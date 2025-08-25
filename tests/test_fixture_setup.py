@@ -57,3 +57,33 @@ def test_create_user2(db_conn: duckdb.DuckDBPyConnection, user_table) -> None:
 
     assert len(result) == 6
     assert result[5][1] == "Matt"
+
+
+def test_qsql_example_file(qsql_file):
+    qsql_string = """/*
+output_dir: ./data
+vars:
+  my_var_1: Alice
+  my_var_2: 25
+  my_table: user
+*/
+
+-- Name: first_query
+SELECT * FROM user;
+
+-- Name: second_query
+SELECT *
+FROM user
+WHERE name = {{ my_var_1 }};
+
+-- Name: third_query
+SELECT *
+FROM user
+WHERE age = {{ my_var_2 }};
+
+-- Name: fourth_query
+SELECT
+  name
+FROM {{ my_table }};
+"""
+    assert qsql_file == qsql_string
