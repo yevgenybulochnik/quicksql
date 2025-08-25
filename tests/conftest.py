@@ -1,3 +1,4 @@
+from pathlib import Path
 import pytest
 import duckdb
 import polars as pl
@@ -14,7 +15,7 @@ def user_table(db_conn: duckdb.DuckDBPyConnection) -> None:
         {"id": 1, "name": "Alice", "age": 30},
         {"id": 2, "name": "Bob", "age": 25},
         {"id": 3, "name": "Charlie", "age": 35},
-        {"id": 4, "name": "Diana", "age": 28},
+        {"id": 4, "name": "Diana", "age": 25},
         {"id": 5, "name": "Ethan", "age": 40},
     ]
     df = pl.from_records(records)
@@ -23,3 +24,9 @@ def user_table(db_conn: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE user AS SELECT * FROM df
         """
     )
+
+
+@pytest.fixture
+def qsql_file() -> str:
+    file_path = Path("tests/qsql_example.sql").absolute()
+    return file_path.read_text()
