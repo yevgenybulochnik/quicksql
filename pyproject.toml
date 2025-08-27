@@ -7,7 +7,12 @@ authors = [
     { name = "Yevgeny Bulochnik", email = "yevgeny.bulochnik@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "jinja2>=3.1.6",
+    "pydantic>=2.11.7",
+    "pyyaml>=6.0.2",
+    "sqlglot[rs]>=27.8.0",
+]
 
 [project.scripts]
 quicksql = "quicksql:main"
