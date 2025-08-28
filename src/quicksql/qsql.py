@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import yaml
 
 
@@ -11,33 +11,38 @@ class CellConfig(BaseModel):
     auto_run: bool = Field(default=True)
     vars: dict[str, Any] | None = Field(default=None)
 
+    model_config = ConfigDict(extra="forbid")
+
 
 @dataclass
 class CellParser:
     model: CellConfig
 
     def parse_config(self, text):
-        config_dict = {}
+        key_value_pattern = re.compile(
+            rf"--\s*?(\S+):\s*?(\S+)\s*?",
+        )
 
-        for field_name, field in self.model.model_fields.items():
+        dict_key_pattern = re.compile(r"--\s*?(\w+):\s*/\*(.*?)\*/", re.DOTALL)
 
-            if field.annotation == dict[str, Any] | None:
-                full_key_pattern = re.compile(rf"\s*?vars:\s*?/\*(.*)\*/", re.DOTALL)
-                matches = full_key_pattern.findall(text)
+        matches = [
+            *key_value_pattern.findall(text),
+            *dict_key_pattern.findall(text),
+        ]
 
-                if matches:
-                    yaml_dict = yaml.safe_load(matches[0])
-                    print(yaml_dict)
-                    config_dict[field_name] = yaml_dict
+        yaml_string = ""
+
+        for match in matches:
+            key, value = match
+
+            if value == "/*":
+                continue
             else:
-                pattern = re.compile(
-                    rf"\s*?{field_name}:\s*?(\S+)\s?",
-                )
-                matches = pattern.findall(text)
+                yaml_string += f"{key}: {value}\n"
 
-                assert len(matches) <= 1
-                if matches:
-                    config_dict[field_name] = matches[0]
+        config_dict = yaml.safe_load(yaml_string)
+        print("code", config_dict)
+
         return self.model(**config_dict)
 
     def parse_sql(self, text):

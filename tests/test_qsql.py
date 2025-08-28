@@ -46,17 +46,32 @@ cases = [
         """
         -- name: test_sql_statement
         -- auto_run: false
-        -- vars:  /*
-             my_var1: test
-             my_var2: 1
-             my_var3: ['a', 'b', 'c']
-           */
+        -- vars:
+        /*
+         my_var1: test
+         my_var2: 1
+         my_var3: ['a', 'b', 'c']
+         my_var4:
+            - 1
+            - 2
+            - 3
+        */
         -- something random
+        SELECT 1 + 1
+        /* multline comment */
+        /* additional
+        multiline comment
+        */ 
         """,
         {
             "name": "test_sql_statement",
             "auto_run": False,
-            "vars": {"my_var1": "test", "my_var2": 1, "my_var3": ["a", "b", "c"]},
+            "vars": {
+                "my_var1": "test",
+                "my_var2": 1,
+                "my_var3": ["a", "b", "c"],
+                "my_var4": [1, 2, 3],
+            },
         },
     ),
 ]
