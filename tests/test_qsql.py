@@ -76,6 +76,8 @@ def test_parse_cell_config(config_string, expected):
 
     config = CellParser()._parse_config(config_string)
 
+    assert config == expected
+
 
 def test_parse_file():
     file_string = """
