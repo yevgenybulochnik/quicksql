@@ -16,9 +16,8 @@ class CellConfig(BaseModel):
 
 @dataclass
 class CellParser:
-    model: CellConfig
 
-    def parse_config(self, text):
+    def _parse_config(self, text):
         key_value_pattern = re.compile(
             rf"--\s*?(\S+):\s*?(\S+)\s*?",
         )
@@ -41,9 +40,17 @@ class CellParser:
                 yaml_string += f"{key}: {value}\n"
 
         config_dict = yaml.safe_load(yaml_string)
-        print("code", config_dict)
+        return config_dict
 
-        return self.model(**config_dict)
+    def _parse_sql(self, text):
+        return text
 
-    def parse_sql(self, text):
-        pass
+    def parse(self, text):
+        config_dict = self._parse_config(text)
+        sql_template = self._parse_sql(text)
+
+        cell_dict = {"config": config_dict, "sql_template": sql_template}
+
+        return cell_dict
+
+
