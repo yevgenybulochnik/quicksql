@@ -54,3 +54,40 @@ class CellParser:
         return cell_dict
 
 
+@dataclass
+class FileParser:
+
+    def _parse_lines(self, text):
+        lines = [
+            (line_number, line_text)
+            for line_number, line_text in enumerate(text.splitlines())
+        ]
+
+        return lines
+
+    def _parse_cell_blocks(self, text):
+        lines = self._parse_lines(text)
+
+        last_line_number = lines[-1][0] + 1
+
+        cell_blocks = []
+
+        pattern = re.compile(rf"--\s*?name:\s*?(\S+)\s*?")
+
+        for line_number, line_text in reversed(lines):
+            match = pattern.search(line_text)
+
+            if match:
+                cell_end = last_line_number
+                cell_dict = {
+                    "cell_block_name": match[1],
+                    "cell_start": line_number,
+                    "cell_end": last_line_number,
+                    "text": line_text,
+                }
+                cell_blocks.append(cell_dict)
+                last_line_number = line_number
+
+        cell_blocks.reverse()
+
+        return cell_blocks

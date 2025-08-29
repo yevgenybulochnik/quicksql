@@ -77,3 +77,38 @@ def test_parse_cell_config(config_string, expected):
     config = CellParser()._parse_config(config_string)
 
 
+def test_parse_file():
+    file_string = """
+    -- Config:
+    /*
+    output_dir: ./data
+    */
+
+    -- name: test_sql_statement
+    SELECT 1 + 1
+
+    -- name: test_sql_statement_2
+    -- auto_run: False
+    SELECT
+        "a" AS col1,
+        "b" as col2
+    """
+
+    file_string = dedent(file_string).strip()
+
+    file_parser = FileParser()
+
+    cell_blocks = file_parser._parse_cell_blocks(file_string)
+    assert len(cell_blocks) == 2
+    assert cell_blocks[0] == {
+        "cell_block_name": "test_sql_statement",
+        "cell_start": 5,
+        "cell_end": 8,
+        "text": "-- name: test_sql_statement",
+    }
+    assert cell_blocks[1] == {
+        "cell_block_name": "test_sql_statement_2",
+        "cell_start": 8,
+        "cell_end": 13,
+        "text": "-- name: test_sql_statement_2",
+    }
