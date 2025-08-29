@@ -17,9 +17,9 @@ class CellConfig(BaseModel):
 @dataclass
 class CellParser:
 
-    def _parse_config(self, text):
+    def _parse_config(self, text: str) -> dict[str, Any]:
         key_value_pattern = re.compile(
-            rf"--\s*?(\S+):\s*?(\S+)\s*?",
+            r"--\s*?(\S+):\s*?(\S+)\s*?",
         )
 
         dict_key_pattern = re.compile(r"--\s*?(\w+):\s*/\*(.*?)\*/", re.DOTALL)
@@ -42,10 +42,10 @@ class CellParser:
         config_dict = yaml.safe_load(yaml_string)
         return config_dict
 
-    def _parse_sql(self, text):
+    def _parse_sql(self, text: str) -> str:
         return text
 
-    def parse(self, text):
+    def parse(self, text: str) -> dict[str, Any]:
         config_dict = self._parse_config(text)
         sql_template = self._parse_sql(text)
 
@@ -57,7 +57,7 @@ class CellParser:
 @dataclass
 class FileParser:
 
-    def _parse_lines(self, text):
+    def _parse_lines(self, text: str) -> list[tuple[int, str]]:
         lines = [
             (line_number, line_text)
             for line_number, line_text in enumerate(text.splitlines())
@@ -65,20 +65,19 @@ class FileParser:
 
         return lines
 
-    def _parse_cell_blocks(self, text):
+    def _parse_cell_blocks(self, text: str) -> list[dict[str, Any]]:
         lines = self._parse_lines(text)
 
         last_line_number = lines[-1][0] + 1
 
         cell_blocks = []
 
-        pattern = re.compile(rf"--\s*?name:\s*?(\S+)\s*?")
+        pattern = re.compile(r"--\s*?name:\s*?(\S+)\s*?")
 
         for line_number, line_text in reversed(lines):
             match = pattern.search(line_text)
 
             if match:
-                cell_end = last_line_number
                 cell_dict = {
                     "cell_block_name": match[1],
                     "cell_start": line_number,
