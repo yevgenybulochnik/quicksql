@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,20 +55,33 @@ class CellParser:
         return cell_dict
 
 
-@dataclass
 class FileParser:
+    def __init__(self, content: str):
+        self._content = content
 
-    def _parse_lines(self, text: str) -> list[tuple[int, str]]:
-        lines = [
+    @classmethod
+    def from_string(cls, string: str):
+        return cls(string)
+
+    @classmethod
+    def from_file(cls, file_path: Path):
+        content = Path(file_path).read_text()
+        return cls(content)
+
+    @property
+    def content(self):
+        return self._content
+
+    @property
+    def lines(self) -> list[tuple[int, str]]:
+        return [
             (line_number, line_text)
-            for line_number, line_text in enumerate(text.splitlines())
+            for line_number, line_text in enumerate(self.content.splitlines())
         ]
 
-        return lines
-
-    def _parse_cell_blocks(self, text: str) -> list[dict[str, Any]]:
-        lines = self._parse_lines(text)
-
+    @property
+    def cell_blocks(self) -> list[dict[str, Any]]:
+        lines = self.lines
         last_line_number = lines[-1][0] + 1
 
         cell_blocks = []
@@ -90,3 +104,13 @@ class FileParser:
         cell_blocks.reverse()
 
         return cell_blocks
+
+
+@dataclass
+class QSqlRunner:
+    file_path: str
+    cell_model: Any
+    file: Any
+    config: Any
+    cell_blocks: Any
+    queue: Any

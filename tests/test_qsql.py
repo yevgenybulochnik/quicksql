@@ -79,7 +79,7 @@ def test_parse_cell_config(config_string, expected):
     assert config == expected
 
 
-def test_parse_file():
+def test_parse_file_from_string():
     file_string = """
     -- Config:
     /*
@@ -97,10 +97,43 @@ def test_parse_file():
     """
 
     file_string = dedent(file_string).strip()
+    file_parser = FileParser.from_string(file_string)
+    cell_blocks = file_parser.cell_blocks
+    assert len(cell_blocks) == 2
+    assert cell_blocks[0] == {
+        "cell_block_name": "test_sql_statement",
+        "cell_start": 5,
+        "cell_end": 8,
+        "text": "-- name: test_sql_statement",
+    }
+    assert cell_blocks[1] == {
+        "cell_block_name": "test_sql_statement_2",
+        "cell_start": 8,
+        "cell_end": 13,
+        "text": "-- name: test_sql_statement_2",
+    }
 
-    file_parser = FileParser()
 
-    cell_blocks = file_parser._parse_cell_blocks(file_string)
+def test_parse_file_from_file(tmp_path):
+    file_content = """
+    -- Config:
+    /*
+    output_dir: ./data
+    */
+
+    -- name: test_sql_statement
+    SELECT 1 + 1
+
+    -- name: test_sql_statement_2
+    -- auto_run: False
+    SELECT
+        "a" AS col1,
+        "b" as col2
+    """
+    file_path = tmp_path / "test.sql"
+    file_path.write_text(dedent(file_content).strip())
+    file_parser = FileParser.from_file(file_path)
+    cell_blocks = file_parser.cell_blocks
     assert len(cell_blocks) == 2
     assert cell_blocks[0] == {
         "cell_block_name": "test_sql_statement",
