@@ -79,26 +79,29 @@ def test_parse_cell_config(config_string, expected):
     assert config == expected
 
 
+file_content = """
+-- Config:
+/*
+output_dir: ./data
+*/
+
+-- name: test_sql_statement
+SELECT 1 + 1
+
+-- name: test_sql_statement_2
+-- auto_run: False
+SELECT
+    "a" AS col1,
+    "b" as col2
+"""
+
+
 def test_parse_file_from_string():
-    file_string = """
-    -- Config:
-    /*
-    output_dir: ./data
-    */
 
-    -- name: test_sql_statement
-    SELECT 1 + 1
-
-    -- name: test_sql_statement_2
-    -- auto_run: False
-    SELECT
-        "a" AS col1,
-        "b" as col2
-    """
-
-    file_string = dedent(file_string).strip()
+    file_string = dedent(file_content).strip()
     file_parser = FileParser.from_string(file_string)
     cell_blocks = file_parser.cell_blocks
+
     assert len(cell_blocks) == 2
     assert cell_blocks[0] == {
         "cell_block_name": "test_sql_statement",
@@ -115,25 +118,12 @@ def test_parse_file_from_string():
 
 
 def test_parse_file_from_file(tmp_path):
-    file_content = """
-    -- Config:
-    /*
-    output_dir: ./data
-    */
-
-    -- name: test_sql_statement
-    SELECT 1 + 1
-
-    -- name: test_sql_statement_2
-    -- auto_run: False
-    SELECT
-        "a" AS col1,
-        "b" as col2
-    """
     file_path = tmp_path / "test.sql"
     file_path.write_text(dedent(file_content).strip())
     file_parser = FileParser.from_file(file_path)
     cell_blocks = file_parser.cell_blocks
+
+    assert len(file_parser.lines) == 13
     assert len(cell_blocks) == 2
     assert cell_blocks[0] == {
         "cell_block_name": "test_sql_statement",
