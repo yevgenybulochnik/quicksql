@@ -1,10 +1,11 @@
 import re
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
 import yaml
+from jinja2 import Environment
 
 
 class CellConfig(BaseModel):
@@ -13,6 +14,19 @@ class CellConfig(BaseModel):
     vars: dict[str, Any] | None = Field(default=None)
 
     model_config = ConfigDict(extra="forbid")
+
+
+class Cell(BaseModel):
+    name: str
+    config: CellConfig
+    sql_template: str
+    sql: str | None = Field(default=None)
+
+    def render_sql(self, jinja_env) -> str:
+        template = jinja_env.from_string(self.sql_template)
+        rendered_sql = template.render(self.config.vars or {})
+        self.sql = rendered_sql
+        return self.sql
 
 
 @dataclass
@@ -109,8 +123,29 @@ class FileParser:
 @dataclass
 class QSqlRunner:
     file_path: str
+    file_parser: Any
+    cell_parser: Any
     cell_model: Any
-    file: Any
     config: Any
-    cell_blocks: Any
     queue: Any
+    cells: Any = field(default_factory=list)
+    env = Environment()
+
+    def create_cells(self) -> None:
+
+        for cell_block in self.file_parser.cell_blocks:
+            cell_start = cell_block["cell_start"]
+            cell_end = cell_block["cell_end"]
+            cell_dict = self.cell_parser.parse(
+                "\n".join(
+                    line for _, line in self.file_parser.lines[cell_start:cell_end]
+                )
+            )
+
+            cell = Cell(
+                name=cell_block["cell_block_name"],
+                config=CellConfig(**cell_dict["config"]),
+                sql_template=cell_dict["sql_template"],
+            )
+            cell.render_sql(self.env)
+            self.cells.append(cell)

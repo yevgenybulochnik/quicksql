@@ -27,4 +27,5 @@ dev = [
     "polars[pyarrow]>=1.32.3",
     "pytest>=8.4.1",
     "pytest-watcher>=0.4.3",
+    "sqlfluff>=3.4.2",
 ]

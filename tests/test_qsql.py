@@ -1,6 +1,6 @@
 from textwrap import dedent
 import pytest
-from quicksql.qsql import CellParser, CellConfig, FileParser
+from quicksql.qsql import CellParser, CellConfig, FileParser, QSqlRunner, Cell
 
 
 cases = [
@@ -137,3 +137,48 @@ def test_parse_file_from_file(tmp_path):
         "cell_end": 13,
         "text": "-- name: test_sql_statement_2",
     }
+
+
+def test_qsql_runner(tmp_path):
+    file_content = """
+        -- Config:
+        /*
+        output_dir: ./data
+        */
+
+        -- name: test_sql_statement
+        SELECT 1 + 1
+
+        -- name: test_sql_statement_2
+        -- auto_run: False
+        SELECT
+            "a" AS col1,
+            "b" as col2
+
+        -- name: test_jinja_vars
+        {% set my_var = 'Hello, World!' %}
+        SELECT '{{ my_var }}' AS greeting
+
+        -- name: test_jinja_custom_vars
+        -- vars:
+        /*
+            my_var1: test
+            my_var2: 1
+        */
+        SELECT '{{ my_var1 }}' AS col1, {{ my_var2 }} AS col2
+    """
+    file_path = tmp_path / "test.sql"
+    file_path.write_text(dedent(file_content).strip())
+
+    runner = QSqlRunner(
+        file_path=file_path,
+        file_parser=FileParser.from_file(file_path),
+        cell_parser=CellParser(),
+        cell_model=Cell,
+        config=None,
+        queue=[],
+    )
+    runner.create_cells()
+    print(runner.cells[3].sql)
+
+    assert False
