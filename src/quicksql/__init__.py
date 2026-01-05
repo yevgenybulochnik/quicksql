@@ -1,9 +1,8 @@
-from .core import QsqlFile, QsqlManager
+from .core import QsqlFile
 from .parsers import Parser, ParserRegistry, KeyValueParser, DictLikeParser
 
 __all__ = [
     "QsqlFile",
-    "QsqlManager",
     "Parser",
     "ParserRegistry",
     "KeyValueParser",
