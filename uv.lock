@@ -470,6 +470,7 @@ dependencies = [
     { name = "polars" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "watchdog" },
 ]
 
 [package.dev-dependencies]
@@ -485,6 +486,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.36.1" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "watchdog", specifier = ">=6.0.0" },
 ]
 
 [package.metadata.requires-dev]
