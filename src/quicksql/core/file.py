@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -10,11 +11,12 @@ class QsqlFile:
         self,
         file_path: Path,
         parsers: Sequence[Parser] | None = None,
+        validate_on_init: bool = True,
     ) -> None:
         self.file_path: Path = file_path
 
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"File {self.file_path} does not exist.")
+        if validate_on_init:
+            self._validate_file_exists()
 
         if parsers is None:
             self.parsers = [
@@ -23,9 +25,74 @@ class QsqlFile:
         else:
             self.parsers = list(parsers)
 
+    def _validate_file_exists(
+        self, max_retries: int = 2, base_delay: float = 0.01
+    ) -> None:
+        """
+        Validate file exists with retry logic for initialization.
+        This handles cases where the file is temporarily unavailable during object creation.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            base_delay: Base delay in seconds between retries
+
+        Raises:
+            FileNotFoundError: If file doesn't exist after all retries
+        """
+        for attempt in range(max_retries + 1):
+            if self.file_path.exists():
+                return
+            elif attempt < max_retries:
+                time.sleep(base_delay * (2**attempt))
+            else:
+                raise FileNotFoundError(
+                    f"File {self.file_path} does not exist after {max_retries + 1} attempts. "
+                    f"This may be due to neovim's atomic save operation or the file being deleted."
+                )
+
     @property
     def content(self) -> str:
-        return self.file_path.read_text()
+        return self._read_with_retry()
+
+    def _read_with_retry(self, max_retries: int = 3, base_delay: float = 0.01) -> str:
+        """
+        Read file content with retry logic to handle transient file availability issues.
+        This is particularly useful during neovim's atomic save operations.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            base_delay: Base delay in seconds between retries (exponential backoff)
+
+        Returns:
+            File content as string
+
+        Raises:
+            FileNotFoundError: If file doesn't exist after all retries
+            PermissionError: If file can't be read due to permissions
+            Exception: For other I/O errors
+        """
+        last_exception = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                return self.file_path.read_text()
+            except FileNotFoundError as e:
+                last_exception = e
+                if attempt < max_retries:
+                    delay = base_delay * (2**attempt)  # Exponential backoff
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise FileNotFoundError(
+                        f"File {self.file_path} not found after {max_retries + 1} attempts. "
+                        f"This may be due to neovim's atomic save operation or file being deleted."
+                    ) from e
+            except (PermissionError, OSError) as e:
+                # Don't retry for permission or other I/O errors
+                raise e
+
+        # This should never be reached, but just in case
+        raise last_exception if last_exception else Exception("Unknown error occurred")
 
     @property
     def lines(self) -> tuple[tuple[int, str], ...]:

@@ -1,37 +1,37 @@
+"""Backend registry and implementations for QuickSQL."""
+
 from abc import ABC, abstractmethod
 from typing import Any
-from pprint import pprint
 
 import duckdb
-
-
-from .file import QsqlFile
+import polars as pl
+from google.cloud import bigquery
 
 
 class BackendRegistry:
     """Registry for backend classes."""
 
-    _backends = {}
+    _backends: dict[str, type["Backend"]] = {}
 
     @classmethod
     def register(cls, name: str):
         """Decorator to register a backend class with a given name."""
 
-        def decorator(backend_class):
+        def decorator(backend_class: type["Backend"]) -> type["Backend"]:
             cls._backends[name] = backend_class
             return backend_class
 
         return decorator
 
     @classmethod
-    def get_backend(cls, name: str):
-        """Get all registered backend classes."""
+    def get_backend(cls, name: str) -> type["Backend"]:
+        """Get a registered backend class by name."""
         if name not in cls._backends:
             raise ValueError(f"Backend '{name}' is not registered.")
-        return cls._backends.get(name)
+        return cls._backends[name]
 
     @classmethod
-    def clear(cls):
+    def clear(cls) -> None:
         """Clear all registered backends (useful for testing)."""
         cls._backends.clear()
 
@@ -40,80 +40,113 @@ class Backend(ABC):
     """Abstract base class for backends."""
 
     @abstractmethod
-    def connect(self, connection_string) -> None:
+    def connect(self, connection_string: str) -> None:
+        """Connect to the backend using the given connection string."""
         pass
 
     @abstractmethod
     def execute(self, query: str) -> Any:
+        """Execute a query and return the result."""
         pass
 
     @abstractmethod
     def close(self) -> None:
+        """Close the connection to the backend."""
         pass
 
 
 @BackendRegistry.register("duckdb")
 class DuckDBBackend(Backend):
-    """Backend for Duckdb"""
+    """Backend for DuckDB."""
 
     def __init__(self) -> None:
-        self.conn = None
+        self.conn: duckdb.DuckDBPyConnection | None = None
 
     def connect(self, connection_string: str) -> None:
+        """Connect to DuckDB database."""
         self.conn = duckdb.connect(connection_string)
 
     def execute(self, query: str) -> Any:
-        """Exeute query string and retrun a polars dataframe"""
+        """Execute query string and return a polars dataframe."""
+        if self.conn is None:
+            raise RuntimeError("Backend not connected. Call connect() first.")
         return self.conn.execute(query).pl()
 
     def close(self) -> None:
+        """Close the DuckDB connection."""
         if self.conn:
             self.conn.close()
             self.conn = None
 
 
-class QsqlExecutor:
-    def __init__(self, qsql_file: QsqlFile):
-        self._file = qsql_file
-        self._backend_conns = {}
-        self._init_backends()
+@BackendRegistry.register("bigquery")
+class BigQueryBackend(Backend):
+    """Backend for Google BigQuery.
 
-    def _init_backends(self):
-        for cell in self._file.parsed_cells:
-            config = cell.get("config", {})
-            input_config = config.get("input", {})
+    Connection string format: project_id or project_id/location
+    Examples:
+        - my-project
+        - my-project/us-east1
 
-            for backend_name, conn_string in input_config.items():
-                backend_class = BackendRegistry.get_backend(backend_name)
+    Authentication uses Application Default Credentials (ADC).
+    Set up via: gcloud auth application-default login
+    """
 
-                if conn_string not in self._backend_conns:
-                    backend_instance = backend_class()
-                    backend_instance.connect(conn_string)
-                    self._backend_conns[conn_string] = backend_instance
+    def __init__(self) -> None:
+        self.client: bigquery.Client | None = None
+        self.project: str | None = None
+        self.location: str | None = None
 
-    def execute_cell(self, cell_name: str) -> Any:
-        cell = next(
-            (c for c in self._file.parsed_cells if c["cell_name"] == cell_name), None
+    def connect(self, connection_string: str) -> None:
+        """Connect to BigQuery using project ID and optional location.
+
+        Args:
+            connection_string: Project ID, optionally with location.
+                Formats:
+                    - bigquery://project_id
+                    - bigquery://project_id/location
+                    - project_id
+                    - project_id/location
+        """
+        conn = connection_string.strip()
+
+        # Strip bigquery:// prefix if present
+        if conn.lower().startswith("bigquery://"):
+            conn = conn[len("bigquery://") :]
+
+        parts = conn.split("/")
+        self.project = parts[0]
+        self.location = parts[1] if len(parts) > 1 else None
+
+        self.client = bigquery.Client(
+            project=self.project,
+            location=self.location,
         )
 
-        input_config = cell.get("config").get("input")
+    def execute(self, query: str) -> Any:
+        """Execute query and return a Polars DataFrame.
 
-        _, conn_string = next(iter(input_config.items()))
+        Args:
+            query: SQL query to execute
 
-        backend_instance = self._backend_conns.get(conn_string)
+        Returns:
+            Query results as a Polars DataFrame
+        """
+        if self.client is None:
+            raise RuntimeError("Backend not connected. Call connect() first.")
 
-        try:
-            result = backend_instance.execute(cell["text"])
-            return result
-        except Exception as e:
-            pprint(cell)
-            raise e
+        query_job = self.client.query(query)
+        # Convert to Arrow first for efficient conversion to Polars
+        arrow_table = query_job.to_arrow()
+        result = pl.from_arrow(arrow_table)
+        # to_arrow() returns a Table, so from_arrow will always return a DataFrame
+        assert isinstance(result, pl.DataFrame)
+        return result
 
-    def execute_many(self, cell_names: list[str]) -> dict[str, Any]:
-        results = {}
-
-        for cell_name in cell_names:
-            result = self.execute_cell(cell_name)
-            results[cell_name] = result
-
-        return results
+    def close(self) -> None:
+        """Close the BigQuery client."""
+        if self.client:
+            self.client.close()
+            self.client = None
+            self.project = None
+            self.location = None
