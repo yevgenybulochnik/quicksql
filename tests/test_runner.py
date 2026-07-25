@@ -357,6 +357,32 @@ def test_on_event_streams_the_cell_lifecycle_in_order(tmp_path) -> None:
     assert "2 ok, 0 failed" in events[-1].detail
 
 
+def test_run_started_carries_the_post_expansion_cell_list(tmp_path) -> None:
+    """run_started.cells is the authoritative list of what will actually run —
+    including upstreams pulled in by _expand_missing_temps, which a consumer
+    (the TUI cell table) cannot recover from its own select list."""
+    from quicksql.models import RunEvent
+
+    project = compile_text(
+        "-- @cell parent\nSELECT 1 AS x;\n"
+        "-- @cell child\nSELECT * FROM {{ ref('parent') }};",
+        root=tmp_path,
+    )
+    fresh = RunSession()
+    try:  # cold session: the parent's temp is missing, so it joins the run
+        events: list[RunEvent] = []
+        run_project(project, select=["child"], closure=False, session=fresh, on_event=events.append)
+        started = [e for e in events if e.kind == "run_started"]
+        assert started and started[0].cells == ("parent", "child")
+        # warm session: exact selection stays exact, and cells says so
+        events.clear()
+        run_project(project, select=["child"], closure=False, session=fresh, on_event=events.append)
+        started = [e for e in events if e.kind == "run_started"]
+        assert started and started[0].cells == ("child",)
+    finally:
+        fresh.close()
+
+
 def test_on_event_reports_failures_and_run_continues(tmp_path) -> None:
     project = compile_text(
         "-- @cell bad\nSELECT * FROM missing_table;\n-- @cell good\nSELECT 1 AS x;",

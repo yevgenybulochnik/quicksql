@@ -106,6 +106,10 @@ class RunEvent:
     cell: str | None = None
     detail: str = ""
     result: RunResult | None = None
+    # run_started only: the post-expansion list of cells this run will execute
+    # (closure / missing-temp upstreams included) — consumers can't derive it
+    # from their own select list
+    cells: tuple[str, ...] | None = None
 
     def line(self) -> str:
         """One human-readable log line; the TUI log tab and CLI both use this."""
@@ -141,12 +145,19 @@ class RunContext:
     session: Any = None
     on_event: Any = None  # Callable[[RunEvent], None] | None — set by run_project
 
-    def emit(self, kind: str, cell: str | None = None, detail: str = "", result: Any = None) -> None:
+    def emit(
+        self,
+        kind: str,
+        cell: str | None = None,
+        detail: str = "",
+        result: Any = None,
+        cells: tuple[str, ...] | None = None,
+    ) -> None:
         """Stream a RunEvent to the consumer; a broken callback lands in the
         log instead of killing the run (events are observability, not control)."""
         if self.on_event is None:
             return
         try:
-            self.on_event(RunEvent(kind=kind, cell=cell, detail=detail, result=result))
+            self.on_event(RunEvent(kind=kind, cell=cell, detail=detail, result=result, cells=cells))
         except Exception as exc:
             self.log.append(f"on_event callback failed for {kind}: {exc}")

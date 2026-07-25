@@ -218,7 +218,11 @@ def run_project(
     results: list[RunResult] = []
     run_started = time.perf_counter()
     try:
-        ctx.emit("run_started", detail=f"{len(names)} cell(s): {', '.join(names)}")
+        ctx.emit(
+            "run_started",
+            detail=f"{len(names)} cell(s): {', '.join(names)}",
+            cells=tuple(names),
+        )
         _notify(ctx, "before_run", lambda p: p.before_run(project, ctx))
         for name in names:
             cell = project.cells[name]
