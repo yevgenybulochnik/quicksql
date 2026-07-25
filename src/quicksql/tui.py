@@ -47,7 +47,7 @@ from textual.widgets.option_list import Option
 from .catalog import CatalogCache, CatalogNode, project_root_node
 from .compiler import Project, compile_file
 from .errors import QsqlError
-from .models import RunResult
+from .models import RunEvent, RunResult
 from .runner import RunSession, run_project
 from .sheet import Sheet
 from .watcher import config_only_changes, hashes_of, plan_rerun
@@ -289,6 +289,10 @@ class QsqlApp(App):
         self.session = RunSession()  # reused across reruns; run worker is exclusive
         self.results: dict[str, RunResult] = {}
         self.running: set[str] = set()
+        # bumped on the UI thread per run; events/results tagged with an older
+        # generation come from a replaced (still-draining) worker and are
+        # logged but never allowed to touch table state
+        self._run_gen = 0
         self.autorun_off: set[str] = set()
         self.autorun_global = True
         self.show_rendered = True
@@ -535,7 +539,9 @@ class QsqlApp(App):
         self._row_names = list(self.project.order) if self.project else []
         for name in self._row_names:
             cell = self.project.cells[name]
-            result = self.results.get(name)
+            # a pending cell must not show the previous run's rows/ms next to
+            # its spinner; the stored result stays (display-only blanking)
+            result = None if name in self.running else self.results.get(name)
             table.add_row(
                 name,
                 f"{cell.engine} → {cell.sink_type}",
@@ -1190,37 +1196,67 @@ class QsqlApp(App):
         else:
             self._push_catalog_sheet(sheet)
 
-    @work(thread=True, exclusive=True, group="run")
     def _run_worker(self, select: Optional[list[str]], closure: bool = True) -> None:
+        """Bump the run generation (on the UI thread) and hand off to the
+        thread worker. `exclusive` only *flags* the old worker cancelled — a
+        blocking run_project keeps draining events, so the generation tag is
+        what keeps a replaced run from repainting the table."""
+        self._run_gen += 1
+        self._run_thread(select, closure, self._run_gen)
+
+    @work(thread=True, exclusive=True, group="run")
+    def _run_thread(self, select: Optional[list[str]], closure: bool, gen: int) -> None:
         try:
             project = compile_file(self.path, self.overrides)
         except QsqlError as exc:
             self.call_from_thread(self.log_line, f"compile error: {exc}")
             return
-        names = select if select is not None else list(project.order)
-        self.call_from_thread(self._mark_running, project, names)
-        results = run_project(
-            project,
-            select=select,
-            closure=closure,
-            session=self.session,
-            on_event=lambda e: self.call_from_thread(self.log_line, e.line()),
-        )
-        self.call_from_thread(self._apply_results, results)
+        self.call_from_thread(self._adopt_project, project)
+        results: list[RunResult] = []
+        try:
+            results = run_project(
+                project,
+                select=select,
+                closure=closure,
+                session=self.session,
+                on_event=lambda e: self.call_from_thread(self._on_run_event, gen, e),
+            )
+        except Exception:  # never leave cells stuck at "…" on a runner crash
+            import traceback
 
-    def _mark_running(self, project: Project, names: list[str]) -> None:
+            self.call_from_thread(self.log_line, f"run failed:\n{traceback.format_exc()}")
+        finally:
+            self.call_from_thread(self._apply_results, gen, results)
+
+    def _adopt_project(self, project: Project) -> None:
         self.project = project
         self.hashes = hashes_of(project)
-        self.running.update(names)
         self._refresh_cells()
 
-    def _apply_results(self, results: list[RunResult]) -> None:
-        # the run's event stream already logged each result via cell_finished
-        for result in results:
-            self.running.discard(result.cell)
+    def _on_run_event(self, gen: int, event: RunEvent) -> None:
+        """Route the runner's live events: everything is logged; run_started
+        seeds the pending set from the *post-expansion* cell list (closure and
+        missing-temp upstreams included — the select list undercounts those),
+        and each cell_finished retires its cell so status flips one at a time."""
+        self.log_line(event.line())
+        if gen != self._run_gen:
+            return  # a replaced run may still be draining: log it, never show it
+        if event.kind == "run_started":
+            self.running = set(event.cells or ())
+            self._refresh_cells()
+        elif event.kind == "cell_finished" and event.cell is not None:
+            self.running.discard(event.cell)
+            if event.result is not None:
+                self.results[event.cell] = event.result
+            self._refresh_cells()
+
+    def _apply_results(self, gen: int, results: list[RunResult]) -> None:
+        self._catalog_cache.invalidate()  # outputs and warehouses just changed
+        if gen != self._run_gen:
+            return  # a newer run owns the table; its own events paint it
+        for result in results:  # normally a no-op: cell_finished stored each
             self.results[result.cell] = result
         self.running.clear()
-        self._catalog_cache.invalidate()  # outputs and warehouses just changed
         self._refresh_cells()
         self._refresh_detail()
 
