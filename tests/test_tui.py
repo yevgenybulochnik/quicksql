@@ -1061,3 +1061,135 @@ async def test_config_only_edit_is_logged_without_rerun(notebook) -> None:
         await pilot.pause()
         lines = [s.text for s in app.query_one("#log", RichLog).lines]
         assert any("config changed" in l and "users" in l for l in lines)
+
+
+# ---------- per-cell run progress: events drive the cell table ----------
+
+
+def _row(app, name: str) -> tuple[str, ...]:
+    table = app.query_one("#cells", DataTable)
+    idx = app._row_names.index(name)
+    return tuple(str(c) for c in table.get_row_at(idx))
+
+
+async def test_run_events_drive_per_cell_status(notebook) -> None:
+    """run_started seeds the pending set from the event's post-expansion cell
+    list; each cell_finished retires its cell while the rest stay pending —
+    the table must not flip wholesale at the end of the run."""
+    from quicksql.models import RunEvent, RunResult
+
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        names = tuple(app.project.order)
+        gen = app._run_gen
+        app._on_run_event(gen, RunEvent("run_started", cells=names))
+        await pilot.pause()
+        assert app.running == set(names)
+        assert all(_row(app, n)[3] == "…" for n in names)
+        done = RunResult(cell=names[0], ok=True, rows=3, elapsed=0.25)
+        app._on_run_event(gen, RunEvent("cell_finished", names[0], result=done))
+        await pilot.pause()
+        assert names[0] not in app.running and names[1] in app.running
+        assert _row(app, names[0])[3] == "✔" and _row(app, names[0])[4] == "3"
+        assert _row(app, names[1])[3] == "…"
+
+
+async def test_stale_generation_events_do_not_touch_state(notebook) -> None:
+    """A replaced (still-draining) run keeps logging but must not fight the
+    live run's pending set or results."""
+    from quicksql.models import RunEvent, RunResult
+
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        stale = app._run_gen - 1
+        app._on_run_event(stale, RunEvent("run_started", cells=("users",)))
+        assert app.running == set()
+        done = RunResult(cell="users", ok=True, rows=1, elapsed=0.1)
+        app._on_run_event(stale, RunEvent("cell_finished", "users", result=done))
+        assert "users" not in app.results
+        app._apply_results(stale, [done])
+        assert "users" not in app.results
+
+
+async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
+    """A rerunning cell must not display the previous run's rows/ms next to
+    its spinner — blank them while the cell is pending."""
+    from quicksql.models import RunEvent, RunResult
+
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        old = RunResult(cell="users", ok=True, rows=42, elapsed=1.234)
+        app._apply_results(app._run_gen, [old])
+        await pilot.pause()
+        assert _row(app, "users")[4] == "42"
+        app._on_run_event(app._run_gen, RunEvent("run_started", cells=("users",)))
+        await pilot.pause()
+        row = _row(app, "users")
+        assert row[3] == "…" and row[4] == "" and row[5] == ""
+
+
+async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypatch) -> None:
+    from quicksql import tui as tui_mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("executor exploded")
+
+    monkeypatch.setattr(tui_mod, "run_project", boom)
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.running == set()
+
+
+async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
+    """End-to-end through the real worker: while the second cell is executing,
+    the first already shows done — not the old wholesale flip at run end."""
+    import threading
+
+    import polars as pl
+
+    from quicksql.executors.base import Executor, register_frame, result_view
+    from quicksql.registry import executor
+
+    gate = threading.Event()
+    reached_second = threading.Event()
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def execute(self, cell, ctx):
+            if cell.name == "second":
+                reached_second.set()
+                assert gate.wait(timeout=10)
+            return register_frame(ctx, result_view(cell.name), pl.DataFrame({"x": [1]}))
+
+    path = tmp_path / "base.qsql"
+    path.write_text(
+        "-- @engine: gated\n\n"
+        "-- @cell first\nSELECT 1;\n\n"
+        "-- @cell second\nSELECT 2;\n\n"
+        "-- @cell third\nSELECT 3;\n"
+    )
+    app = QsqlApp(path=path, watch=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached_second.is_set():
+            await pilot.pause(0.05)
+        await pilot.pause()  # drain queued call_from_thread callbacks
+        try:
+            assert "first" not in app.running and app.results["first"].ok
+            assert {"second", "third"} <= app.running
+            assert _row(app, "first")[3] == "✔"
+            assert _row(app, "second")[3] == "…" and _row(app, "third")[3] == "…"
+        finally:
+            gate.set()  # never leave the worker thread blocked on a failure
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.running == set()
+        assert all(app.results[n].ok for n in ("first", "second", "third"))
