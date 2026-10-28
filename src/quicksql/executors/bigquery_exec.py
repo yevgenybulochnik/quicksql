@@ -18,7 +18,7 @@ class BigQueryExecutor(Executor):
     supports_context_refs = True
     # bigquery runs multi-statement scripts server-side in one job; splitting
     # client-side would run the pieces as separate jobs and lose session state,
-    # and a script can't be wrapped in CREATE TEMP TABLE AS (...).
+    # and a script can't be the body of CREATE TEMP TABLE AS.
     supports_multistatement_materialization = False
 
     def split_statements(self, sql: str) -> list[str]:
@@ -115,9 +115,11 @@ class BigQueryExecutor(Executor):
                 self.make_client(spec).query(sql, **self._query_opts(spec)).result()
             return ""
         if cell.reffed_in_context:
-            # materialize once; the temp serves consumers, the read lands parquet
+            # materialize once; the temp serves consumers, the read lands parquet.
+            # body goes in bare: wrapped in parens, a trailing line comment
+            # would swallow the closing one
             state = self._session_state(cell, ctx, spec)
-            self._query(state, f"CREATE OR REPLACE TEMP TABLE {cell.name} AS ({sql})")
+            self._query(state, f"CREATE OR REPLACE TEMP TABLE {cell.name} AS {sql}")
             table = self._query(state, f"SELECT * FROM {cell.name}").to_arrow()
         elif cell.context_refs:
             # consumes session temps: run in-session, no temp of its own
