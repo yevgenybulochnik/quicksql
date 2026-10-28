@@ -237,6 +237,47 @@ def test_bigquery_same_context_cells_share_a_session(tmp_path, monkeypatch) -> N
     assert (tmp_path / "data" / "child.parquet").exists()
 
 
+def test_bigquery_reffed_cte_parent_materializes_unwrapped(tmp_path, monkeypatch) -> None:
+    """The reffed body goes into CTAS bare, as on the other engines: wrapped in
+    parens, a trailing line comment swallowed the closing one (BigQuery: Syntax
+    error: Expected ")" but got end of statement)."""
+    import sqlglot
+
+    from quicksql.compiler import compile_text
+
+    sqls: list[str] = []
+
+    class FakeJob:
+        session_info = SimpleNamespace(session_id="sess-1")
+
+        def result(self):
+            return self
+
+        def to_arrow(self):
+            return pl.DataFrame({"n": [1]})
+
+    class FakeClient:
+        def query(self, sql, job_config=None):
+            sqls.append(sql)
+            return FakeJob()
+
+    monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
+    monkeypatch.setattr(BigQueryExecutor, "_job_config", lambda self, state: None)
+    body = "WITH totals AS (\n  SELECT n FROM src\n)\nSELECT n FROM totals  -- trailing note"
+    project = compile_text(
+        "/*@ input: { bigquery: { project: p } } */\n"
+        f"-- @cell parent\n{body}\n"
+        "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};",
+        root=tmp_path,
+    )
+    results = {r.cell: r for r in project.run()}
+    assert all(r.ok for r in results.values()), [r.error for r in results.values()]
+
+    ctas = next(s for s in sqls if s.startswith("CREATE OR REPLACE TEMP TABLE parent"))
+    assert ctas == f"CREATE OR REPLACE TEMP TABLE parent AS {body}"
+    sqlglot.parse_one(ctas, read="bigquery")  # no paren left for the comment to eat
+
+
 def test_bigquery_executor_with_fake_client(ctx, monkeypatch) -> None:
     frame = pl.DataFrame({"user_id": [1, 2], "event": ["click", "view"]})
 
