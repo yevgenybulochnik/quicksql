@@ -530,7 +530,7 @@ class QsqlApp(App):
         result = self.results.get(name)
         if result is None:
             return "·"
-        return "✔" if result.ok else "✗"
+        return {"ok": "✔", "skipped": "⊘"}.get(result.status, "✗")
 
     def _refresh_cells(self) -> None:
         table = self.query_one("#cells", DataTable)
@@ -570,7 +570,7 @@ class QsqlApp(App):
         self.sub_title = f"{name} · sql:{label}{stack}"
         result = self.results.get(name)
         if result and not result.ok and result.error:
-            self.log_line(f"{name} failed:\n{result.error}")
+            self.log_line(f"{name} {result.status}:\n{result.error}")
 
     MAX_DATA_ROWS = 200
     MAX_DATA_COLS = 40  # window rendered around the cursor; re-windows at the edges
