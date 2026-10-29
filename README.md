@@ -64,6 +64,11 @@ $ uv run quicksql run
   ok active_user_events    7 rows     3.2 ms  -> data/active_user_events.parquet
 ```
 
+When a cell fails, every cell downstream of it — through `ref()` or `@depends_on`,
+transitively — is **skipped**, not run: the summary shows `skip report: upstream 'users'
+failed` (`⊘` in the TUI), and independent cells still run. *Behavior change:* earlier
+versions ran the downstream cells anyway, on the previous run's output, and reported them ok.
+
 ## Anatomy of a cell
 
 A cell is **input → engine → output**. The file is parsed into cells at each `-- @cell
