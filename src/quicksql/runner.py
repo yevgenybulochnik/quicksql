@@ -4,7 +4,8 @@ The base cell-runner does the real work (prepare sinks, execute, write, preview)
 plugins overriding ``run`` wrap it as decorators, outermost = lowest priority.
 Cell failures become ``RunResult(ok=False)`` inside the base runner so chain
 plugins (retries, ...) see error results; a catch-all *outside* the chain turns
-a buggy plugin into an error result too, and the run continues.
+a buggy plugin into an error result too, and the run continues — except that
+every cell downstream of a failure is skipped, never run on stale data.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import shutil
 import tempfile
 import time
 import traceback
+from collections import Counter
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
@@ -224,13 +226,27 @@ def run_project(
             cells=tuple(names),
         )
         _notify(ctx, "before_run", lambda p: p.before_run(project, ctx))
+        # cell that didn't come out ok -> the failed cells behind it (itself if
+        # it failed); depends_on carries both ref() and @depends_on edges
+        failed_roots: dict[str, list[str]] = {}
         for name in names:
             cell = project.cells[name]
-            ctx.emit("cell_started", name, f"{cell.engine} → {cell.sink_type}")
-            try:
-                result = chain(cell, ctx)
-            except Exception:  # a buggy plugin must not kill the run
-                result = RunResult(cell=name, ok=False, error=traceback.format_exc())
+            roots = list(
+                dict.fromkeys(r for up in cell.depends_on for r in failed_roots.get(up, ()))
+            )
+            if roots:  # its inputs are stale or missing: don't run it at all
+                result = _skipped(name, roots)
+            else:
+                ctx.emit("cell_started", name, f"{cell.engine} → {cell.sink_type}")
+                try:
+                    result = chain(cell, ctx)
+                except Exception:  # a buggy plugin must not kill the run
+                    result = RunResult(cell=name, ok=False, error=traceback.format_exc())
+            if not result.ok:
+                failed_roots[name] = roots or [name]
+                # any temp table it left is stale; dropping it makes a later
+                # exact rerun (watch/TUI) re-include the cell
+                session.materialized.discard(name)
             results.append(result)
             ctx.emit("cell_finished", name, result=result)
         _notify(ctx, "after_run", lambda p: p.after_run(project, results))
@@ -238,10 +254,10 @@ def run_project(
         # live list would grow it forever
         for line in list(ctx.log):  # plugin lifecycle failures were invisible before
             ctx.emit("note", detail=line)
-        failed = sum(1 for r in results if not r.ok)
+        counts = Counter(r.status for r in results)
         ctx.emit(  # terminal: consumers may stop listening after this
             "run_finished",
-            detail=f"{len(results) - failed} ok, {failed} failed"
+            detail=f"{counts['ok']} ok, {counts['failed']} failed, {counts['skipped']} skipped"
             f" in {time.perf_counter() - run_started:.1f}s",
         )
     finally:
@@ -249,6 +265,12 @@ def run_project(
         if owns_session:
             session.close()
     return results
+
+
+def _skipped(name: str, roots: list[str]) -> RunResult:
+    noun = "upstream" if len(roots) == 1 else "upstreams"
+    quoted = ", ".join(f"'{root}'" for root in roots)
+    return RunResult(cell=name, status="skipped", error=f"{noun} {quoted} failed")
 
 
 def _notify(ctx: RunContext, hook: str, call: Callable[[Any], None]) -> None:
