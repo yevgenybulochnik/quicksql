@@ -131,6 +131,12 @@ def test_after_render_transformers_compose_in_priority_order(tmp_path) -> None:
     assert sql == "-- header\nSELECT 1;\n-- footer"
 
 
+def test_dev_limit_is_no_longer_a_directive(tmp_path) -> None:
+    # removed: limits belong in the cell's SQL, not a wrapper around the body
+    with pytest.raises(ConfigError, match="unknown directive: @dev_limit"):
+        compile_text("-- @dev_limit: 4\n-- @cell a\nSELECT 1;", root=tmp_path)
+
+
 def test_dev_limit_wraps_rendered_sql_and_limits_rows(tmp_path) -> None:
     project = compile_text(
         "-- @cell many\nSELECT * FROM range(10);",
