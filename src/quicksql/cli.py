@@ -95,6 +95,8 @@ def _print_results(results: list) -> bool:
                 f"  {r.elapsed * 1000:8.1f} ms  -> {r.target}",
                 fg="green",
             )
+        elif r.status == "skipped":
+            typer.secho(f"  skip {r.cell}: {r.error}", fg="yellow")
         else:
             failed = True
             reason = (r.error or "unknown error").strip().splitlines()[-1]
