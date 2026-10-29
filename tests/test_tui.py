@@ -1193,3 +1193,24 @@ async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
         await pilot.pause()
         assert app.running == set()
         assert all(app.results[n].ok for n in ("first", "second", "third"))
+
+
+async def test_skipped_downstream_shows_a_distinct_status(tmp_path) -> None:
+    """A cell skipped because its upstream failed is neither done, failed,
+    pending nor never-run: its cell_finished paints its own glyph."""
+    path = tmp_path / "base.qsql"
+    path.write_text(
+        "-- @cell a\nSELECT * FROM nope;\n\n"
+        "-- @cell b\nSELECT * FROM {{ ref('a') }};\n"
+    )
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.running == set()
+        assert _row(app, "a")[3] == "✗"
+        assert _row(app, "b")[3] == "⊘"
+        assert app.results["b"].status == "skipped"
+        assert _row(app, "b")[4] == ""  # nothing landed, so no row count
