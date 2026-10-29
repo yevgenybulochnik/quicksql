@@ -60,6 +60,18 @@ def test_run_failure_exits_nonzero(tmp_path) -> None:
     assert "broken" in result.output
 
 
+def test_run_summary_reports_skipped_downstream(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text(
+        "-- @cell broken\nSELECT * FROM no_such_table;\n"
+        "-- @cell downstream\nSELECT * FROM {{ ref('broken') }};"
+    )
+    result = runner.invoke(app, ["run", str(f)])
+    assert result.exit_code == 1
+    assert "skip downstream: upstream 'broken' failed" in result.output
+    assert "FAIL downstream" not in result.output
+
+
 def test_list_shows_topo_engine_sink_autorun(tmp_path) -> None:
     f = _init(tmp_path)
     result = runner.invoke(app, ["list", str(f)])
