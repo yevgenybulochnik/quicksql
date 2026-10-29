@@ -166,7 +166,6 @@ where it may appear (global header, per-cell, or both).
 | `autorun` | both | Default `true`; set `false` to skip a cell in watch/TUI rerun cascades. |
 | `catalog` | global | Extra schema-browser targets for the TUI's `S` view, keyed by engine. |
 | `tags` | both | Free-form labels. |
-| `dev_limit` | both | Wrap every cell in `LIMIT n` while iterating (demonstrator plugin). |
 | `render_dir` | global | Write each cell's rendered SQL to a directory before it runs (demonstrator plugin). |
 
 Jinja globals available in SQL bodies: `ref('cell')`, `source('name_or_path')`,
@@ -222,12 +221,8 @@ A `Plugin` pairs a pydantic `Config` (whose fields *become* directives) with beh
 globals, `after_render` transforms SQL, and decision hooks like `resolve_engine` /
 `resolve_sink` / `should_rerun` let directives own their behavior. Lower `priority` = outer.
 
-Two demonstrators ship in-tree and need zero core edits:
-
-- `dev_limit` (`plugins/dev_limit.py`) — an `after_render` transformer wrapping each cell in
-  `LIMIT n`. `--set dev_limit=100`, opt a cell out with `-- @dev_limit: null`.
-- `emit_sql` (`plugins/emit_sql.py`) — a `run` wrapper that writes every rendered cell to
-  `render_dir` before it executes.
+One demonstrator ships in-tree and needs zero core edits: `emit_sql` (`plugins/emit_sql.py`),
+a `run` wrapper that writes every rendered cell to `render_dir` before it executes.
 
 Third-party plugins load via `--plugins mod.name` / `--plugins path/to/file.py`, or a
 `quicksqlrc.py` sitting next to the notebook (auto-loaded). `quicksql explain` prints the
@@ -237,7 +232,7 @@ resulting chain and which plugins participate in each hook:
 $ uv run quicksql explain
 run chain:      emit_sql(-100) → extensions(0) → [execute on engine, land via sink]
 render_context: sources(0) → vars(0) → refs(0) → env(0)
-after_render:   dev_limit(0)
+after_render:   (none)
 resolve_engine: engine(0) → input(0)
 resolve_sink:   output(0)
 ...

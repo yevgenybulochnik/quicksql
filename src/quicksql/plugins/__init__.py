@@ -1,4 +1,4 @@
 from .base import EmptyConfig, Plugin, qfield
-from . import builtin, dev_limit, emit_sql  # noqa: F401  (import registers the builtin plugins)
+from . import builtin, emit_sql  # noqa: F401  (import registers the builtin plugins)
 
 __all__ = ["EmptyConfig", "Plugin", "qfield"]

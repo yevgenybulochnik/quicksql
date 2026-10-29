@@ -137,45 +137,6 @@ def test_dev_limit_is_no_longer_a_directive(tmp_path) -> None:
         compile_text("-- @dev_limit: 4\n-- @cell a\nSELECT 1;", root=tmp_path)
 
 
-def test_dev_limit_wraps_rendered_sql_and_limits_rows(tmp_path) -> None:
-    project = compile_text(
-        "-- @cell many\nSELECT * FROM range(10);",
-        root=tmp_path,
-        overrides={"dev_limit": 4},
-    )
-    assert "LIMIT 4" in project.cells["many"].sql
-    result = project.run()[0]
-    assert result.ok, result.error
-    assert result.rows == 4
-
-
-def test_dev_limit_cell_null_disables_it(tmp_path) -> None:
-    project = compile_text(
-        "-- @dev_limit: 4\n"
-        "-- @cell capped\nSELECT * FROM range(10);\n"
-        "-- @cell full\n-- @dev_limit: null\nSELECT * FROM range(10);",
-        root=tmp_path,
-    )
-    assert "LIMIT 4" in project.cells["capped"].sql
-    assert "LIMIT" not in project.cells["full"].sql
-
-
-def test_dev_limit_handles_trailing_comments_after_semicolon(tmp_path) -> None:
-    project = compile_text(
-        "-- @cell tail\nSELECT * FROM range(10);\n\n-- trailing note\n-- another\n",
-        root=tmp_path,
-        overrides={"dev_limit": 3},
-    )
-    result = project.run()[0]
-    assert result.ok, result.error
-    assert result.rows == 3
-
-
-def test_dev_limit_rejects_nonpositive(tmp_path) -> None:
-    with pytest.raises(ConfigError, match="dev_limit"):
-        compile_text("-- @dev_limit: 0\n-- @cell a\nSELECT 1;", root=tmp_path)
-
-
 # ---------- lifecycle notifications ----------
 
 

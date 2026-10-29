@@ -18,7 +18,6 @@ below lands in place, one phase at a time, with the existing 346 tests as the sa
 
 | Finding (2026-10-15) | Evidence | Phase |
 |---|---|---|
-| `@dev_limit` breaks multi-statement cells | reproduced: syntax error | 1 |
 | Append-mode sinks report the table's total rows | `count(*)` after `INSERT` | 1 |
 | TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 |
 | A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 |
@@ -69,7 +68,6 @@ Sizes are relative: S, M, L.
 - Record the baseline: `demo/kitchen-sink/kitchen-sink.qsql` compiles in ~25 ms.
 
 **Phase 1 — quick fixes (S; independent red/green pairs).**
-- `@dev_limit` wraps only the terminal statement (split with `statement_spans`).
 - Append-mode DuckDB and Postgres sinks report the `INSERT`'s own row count.
 - The TUI's `_preview_frame` falls back to the cell's own sink (`make_sink(...).ref_expr`),
   not `data/<cell>.parquet`.
@@ -152,7 +150,7 @@ Sizes are relative: S, M, L.
   both name a validator `positive`; per-directive errors still aggregate per cell with
   line numbers; compile time stays at or below the Phase 1 number.
 - Breaking: plugin config access, the biggest change for plugin authors. Update
-  `docs/plugin-authoring.md`, the `dev_limit` and `emit_sql` demonstrators and the README's
+  `docs/plugin-authoring.md`, the `emit_sql` demonstrator and the README's
   directive table.
 
 **Phase 6 — capabilities and layering (M).** Can start after Phase 3.

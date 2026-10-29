@@ -78,9 +78,9 @@ a `run` hook that writes each cell's rendered SQL before delegating —
   plugin contributions — `Refs` (`ref`), `Sources` (`source`), `Vars` (`var`/`vars`),
   `Env` (`env`) — each bundled with the directive it consumes.
 - `after_render(rctx, sql) -> sql | None` — transform rendered SQL; return None to
-  keep it. Transformers compose in `(priority, registration)` order. Builtin
-  `DevLimit` (`plugins/dev_limit.py`) is the reference: `--set dev_limit=100` wraps
-  every cell in a LIMIT; a cell opts out with `-- @dev_limit: null`.
+  keep it. Transformers compose in `(priority, registration)` order. No builtin
+  plugin uses this hook; the scratch `Header`/`Footer` plugins in
+  `tests/test_hooks.py` show two transformers composing.
 
 ## Decision & aggregation hooks
 

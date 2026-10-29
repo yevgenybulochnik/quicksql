@@ -108,7 +108,6 @@ def test_explain_shows_chain_hooks_and_cells(tmp_path) -> None:
     assert "run chain" in result.output
     assert "emit_sql(-100)" in result.output   # builtin wrapper, with priority
     assert "after_render" in result.output
-    assert "dev_limit" in result.output        # builtin transformer
     for name in ("refs", "sources", "vars", "env"):  # plugin-owned globals
         assert name in result.output
     assert "users" in result.output            # cells listed with engine -> sink
