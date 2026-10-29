@@ -104,6 +104,98 @@ def test_failed_cell_reports_error_and_run_continues(tmp_path) -> None:
     assert results["good"].ok is True
 
 
+# ---------- a failed upstream skips its downstream ----------
+
+
+def test_failed_upstream_skips_downstream_across_contexts(tmp_path) -> None:
+    """sqlite a fails -> duckdb b must not read run 1's still-landed parquet."""
+    good = (
+        "-- @cell a\n-- @input: {sqlite: \":memory:\"}\nSELECT 1 AS x\n"
+        "-- @cell b\nSELECT * FROM {{ ref('a') }}\n"
+    )
+    assert all(r.ok for r in run_project(compile_text(good, root=tmp_path)))
+    bad = good.replace("SELECT 1 AS x", "SELECT * FROM nope")
+    results = {r.cell: r for r in run_project(compile_text(bad, root=tmp_path))}
+    assert results["a"].ok is False
+    assert results["b"].ok is False, "b ran on a's stale parquet"
+    assert results["a"].status == "failed"
+    assert results["b"].status == "skipped"
+    assert results["b"].rows is None
+    assert "upstream 'a' failed" in results["b"].error
+
+
+def test_failed_upstream_skips_downstream_in_a_reused_session(tmp_path) -> None:
+    """Same-context duckdb under one session (watch/TUI): b would read a's
+    still-live temp table from run 1. A cell that didn't come out ok leaves
+    session.materialized, so a later exact rerun re-includes it."""
+    good = (
+        "-- @cell a\nSELECT 1 AS x;\n"
+        "-- @cell b\nSELECT * FROM {{ ref('a') }};\n"
+        "-- @cell c\nSELECT * FROM {{ ref('b') }};\n"
+    )
+    bad = good.replace("SELECT 1 AS x", "SELECT * FROM nope")
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(compile_text(good, root=tmp_path), session=session))
+        assert {"a", "b"} <= session.materialized
+        results = {
+            r.cell: r for r in run_project(compile_text(bad, root=tmp_path), session=session)
+        }
+        assert results["a"].ok is False
+        assert results["b"].ok is False, "b ran on a's stale temp table"
+        assert [results[n].status for n in "abc"] == ["failed", "skipped", "skipped"]
+        assert not {"a", "b"} & session.materialized
+    finally:
+        session.close()
+
+
+def test_depends_on_edge_alone_skips_downstream(tmp_path) -> None:
+    project = compile_text(
+        "-- @cell a\nSELECT * FROM nope;\n"
+        "-- @cell b\n-- @depends_on: [a]\nSELECT 1 AS x;\n",
+        root=tmp_path,
+    )
+    results = {r.cell: r for r in project.run()}
+    assert results["a"].ok is False
+    assert results["b"].ok is False, "b ran although its @depends_on upstream failed"
+    assert results["b"].status == "skipped"
+    assert "upstream 'a' failed" in results["b"].error
+    assert not (tmp_path / "data" / "b.parquet").exists()
+
+
+def test_skip_is_transitive_and_names_the_failed_root(tmp_path) -> None:
+    project = compile_text(
+        "-- @cell a\nSELECT * FROM nope;\n"
+        "-- @cell b\nSELECT * FROM {{ ref('a') }};\n"
+        "-- @cell c\nSELECT * FROM {{ ref('b') }};\n"
+        "-- @cell d\nSELECT 1 AS x;\n",  # independent of a: still runs
+        root=tmp_path,
+    )
+    events = []
+    results = {r.cell: r for r in run_project(project, on_event=events.append)}
+    assert "upstream 'a' failed" in (results["c"].error or "")
+    assert [results[n].status for n in "abcd"] == ["failed", "skipped", "skipped", "ok"]
+    # skipped cells never start, but each reports a cell_finished with its result
+    started = {e.cell for e in events if e.kind == "cell_started"}
+    assert started == {"a", "d"}
+    finished = {e.cell: e.result for e in events if e.kind == "cell_finished"}
+    assert finished["c"] is results["c"]
+    assert events[-1].kind == "run_finished"
+    assert "1 ok, 1 failed, 2 skipped" in events[-1].detail
+
+
+def test_run_result_status_and_ok_agree() -> None:
+    from quicksql.models import RunResult
+
+    assert RunResult(cell="a", ok=True).status == "ok"
+    assert RunResult(cell="a", ok=False).status == "failed"
+    assert RunResult(cell="a", status="ok").ok is True
+    skipped = RunResult(cell="b", status="skipped", error="upstream 'a' failed")
+    assert skipped.ok is False
+    with pytest.raises(ValueError):
+        RunResult(cell="a", ok=True, status="skipped")
+
+
 def test_extensions_directive_is_loaded_by_runner(tmp_path) -> None:
     project = compile_text(
         "-- @cell a\n-- @extensions: [json]\nSELECT 1 AS x;", root=tmp_path
@@ -457,4 +549,13 @@ def test_run_event_line_renders_each_kind() -> None:
     )
     assert RunEvent("note", detail="plugin x after_run failed").line() == (
         "note: plugin x after_run failed"
+    )
+
+
+def test_run_event_line_renders_a_skipped_result() -> None:
+    from quicksql.models import RunEvent, RunResult
+
+    skipped = RunResult(cell="b", status="skipped", error="upstream 'a' failed")
+    assert RunEvent("cell_finished", "b", result=skipped).line() == (
+        "b: skipped — upstream 'a' failed"
     )
