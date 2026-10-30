@@ -1,6 +1,6 @@
 """BigQuery executor: extracts to Arrow, which DuckDB registers and lands anywhere.
 
-Needs the ``bigquery`` extra (google-cloud-bigquery, pyarrow, db-dtypes).
+Needs the ``bigquery`` extra (google-cloud-bigquery, pyarrow).
 """
 
 from __future__ import annotations
