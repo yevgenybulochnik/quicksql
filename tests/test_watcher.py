@@ -3,6 +3,7 @@ import queue
 import threading
 
 from quicksql.compiler import compile_file
+from quicksql.runner import RunSession
 from quicksql.watcher import hashes_of, plan_rerun, run_changed, touches, watch_events
 
 V1 = """\
@@ -107,6 +108,30 @@ def test_run_changed_streams_run_events(tmp_path) -> None:
     _, results = run_changed(f, hashes, on_event=events.append)
     assert [r.cell for r in results] == ["a", "b"]
     assert [e.cell for e in events if e.kind == "cell_started"] == ["a", "b"]
+
+
+def test_editing_only_the_downstream_reruns_its_failed_upstream_first(tmp_path) -> None:
+    """Cross-context a broke on the last save; this save edits only b. a reruns
+    (fails again) and b is skipped, not run on a's earlier parquet."""
+    good = (
+        "-- @cell a\n-- @input: {sqlite: \":memory:\"}\nSELECT 1 AS x;\n"
+        "-- @cell b\nSELECT * FROM {{ ref('a') }};\n"
+    )
+    bad = good.replace("SELECT 1 AS x", "SELECT * FROM nope")
+    f = tmp_path / "base.sql"
+    session = RunSession()
+    try:
+        f.write_text(good)
+        project, results = run_changed(f, {}, session=session)  # every cell is new
+        assert all(r.ok for r in results), [r.error for r in results]
+        f.write_text(bad)
+        project, results = run_changed(f, hashes_of(project), session=session)
+        assert [(r.cell, r.status) for r in results] == [("a", "failed"), ("b", "skipped")]
+        f.write_text(bad.replace("SELECT * FROM {{", "SELECT *, 1 AS y FROM {{"))
+        _, results = run_changed(f, hashes_of(project), session=session)
+        assert [(r.cell, r.status) for r in results] == [("a", "failed"), ("b", "skipped")]
+    finally:
+        session.close()
 
 
 def test_config_only_edit_is_detected_but_not_rerun(tmp_path) -> None:

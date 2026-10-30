@@ -208,6 +208,99 @@ def test_skip_is_transitive_and_names_the_failed_root(tmp_path) -> None:
     assert "1 ok, 1 failed, 2 skipped" in events[-1].detail
 
 
+# ---------- across exact reruns (watch/TUI), an upstream that wasn't ok reruns first ----------
+
+CROSS = (
+    "-- @cell a\n-- @input: {sqlite: \":memory:\"}\nSELECT 1 AS x\n"
+    "-- @cell b\nSELECT * FROM {{ ref('a') }}\n"
+)
+CROSS_BROKEN = CROSS.replace("SELECT 1 AS x", "SELECT * FROM nope")
+
+
+def test_exact_rerun_pulls_in_a_cross_context_upstream_that_failed(tmp_path) -> None:
+    """Only b's body changed, so watch reruns just b. Cross-context a failed in
+    the previous run, and b would read run 1's still-landed parquet: a reruns
+    first, fails again, and b is skipped."""
+    edited = CROSS_BROKEN.replace("SELECT * FROM {{", "SELECT *, 1 AS y FROM {{")
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(compile_text(CROSS, root=tmp_path), session=session))
+        run_project(compile_text(CROSS_BROKEN, root=tmp_path), session=session)
+        results = run_project(
+            compile_text(edited, root=tmp_path), select=["b"], closure=False, session=session
+        )
+        assert [(r.cell, r.status) for r in results] == [("a", "failed"), ("b", "skipped")]
+    finally:
+        session.close()
+
+
+def test_exact_rerun_recovers_once_a_failed_upstreams_input_exists(tmp_path) -> None:
+    """a failed on a missing table; the table then appears, a's SQL unchanged
+    (the body hash can't see that). Rerunning b reruns a too: both on fresh data."""
+    notebook = (
+        "-- @cell a\n/*@ input: { sqlite: legacy.sqlite } */\nSELECT x FROM seed\n"
+        "-- @cell b\nSELECT x * 10 AS y FROM {{ ref('a') }}\n"
+    )
+    session = RunSession()
+    try:
+        first = run_project(compile_text(notebook, root=tmp_path), session=session)
+        assert [r.status for r in first] == ["failed", "skipped"]
+        con = sqlite3.connect(tmp_path / "legacy.sqlite")
+        con.execute("CREATE TABLE seed AS SELECT 7 AS x")
+        con.commit()
+        con.close()
+        edited = notebook.replace("x * 10", "x * 100")
+        results = run_project(
+            compile_text(edited, root=tmp_path), select=["b"], closure=False, session=session
+        )
+        assert [(r.cell, r.status) for r in results] == [("a", "ok"), ("b", "ok")]
+        assert pl.read_parquet(tmp_path / "data" / "b.parquet")["y"].to_list() == [700]
+    finally:
+        session.close()
+
+
+def test_exact_rerun_pulls_in_a_skipped_upstream_and_its_failed_root(tmp_path) -> None:
+    """a -> b -> c, over a cross-context ref() and an @depends_on edge (no temp
+    table covers either): a failed, b was skipped; rerunning only c reruns both."""
+    project = compile_text(
+        CROSS_BROKEN + "-- @cell c\n-- @depends_on: [b]\nSELECT 1 AS z\n", root=tmp_path
+    )
+    session = RunSession()
+    try:
+        run_project(project, session=session)
+        results = run_project(project, select=["c"], closure=False, session=session)
+        assert [(r.cell, r.status) for r in results] == [
+            ("a", "failed"),
+            ("b", "skipped"),
+            ("c", "skipped"),
+        ]
+        assert results[-1].error == "upstream 'a' failed"
+    finally:
+        session.close()
+
+
+def test_exact_rerun_leaves_out_an_upstream_this_session_never_ran(tmp_path) -> None:
+    """No status in this session (e.g. an autorun:false cell watch never ran):
+    its landed output stands, as before."""
+    project = compile_text(CROSS, root=tmp_path)
+    assert all(r.ok for r in run_project(project))  # landed by a session of its own
+    session = RunSession()
+    try:
+        results = run_project(project, select=["b"], closure=False, session=session)
+        assert [(r.cell, r.status) for r in results] == [("b", "ok")]
+    finally:
+        session.close()
+
+
+def test_session_remembers_each_cells_last_status_until_closed(tmp_path) -> None:
+    session = RunSession()
+    run_project(compile_text(CROSS, root=tmp_path), session=session)
+    run_project(compile_text(CROSS_BROKEN, root=tmp_path), select=["a"], session=session)
+    assert session.last_status == {"a": "failed", "b": "ok"}
+    session.close()
+    assert session.last_status == {}
+
+
 def test_run_result_ok_is_derived_from_status() -> None:
     from quicksql.models import RunResult
 
@@ -500,6 +593,21 @@ def test_run_started_carries_the_post_expansion_cell_list(tmp_path) -> None:
         assert started and started[0].cells == ("child",)
     finally:
         fresh.close()
+
+
+def test_run_started_lists_a_pulled_in_failed_upstream(tmp_path) -> None:
+    from quicksql.models import RunEvent
+
+    project = compile_text(CROSS_BROKEN, root=tmp_path)
+    session = RunSession()
+    try:
+        run_project(project, session=session)
+        events: list[RunEvent] = []
+        run_project(project, select=["b"], closure=False, session=session, on_event=events.append)
+        started = [e for e in events if e.kind == "run_started"]
+        assert started and started[0].cells == ("a", "b")
+    finally:
+        session.close()
 
 
 def test_on_event_reports_failures_and_run_continues(tmp_path) -> None:
