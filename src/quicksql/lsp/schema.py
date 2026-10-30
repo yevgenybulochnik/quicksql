@@ -137,7 +137,7 @@ def table_columns(project: Any, cell: Any, name: str) -> list[Column]:
 
 
 def relation_names(
-    project: Any, cell: Any, parts: list[str], cache: SchemaCache | None = None
+    cell: Any, parts: list[str], cache: SchemaCache | None = None
 ) -> list[Column]:
     """Completion candidates for the next segment of a partial dotted relation
     in a bigquery cell (v1: other engines return []): with no typed segments,

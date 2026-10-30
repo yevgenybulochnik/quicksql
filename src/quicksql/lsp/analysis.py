@@ -106,7 +106,7 @@ class Analyzer:
             tbl = _TABLE_POS.search(prefix)
             if tbl is not None:
                 segments = tbl.group(1).split(".")[:-1]  # done segments only
-                names = relation_names(project, cell, segments, self.cache)
+                names = relation_names(cell, segments, self.cache)
                 if names:
                     return [Completion(n, "table", detail) for n, detail in names]
 
