@@ -46,9 +46,7 @@ class PostgresExecutor(Executor):
         or an ephemeral one without a session."""
         dsn = _dsn(cell.config)
         if not dsn:
-            raise ExecutorError(
-                f"cell {cell.name!r}: postgres engine needs input.postgres.dsn"
-            )
+            raise ExecutorError("postgres engine needs input.postgres.dsn")
         if ctx.session is None:
             return self.make_connection(dsn), True
         key = self.context_key(cell.config)
@@ -74,13 +72,13 @@ class PostgresExecutor(Executor):
             else:
                 cur = con.execute(final)
             if cur.description is None:
-                raise ExecutorError(f"cell {cell.name!r}: postgres query returned no result set")
+                raise ExecutorError("postgres query returned no result set")
             cols = [d.name for d in cur.description]
             rows = cur.fetchall()
         except ExecutorError:
             raise
         except Exception as exc:  # psycopg may be absent offline; wrap any driver failure
-            raise ExecutorError(f"cell {cell.name!r}: postgres: {exc}") from exc
+            raise ExecutorError(f"postgres: {exc}") from exc
         finally:
             if ephemeral:
                 con.close()

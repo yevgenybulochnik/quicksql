@@ -54,11 +54,11 @@ class SQLiteExecutor(Executor):
             else:
                 cur = con.execute(final)
             if cur.description is None:
-                raise ExecutorError(f"cell {cell.name!r}: sqlite query returned no result set")
+                raise ExecutorError("sqlite query returned no result set")
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
         except sqlite3.Error as exc:
-            raise ExecutorError(f"cell {cell.name!r}: sqlite: {exc}") from exc
+            raise ExecutorError(f"sqlite: {exc}") from exc
         finally:
             if ephemeral:
                 con.close()
