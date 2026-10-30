@@ -25,6 +25,9 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — SQL templates render in Jinja's sandbox, and a pydantic model in a template
   exposes only its fields, so compiling (and the LSP) can't run Python or read files
   through `config.parse_file` (`84e9239..64cc7f4`).
+- Done — TUI catalog navigation (user-reported): leaving the Catalog tab keeps the dive,
+  `1`–`5` jump to a tab from any mode, `Esc` leaves a sheet without popping, and a notebook
+  switch on the Catalog tab shows the new catalog (`91cfea3..33dd7ac`).
 - Next — the remaining Phase 1 fixes, and the Phase 0 safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
@@ -295,10 +298,13 @@ needs Phase 4's composition root and lazy package `__init__`s.
   stale after a watch rerun; sort, filter, freq and describe work on the 100-row preview
   without saying so; runs and recompiles overwrite the subtitle; a replaced run still
   shares the session (Textual's `exclusive` only marks the old thread worker cancelled).
-  Already fixed: per-notebook sessions and the per-cursor-move re-log (2026-10-30).
-- Smaller issues found on the way: a catalog load still running across a notebook switch
-  fails with DuckDB's "Connection already closed" (no crash: the switch closes the old
-  session); a single-line failure is logged twice, as the `FAILED` line and the full
+  Already fixed: per-notebook sessions and the per-cursor-move re-log, and catalog
+  navigation (the dive survives tab switches; digit keys; `Esc`) (2026-10-30).
+- Smaller issues found on the way: catalog loads carry no generation tag, so one still
+  running across a notebook switch either lands on the new notebook's stack or fails with
+  DuckDB's "Connection already closed" (no crash: the switch closes the old session); tag
+  them like runs (`_run_gen`) in the catalog view's extraction. The Data tab still drops
+  its dive when you leave it (it follows the selected cell). A single-line failure is logged twice, as the `FAILED` line and the full
   message block (log the block only for multi-line messages).
 - Tests first: the existing pilot tests pass unchanged after each extraction; one new
   test per fixed issue; `/verify` in tmux after each step.
