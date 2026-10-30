@@ -5,16 +5,19 @@ from __future__ import annotations
 import hashlib
 import importlib
 import importlib.util
+import json
 import sys
 import textwrap
+import time
+from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
 from .bootstrap import load_builtins
 from .compiler import Project, compile_file
-from .errors import QsqlError
+from .errors import ConfigErrorGroup, QsqlError
 from .overrides import gather_overrides
 from .runner import run_project
 from .scaffold import write_scaffold
@@ -74,18 +77,23 @@ def _load_plugin_module(spec: str) -> None:
         importlib.import_module(spec)
 
 
-def _project(file: Path, sets: list[str] | None, plugins: list[str] | None) -> Project:
+def _compile(file: Path, sets: list[str] | None, plugins: list[str] | None) -> Project:
+    """Load plugins and compile, warnings to stderr; a QsqlError propagates."""
     load_builtins()
+    rc = file.parent / "quicksqlrc.py"
+    if rc.exists():
+        _load_plugin_module(str(rc))
+    for spec in plugins or []:
+        _load_plugin_module(spec)
+    project = compile_file(file, overrides=gather_overrides(list(sets or [])))
+    for line, message in project.warnings:
+        typer.secho(f"warning: {message}", fg="yellow", err=True)
+    return project
+
+
+def _project(file: Path, sets: list[str] | None, plugins: list[str] | None) -> Project:
     try:
-        rc = file.parent / "quicksqlrc.py"
-        if rc.exists():
-            _load_plugin_module(str(rc))
-        for spec in plugins or []:
-            _load_plugin_module(spec)
-        project = compile_file(file, overrides=gather_overrides(list(sets or [])))
-        for line, message in project.warnings:
-            typer.secho(f"warning: {message}", fg="yellow", err=True)
-        return project
+        return _compile(file, sets, plugins)
     except QsqlError as exc:
         typer.secho(str(exc), fg="red")
         raise typer.Exit(EXIT_COMPILE)
@@ -119,18 +127,70 @@ def run(
     select: Optional[list[str]] = typer.Option(None, "--select", "-s", help="Run these cells (+ upstreams)"),
     set_: Optional[list[str]] = SET_OPT,
     plugins: Optional[list[str]] = PLUGINS_OPT,
+    json_out: bool = typer.Option(
+        False, "--json", help="Print one JSON document on stdout instead of progress and a summary"
+    ),
+    rows: int = typer.Option(
+        0, "--rows", min=0,
+        help="With --json: add up to N preview rows per ok cell (at most 100, the cached preview)",
+    ),
 ) -> None:
-    """Compile and run cells in dependency order, landing each via its sink."""
+    """Compile and run cells in dependency order, landing each via its sink.
+
+    Exit codes: 0 all ok, 1 a cell failed, 3 the notebook didn't compile or
+    --select names an unknown cell (2 is a usage error)."""
+    if rows and not json_out:
+        raise typer.BadParameter("only applies with --json", param_hint="'--rows'")
+    selected = list(select) if select else None
+    if json_out:
+        _run_json(file, selected, set_, plugins, rows)
+        return
     project = _project(file, set_, plugins)
     try:
-        results = run_project(
-            project, select=list(select) if select else None, on_event=_live_event
-        )
+        results = run_project(project, select=selected, on_event=_live_event)
     except QsqlError as exc:  # an unknown --select cell
         typer.secho(str(exc), fg="red")
         raise typer.Exit(EXIT_COMPILE)
     if _print_results(results):
         raise typer.Exit(EXIT_FAILED)
+
+
+def _run_json(
+    file: Path,
+    select: list[str] | None,
+    sets: list[str] | None,
+    plugins: list[str] | None,
+    rows: int,
+) -> None:
+    """``run --json``: stdout gets the one document and nothing else (no
+    progress events); compile warnings stay on stderr."""
+    started = time.perf_counter()
+    results = []
+    errors: list[dict[str, Any]] = []
+    try:
+        results = run_project(_compile(file, sets, plugins), select=select)
+    except QsqlError as exc:  # before any cell ran: compile, or an unknown --select
+        errors = _error_dicts(exc)
+    counts = Counter(r.status for r in results)
+    status = "compile_error" if errors else "failed" if counts["failed"] else "ok"
+    doc = {
+        "file": str(file),
+        "status": status,
+        "summary": {s: counts[s] for s in ("ok", "failed", "skipped")},
+        "elapsed": time.perf_counter() - started,
+        "errors": errors,
+        "cells": [r.to_dict(rows) for r in results],
+    }
+    # to_dict is JSON-safe; default=str covers a plugin's odd target (a Path, ...)
+    typer.echo(json.dumps(doc, indent=2, default=str))
+    if status != "ok":
+        raise typer.Exit(EXIT_COMPILE if errors else EXIT_FAILED)
+
+
+def _error_dicts(exc: QsqlError) -> list[dict[str, Any]]:
+    if isinstance(exc, ConfigErrorGroup):
+        return [{"cell": e.cell, "line": e.line, "message": e.message} for e in exc.errors]
+    return [{"cell": None, "line": None, "message": str(exc)}]
 
 
 def _live_event(event) -> None:
