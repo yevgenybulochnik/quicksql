@@ -857,12 +857,13 @@ class QsqlApp(App):
             self._push_sheet(self.sheet_stack[-1].describe())
 
     def action_catalog(self) -> None:
-        """S: jump to the Catalog tab and dive straight into the listing."""
+        """S / 5: jump to the Catalog tab and dive — back into the kept dive at
+        its top sheet, or straight into the root listing."""
         if not self.project:
             return
         tabs = self.query_one(TabbedContent)
         if tabs.active != "tab_catalog":
-            tabs.active = "tab_catalog"  # the activation handler loads the root
+            tabs.active = "tab_catalog"  # the activation handler loads a missing root
         if self.catalog_stack:
             self.mode = "catalog"
             self._refresh_catalog()
@@ -1026,13 +1027,38 @@ class QsqlApp(App):
             self._toggle_split()
         elif ch == "w":
             self._switch_pane()
+        elif ch in self.TAB_KEYS:
+            self._jump_to_tab(self.TAB_KEYS[ch])
 
     TAB_ORDER = ["tab_sql", "tab_data", "tab_config", "tab_log", "tab_catalog"]
+    TAB_KEYS = dict(zip("12345", TAB_ORDER))
 
     def _cycle_tab(self, delta: int) -> None:
         tabs = self.query_one(TabbedContent)
         idx = self.TAB_ORDER.index(tabs.active) if tabs.active in self.TAB_ORDER else 0
         tabs.active = self.TAB_ORDER[(idx + delta) % len(self.TAB_ORDER)]
+
+    def _jump_to_tab(self, tab: str) -> None:
+        """1-5, from any mode. 5 is S; 1-4 land with keys back on the cell
+        list — handed back here, since 2 on the Data tab activates nothing —
+        and the activation handler drops a Data dive left behind."""
+        if tab == "tab_catalog":
+            self.action_catalog()
+            return
+        self._leave_dive()
+        self.query_one(TabbedContent).active = tab
+
+    def _leave_dive(self) -> None:
+        """Hand keys back to the cell list without popping, staying on the
+        tab: a catalog dive is kept for Enter/S/5 to resume; a Data sheet
+        stays on screen until the selection moves and the Data tab follows."""
+        if self.mode not in self.SHEET_MODES:
+            return
+        if self.split:  # the split is a data-mode concern; drop it on the way out
+            self._collapse_panes(self.active_pane)
+            self._refresh_data()
+        self.mode = "cells"
+        self._refresh_detail()
 
     def _reconcile_to_viewport(self, sheet: Sheet) -> Sheet:
         """Snap the cursor row into the data table's visible window. The mouse
