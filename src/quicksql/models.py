@@ -46,17 +46,6 @@ class RawBlock:
 
 
 @dataclass
-class Cell:
-    """A named cell with its merged+validated config and raw (unrendered) SQL."""
-
-    name: str
-    config: Any
-    sql_raw: str
-    hash: str
-    line: int = 0
-
-
-@dataclass
 class RenderedCell:
     """A cell after Jinja rendering: final SQL, resolved engine/sink, edges."""
 
