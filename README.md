@@ -39,6 +39,7 @@ extracts the SQLite result and lands everything in a DuckDB warehouse.
 $ uv sync
 $ uv run quicksql              # bare invocation scaffolds base.qsql
 $ uv run quicksql run          # run every cell in dependency order, land data/<cell>.parquet
+$ uv run quicksql run --json   # the same run as one JSON document, for scripts and agents
 $ uv run quicksql list         # cells in topo order: engine -> sink, autorun, deps
 $ uv run quicksql show report  # rendered SQL for one cell
 $ uv run quicksql compile      # rendered SQL for every cell
@@ -85,6 +86,53 @@ output, and reported them ok.
 Across reruns too: when watch or the TUI reruns a cell whose upstream failed (or was
 skipped) earlier in the session, it reruns that upstream first, so the cell never reads its
 stale output.
+
+### Scripts and agents: `--json` and exit codes
+
+`quicksql run --json` prints one JSON document on stdout and nothing else: no progress
+lines and no colours. Compile warnings still go to stderr. The document is indented on a
+terminal and one line when piped. `--rows N` adds the first `N` rows of each ok cell's
+output, read from the cached preview, so at most 100 (`--rows` without `--json` is a
+usage error). The failing run above, as JSON (messages cut short):
+
+```json
+{
+  "file": "base.qsql",
+  "status": "failed",
+  "summary": {"ok": 1, "failed": 1, "skipped": 1},
+  "elapsed": 0.0536,
+  "errors": [],
+  "cells": [
+    {"cell": "users", "status": "failed", "rows": null, "target": null, "elapsed": 0.0219,
+     "error": "Catalog Error: Table with name user_seed does not exist!\nDid you mean ...",
+     "traceback": "Traceback (most recent call last):\n ...", "preview": null},
+    {"cell": "events", "status": "ok", "rows": 10, "target": "data/events.parquet",
+     "elapsed": 0.0045, "error": null, "traceback": null,
+     "preview": {"columns": ["user_id", "event"], "rows": [[1, "event_0"]]}},
+    {"cell": "active_user_events", "status": "skipped", "rows": null, "target": null,
+     "elapsed": 0.0, "error": "upstream 'users' failed", "traceback": null, "preview": null}
+  ]
+}
+```
+
+`status` is `ok`, `failed` or `compile_error`. A cell's `error` is the message the summary
+prints and `traceback` the full trace; `elapsed` is in seconds. `preview` appears only with
+`--rows`. Its values are JSON-safe: dates and times as ISO text, decimals as exact text,
+NaN as `"nan"`. On a compile error `cells` is empty and `errors` lists each problem as
+`{"cell", "line", "message"}`; `cell` and `line` are `null` when the error isn't tied to a
+cell, such as an unknown `--select` cell.
+
+Every command exits with one of these codes:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Success: every cell ran ok. |
+| 1 | A cell failed. A skipped cell never causes it alone, since every skip has a failed upstream in the same run. Also other runtime failures, such as `init` refusing to overwrite. |
+| 2 | Usage error: an unknown option or a bad value. |
+| 3 | The notebook didn't compile (a parse, config or cycle error), or the selection names an unknown cell (`run --select`, `compile --select`, `show`). |
+
+*Behavior change:* compile errors used to exit 1, like a failed cell, and `compile --select`
+with an unknown cell printed nothing and exited 0.
 
 ## Anatomy of a cell
 
