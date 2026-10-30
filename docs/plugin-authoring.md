@@ -49,7 +49,7 @@ class RowLimit(Plugin):
 `runner` wraps the base cell-runner with every plugin participating in execution,
 sorted by `(priority, registration order)`; lower priority = outermost. Convention:
 
-- **retries** (outermost, ~-100) — re-invoke `inner` when the result has `ok=False`
+- **retries** (outermost, ~-100) — re-invoke `inner` when the result isn't `ok`
 - **caching** (~-50) — skip `inner` entirely and return a synthesized result
 - **timing/logging** (~0) — observe around `inner`
 
@@ -60,12 +60,21 @@ Two ways in:
 - **Full control** — override `run(cell, ctx, inner)` to own control flow: call
   `inner` zero or more times (caching, retries), transform the result.
 
-Cell failures arrive as `RunResult(ok=False, error=...)`, so retry-style plugins can
-inspect them; exceptions your plugin raises are caught outside the chain and degrade
-that cell to an error result without killing the run. Builtin `EmitSql`
-(`plugins/emit_sql.py`) is the reference implementation: global `render_dir` config +
-a `run` hook that writes each cell's rendered SQL before delegating —
-`quicksql run --set render_dir=build/sql`.
+Cell failures arrive as `RunResult(status="failed", error=..., traceback=...)`, so
+retry-style plugins can inspect them: `error` is the human message (the engine's own,
+e.g. DuckDB's `Catalog Error: ...`, else prefixed with the exception type, `KeyError: 'x'`)
+and `traceback` the full trace. `status` is `"ok"` / `"failed"` / `"skipped"`; `ok` is a
+read-only property derived from it, so a result is built with `status=`. Exceptions your
+plugin raises are caught outside the chain and degrade that cell to an error result
+without killing the run.
+
+A cell downstream of a failure is skipped: it bypasses the run chain entirely (`run`,
+`before_execute` and `after_execute` aren't called), but `after_run` still receives its
+result, with `status == "skipped"` and `error` naming the failed upstream.
+
+Builtin `EmitSql` (`plugins/emit_sql.py`) is the reference implementation: global
+`render_dir` config + a `run` hook that writes each cell's rendered SQL before
+delegating — `quicksql run --set render_dir=build/sql`.
 
 ## Render seams (compile time)
 

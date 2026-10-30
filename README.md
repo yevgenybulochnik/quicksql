@@ -64,10 +64,23 @@ $ uv run quicksql run
   ok active_user_events    7 rows     3.2 ms  -> data/active_user_events.parquet
 ```
 
-When a cell fails, every cell downstream of it — through `ref()` or `@depends_on`,
-transitively — is **skipped**, not run: the summary shows `skip report: upstream 'users'
-failed` (`⊘` in the TUI), and independent cells still run. *Behavior change:* earlier
-versions ran the downstream cells anyway, on the previous run's output, and reported them ok.
+When a cell fails, the summary leads with the engine's message and indents its context
+(DuckDB's `LINE`/caret) beneath. Every cell downstream of it — through `ref()` or
+`@depends_on`, transitively — is **skipped**, not run (`⊘` in the TUI), and independent
+cells still run:
+
+```console
+  FAIL users: Catalog Error: Table with name user_seed does not exist!
+      Did you mean "sqlite_master"?
+
+      LINE 1: CREATE OR REPLACE TEMP TABLE "users" AS SELECT * FROM user_seed, (VALUES
+                                                                    ^
+  ok events                         10 rows       4.0 ms  -> data/events.parquet
+  skip active_user_events: upstream 'users' failed
+```
+
+*Behavior change:* earlier versions ran the downstream cells anyway, on the previous run's
+output, and reported them ok.
 
 ## Anatomy of a cell
 
