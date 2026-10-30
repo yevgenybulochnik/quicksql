@@ -12,10 +12,15 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — readable failures: `RunResult.error` is the engine's message, `traceback` rides
   apart, `ok` is a plain property of `status`; the CLI prints the message with DuckDB's
   context indented beneath (`439517a..ed58981`).
-- In progress — the cross-run skip (`fix/cross-run-skip`) and `run --json` with exit
-  codes (`feat/run-json`), which finish Phase 2.
-- Next — the Phase 1 fixes, dead code once both branches merge (it touches the same
-  `models.py`/`runner.py` code). The agent-facing CLI beyond `run --json` is planned in
+- Done — the cross-run skip: exact reruns rerun an upstream that wasn't ok this session
+  (`224f100..155246d`).
+- Done — `run --json [--rows N]` and exit codes 1 = a cell failed, 3 = compile error or
+  invalid selection, for every command (`53fcfc5..d1575d9`). Phase 2 is complete.
+- Done — the TUI gives each opened notebook its own `RunSession`, so a rerun after `o`
+  can't read the previous notebook's temps, and logs a failed cell's full message once
+  instead of on every cursor move (`d65a35b..247fcd5`). Two Phase 9 issues, fixed early.
+- Next — the Phase 1 fixes, including the dead code (now unblocked), and the Phase 0
+  safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
 ## Context
@@ -40,7 +45,7 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable | 1 |
 | Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 |
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
-| Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (in progress) |
+| Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
 | DuckDB errors print as `FAIL a: ^` | reproduced | 2 (fixed) |
 | DuckDB's `LINE 1:` error context shows the wrapper (`CREATE OR REPLACE TEMP TABLE "a" AS …`), not the cell's SQL (2026-10-30) | reproduced | 3 |
 | Cell protocol duplicated in all 4 executors; `sink_type == "none"` checks | read | 3 |
@@ -56,6 +61,7 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Plugins, catalog, LSP and TUI import runner privates; 32 function-level imports | grep | 6 |
 | CLI commands auto-import `quicksqlrc.py`; the LSP never loads it | read | 7 |
 | Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 |
+| A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
 | `tui.py` is 1,304 lines, one class with 82 methods | `wc` | 9 |
 | `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 |
 
@@ -107,7 +113,7 @@ Sizes are relative: S, M, L.
   `RunContext.overrides`, unused imports (`tempfile` in `runner.py`; `Ref`/`Source` in
   `lsp/analysis.py`), unused `project` parameters (`_resolve_scope`, `relation_names`).
 
-**Phase 2 — honest run outcomes (M; partly done).**
+**Phase 2 — honest run outcomes (M; done).**
 - Done: `RunResult.status`: `ok` | `failed` | `skipped`.
 - Done: the runner skips cells whose upstream failed or was skipped, across `ref()` and
   `@depends_on` edges, transitively: `skipped: upstream 'a' failed`. Skipped cells bypass
@@ -120,17 +126,14 @@ Sizes are relative: S, M, L.
   traceback. The CLI and `RunEvent.line()` print the message, not the traceback's last
   line; executor errors no longer repeat the cell name. `ok` is a plain read-only
   property of `status`.
-- In progress (`fix/cross-run-skip`): `RunSession` remembers each cell's last status, and
-  exact reruns (watch/TUI) pull in any upstream whose last result wasn't ok, the way
-  missing temps already are. Today a same-context upstream is rerun this way, but a
-  cross-context one that failed in an earlier rerun is read stale and its downstream
-  reports ok.
-- In progress (`feat/run-json`): `RunResult.to_dict()`; `quicksql run --json [--rows N]`
-  prints one document and no progress; exit codes 1 = a cell failed, 3 = compile error,
-  for every command (2 stays click's usage error). `RunEvent.to_dict()` waits for JSON
-  watch events (`docs/agent-cli-plan.md`).
-- Tests first: a cross-context upstream that failed in an earlier rerun is rerun, and its
-  downstream skipped if it fails again; the JSON shape; the exit codes.
+- Done: `RunSession` remembers each cell's last status, and exact reruns (watch/TUI)
+  pull in any upstream whose last result wasn't ok, the way missing temps already are,
+  so a cross-context upstream that failed in an earlier rerun is no longer read stale.
+- Done: `RunResult.to_dict()`; `quicksql run --json [--rows N]` prints one document and
+  no progress, for compile errors and other pre-run failures too; exit codes 1 = a cell
+  failed, 3 = compile error or invalid selection, for every command (2 stays click's
+  usage error). `RunEvent.to_dict()` waits for JSON watch events
+  (`docs/agent-cli-plan.md`).
 
 **Phase 3 — the runner owns the cell protocol (L).**
 - Executors open one session per context with `execute(sql)`, `materialize(name, sql)`,
@@ -275,8 +278,13 @@ needs Phase 4's composition root and lazy package `__init__`s.
   cells) and a catalog view. `QsqlApp` keeps layout and key routing.
 - Fix the open issues from the 2026-07-25 TUI review on the way: the data sheet goes
   stale after a watch rerun; sort, filter, freq and describe work on the 100-row preview
-  without saying so; runs and recompiles overwrite the subtitle; a failed cell's
-  traceback is re-logged on every cursor move; a replaced run still shares the session.
+  without saying so; runs and recompiles overwrite the subtitle; a replaced run still
+  shares the session (Textual's `exclusive` only marks the old thread worker cancelled).
+  Already fixed: per-notebook sessions and the per-cursor-move re-log (2026-10-30).
+- Smaller issues found on the way: a catalog load still running across a notebook switch
+  fails with DuckDB's "Connection already closed" (no crash: the switch closes the old
+  session); a single-line failure is logged twice, as the `FAILED` line and the full
+  message block (log the block only for multi-line messages).
 - Tests first: the existing pilot tests pass unchanged after each extraction; one new
   test per fixed issue; `/verify` in tmux after each step.
 

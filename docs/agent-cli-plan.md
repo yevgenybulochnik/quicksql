@@ -1,6 +1,6 @@
 # Plan: a CLI agents can drive
 
-**Status:** proposed 2026-10-30. Step 1 is in progress on `feat/run-json`.
+**Status:** proposed 2026-10-30. Step 1 is done (`53fcfc5..d1575d9`).
 
 ## Context
 
@@ -37,7 +37,7 @@ Every step below serves that loop. Schema discovery and state come after it work
 
 ## Steps (each one focused change, test-first)
 
-1. **`run --json [--rows N]` and exit codes.** In progress (`feat/run-json`).
+1. **`run --json [--rows N]` and exit codes.** Done.
    `RunResult.to_dict()`; one document per run with per-cell status, rows, target,
    elapsed, error, and preview rows on request; compile errors as `errors` with cell and
    line; exit codes for every command.
