@@ -19,7 +19,7 @@ from .bootstrap import load_builtins
 from .compiler import Project, compile_file
 from .errors import ConfigErrorGroup, QsqlError
 from .overrides import gather_overrides
-from .runner import run_project
+from .runner import _message, run_project
 from .scaffold import write_scaffold
 
 app = typer.Typer(
@@ -36,7 +36,7 @@ PLUGINS_OPT = typer.Option(
 )
 
 # 2 is click's usage error
-EXIT_FAILED = 1  # a cell failed (a skip always has a failed root in the same run)
+EXIT_FAILED = 1  # a cell failed (a skip always has a failed root), or another runtime failure
 EXIT_COMPILE = 3  # the notebook didn't compile, or the selection names an unknown cell
 
 
@@ -163,16 +163,20 @@ def _run_json(
     rows: int,
 ) -> None:
     """``run --json``: stdout gets the one document and nothing else (no
-    progress events); compile warnings stay on stderr."""
+    progress events), whatever goes wrong; compile warnings stay on stderr."""
     started = time.perf_counter()
     results = []
     errors: list[dict[str, Any]] = []
+    status = "ok"
     try:
         results = run_project(_compile(file, sets, plugins), select=select)
     except QsqlError as exc:  # before any cell ran: compile, or an unknown --select
-        errors = _error_dicts(exc)
+        status, errors = "compile_error", _error_dicts(exc)
+    except Exception as exc:  # before any cell ran: a plugin that won't import, a locked db
+        status, errors = "error", [{"cell": None, "line": None, "message": _message(exc)}]
     counts = Counter(r.status for r in results)
-    status = "compile_error" if errors else "failed" if counts["failed"] else "ok"
+    if status == "ok" and counts["failed"]:
+        status = "failed"
     doc = {
         "file": str(file),
         "status": status,
@@ -186,7 +190,7 @@ def _run_json(
     indent = 2 if sys.stdout.isatty() else None
     typer.echo(json.dumps(doc, indent=indent, default=str))
     if status != "ok":
-        raise typer.Exit(EXIT_COMPILE if errors else EXIT_FAILED)
+        raise typer.Exit(EXIT_COMPILE if status == "compile_error" else EXIT_FAILED)
 
 
 def _error_dicts(exc: QsqlError) -> list[dict[str, Any]]:

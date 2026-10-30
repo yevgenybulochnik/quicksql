@@ -115,12 +115,14 @@ usage error). The failing run above, as JSON (messages cut short):
 }
 ```
 
-`status` is `ok`, `failed` or `compile_error`. A cell's `error` is the message the summary
-prints and `traceback` the full trace; `elapsed` is in seconds. `preview` appears only with
+`status` is `ok`, `failed`, `compile_error`, or `error` when something else stopped the run
+before any cell ran, such as a `--plugins` module that won't import (exit 1). A cell's
+`error` is the message the summary prints and `traceback` the full trace; `elapsed` is in
+seconds. `preview` appears only with
 `--rows`. Its values are JSON-safe: dates and times as ISO text, decimals as exact text,
-NaN as `"nan"`. On a compile error `cells` is empty and `errors` lists each problem as
-`{"cell", "line", "message"}`; `cell` and `line` are `null` when the error isn't tied to a
-cell, such as an unknown `--select` cell.
+NaN as `"nan"`. On `compile_error` or `error`, `cells` is empty and `errors` lists each
+problem as `{"cell", "line", "message"}`; `cell` and `line` are `null` when the problem
+isn't tied to a cell, such as an unknown `--select` cell.
 
 Every command exits with one of these codes:
 
