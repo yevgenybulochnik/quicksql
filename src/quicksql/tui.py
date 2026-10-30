@@ -788,8 +788,8 @@ class QsqlApp(App):
     def action_pop_or_quit(self) -> None:
         if self.mode == "catalog" and self.catalog_stack:
             self.catalog_stack.pop()
+            self._refresh_catalog()  # an emptied stack clears the table
             if self.catalog_stack:
-                self._refresh_catalog()
                 return
             self.mode = "cells"  # popped the root: back out to the cell list
             self.query_one(TabbedContent).active = "tab_sql"
@@ -1118,14 +1118,16 @@ class QsqlApp(App):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Browsing onto a tab (click or h/l) shows content but stays in cells
-        mode, so j/k keep moving the cell selection; Enter is what dives. Each
-        stack-owning tab drops the *other* surface's dive state on entry, so a
-        direct jump (click, S) never leaves keys routed to an invisible stack."""
+        mode, so j/k keep moving the cell selection; Enter is what dives.
+        Leaving the Data tab drops its dive; leaving the Catalog tab only hands
+        keys back to the cell list and keeps its stack, so coming back (click,
+        h/l, S) shows the same sheet at the same row. Either way a direct jump
+        never leaves keys routed to an invisible stack."""
         active = self.query_one(TabbedContent).active
         if active == "tab_data":
             # must not touch a "data" mode here: _push_sheet dives (sets the
             # mode) *before* activating the tab, and this handler fires after
-            self._drop_catalog_dive()
+            self._leave_catalog_dive()
             if not self.sheet_stack:
                 self._show_current_data()
         elif active == "tab_catalog":
@@ -1136,7 +1138,7 @@ class QsqlApp(App):
                 )
         else:
             self._drop_data_dive()
-            self._drop_catalog_dive()
+            self._leave_catalog_dive()
             self._refresh_detail()
 
     def _drop_data_dive(self) -> None:
@@ -1146,11 +1148,11 @@ class QsqlApp(App):
             self._collapse_panes(0)
         self.panes[self.active_pane] = []
 
-    def _drop_catalog_dive(self) -> None:
+    def _leave_catalog_dive(self) -> None:
+        # the stack stays: its Sheets keep cursor/sort/filter/hidden columns
+        # for S / Enter to resume. A notebook switch or q past the root resets it.
         if self.mode == "catalog":
             self.mode = "cells"
-        self.catalog_stack = []
-        self._refresh_catalog()  # clears the table + its shown-cache slot
 
     def _show_current_data(self) -> None:
         name = self.current_cell
