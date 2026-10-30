@@ -111,7 +111,7 @@ def test_show_prints_rendered_sql(tmp_path) -> None:
 def test_show_unknown_cell_errors(tmp_path) -> None:
     f = _init(tmp_path)
     result = runner.invoke(app, ["show", "ghost", str(f)])
-    assert result.exit_code == 1
+    assert result.exit_code == 3  # an invalid selection, like an unknown --select
 
 
 def test_compile_prints_all_cells(tmp_path) -> None:
@@ -126,8 +126,32 @@ def test_compile_error_reported(tmp_path) -> None:
     f = tmp_path / "bad.sql"
     f.write_text("-- @bogus: 1\n-- @cell a\nSELECT 1;")
     result = runner.invoke(app, ["run", str(f)])
-    assert result.exit_code == 1
+    assert result.exit_code == 3  # compile errors exit 3; 1 means a cell failed
     assert "unknown directive" in result.output
+
+
+def test_compile_error_exits_3_for_every_command(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text("-- @cell a\n-- @bogus: 1\nSELECT 1;")
+    for command in ("run", "list", "compile", "explain"):
+        result = runner.invoke(app, [command, str(f)])
+        assert result.exit_code == 3, (command, result.output)
+    result = runner.invoke(app, ["show", "a", str(f)])
+    assert result.exit_code == 3, result.output
+
+
+def test_run_unknown_select_exits_3(tmp_path) -> None:
+    f = _init(tmp_path)
+    result = runner.invoke(app, ["run", str(f), "--select", "ghost"])
+    assert result.exit_code == 3
+    assert "unknown cell(s) in --select: ghost" in result.output
+
+
+def test_compile_unknown_select_exits_3(tmp_path) -> None:
+    f = _init(tmp_path)
+    result = runner.invoke(app, ["compile", str(f), "--select", "ghost"])
+    assert result.exit_code == 3
+    assert "unknown cell(s) in --select: ghost" in result.output
 
 
 def test_explain_shows_chain_hooks_and_cells(tmp_path) -> None:
@@ -164,7 +188,7 @@ def test_plugins_flag_loads_module_from_path(tmp_path) -> None:
     f = tmp_path / "pipeline.sql"
     f.write_text(GREETING_FILE)
     without = runner.invoke(app, ["run", str(f)])
-    assert without.exit_code == 1  # @greeting unknown without the plugin
+    assert without.exit_code == 3  # @greeting unknown without the plugin
     result = runner.invoke(
         app, ["run", str(f), "--plugins", str(tmp_path / "myplug.py")]
     )
