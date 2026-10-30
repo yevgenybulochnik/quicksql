@@ -918,6 +918,98 @@ async def test_notebook_switch_resets_a_kept_catalog_dive(deep_catalog) -> None:
         assert "users" in app.catalog_stack[-1].frame["name"].to_list()
 
 
+def _root_names(app) -> list[str]:
+    return app.catalog_stack[-1].frame["name"].to_list()
+
+
+@pytest.mark.parametrize("key", ["5", "S"])
+async def test_notebook_switch_on_the_catalog_tab_then_dive_into_the_new_root(
+    deep_catalog, key
+) -> None:
+    # the old listing must vanish with the switch (not linger under the new
+    # notebook), and S/5 must dive into the new root — not wait forever on a
+    # tab activation that never fires because Catalog is already active
+    other = write_scaffold(deep_catalog.parent / "base.qsql")
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press(key)
+        await _settle(app, pilot)
+        assert "sqlite:nums.db" in _root_names(app)
+        table = app.query_one("#catalog", DataTable)
+        app._load_notebook(other)
+        assert table.row_count == 0  # the old listing is gone right away
+        await _settle(app, pilot)
+        await pilot.press(key)
+        await _settle(app, pilot)
+        tabs = app.query_one(TabbedContent)
+        assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
+        assert len(app.catalog_stack) == 1
+        assert "users" in _root_names(app)
+        assert table.row_count == app.catalog_stack[-1].frame.height
+
+
+async def test_notebook_switch_on_the_catalog_tab_loads_the_new_root_to_browse(
+    deep_catalog,
+) -> None:
+    other = write_scaffold(deep_catalog.parent / "base.qsql")
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("5")
+        await _settle(app, pilot)
+        app._load_notebook(other)
+        await _settle(app, pilot)
+        assert app.query_one(TabbedContent).active == "tab_catalog"
+        assert app.mode == "cells"  # browse, as when cycling onto the tab
+        assert len(app.catalog_stack) == 1
+        assert "users" in _root_names(app)
+        assert app.query_one("#catalog", DataTable).row_count > 0
+
+
+async def test_5_on_an_empty_catalog_tab_loads_the_root_itself(deep_catalog) -> None:
+    # Catalog tab active, no listing, nothing loading: a notebook that failed
+    # to compile, then fixed by a watch recompile. No tab activation follows
+    # 5, so 5 has to start the root load itself.
+    broken = deep_catalog.parent / "broken.qsql"
+    broken.write_text("-- @cell a\nSELECT * FROM {{ ref('missing') }};\n")
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("5")
+        await _settle(app, pilot)
+        app._load_notebook(broken)
+        await _settle(app, pilot)
+        assert app.project is None and app.catalog_stack == []
+        broken.write_text("-- @cell fixed\nSELECT 1 AS x;\n")
+        app._on_recompiled(compile_file(broken))
+        await pilot.press("5")
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        assert len(app.catalog_stack) == 1
+        assert "fixed" in _root_names(app)
+
+
+async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeypatch) -> None:
+    # S starts the root load itself *and* activates the tab, whose handler
+    # also wants the root: only one load may start, or two roots get pushed
+    import quicksql.tui as tui
+
+    calls = []
+    real = tui.project_root_node
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tui, "project_root_node", counting)
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("S")
+        await _settle(app, pilot)
+        assert len(calls) == 1
+        assert len(app.catalog_stack) == 1
+        assert app.mode == "catalog"
+
+
 async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
     # S while dived in the Data sheet lands in a clean catalog dive: the
     # data-pane dive is dropped and keys route to the catalog listing, never
