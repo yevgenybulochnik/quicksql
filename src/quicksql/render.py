@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from jinja2 import Environment, StrictUndefined, TemplateError
+from jinja2 import StrictUndefined, TemplateError
+from jinja2.sandbox import SandboxedEnvironment
 
 from .errors import ConfigError
 from .registry import PLUGINS
@@ -124,7 +125,9 @@ def render_sql(
     )
     context = build_context(rctx)
 
-    jinja = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
+    # sandboxed: a template may call its globals but not walk from them to
+    # Python internals (`__globals__`, `__mro__`), so it can't run arbitrary code
+    jinja = SandboxedEnvironment(undefined=StrictUndefined, keep_trailing_newline=True)
     try:
         sql = jinja.from_string(sql_raw).render(**context)
     except TemplateError as exc:
