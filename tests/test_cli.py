@@ -60,6 +60,23 @@ def test_run_failure_exits_nonzero(tmp_path) -> None:
     assert "broken" in result.output
 
 
+def test_run_failure_prints_the_engine_message_and_its_context(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text("-- @cell a\nSELECT * FROM nope;")
+    result = runner.invoke(app, ["run", str(f)])
+    assert result.exit_code == 1
+    lines = result.output.splitlines()
+    fail = next(line for line in lines if "FAIL a:" in line)
+    assert fail.strip() == "FAIL a: Catalog Error: Table with name nope does not exist!"
+    # duckdb's LINE/caret context follows, indented as a block so the caret
+    # still points at the missing table
+    context = lines[lines.index(fail) + 1 :]
+    sql_line = next(line for line in context if "LINE 1:" in line)
+    caret = context[context.index(sql_line) + 1]
+    assert caret.strip() == "^"
+    assert caret.index("^") == sql_line.index("nope")
+
+
 def test_run_summary_reports_skipped_downstream(tmp_path) -> None:
     f = tmp_path / "bad.sql"
     f.write_text(
