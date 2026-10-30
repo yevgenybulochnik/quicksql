@@ -9,9 +9,14 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   the CLI (`b80d936`, `08eb63b`, `7185bba`). The core of Phase 2.
 - Done — `@dev_limit` removed rather than fixed; write `LIMIT` in the cell's SQL
   (`75bffb9`).
-- In progress — readable failures on `fix/readable-failures`: the rest of Phase 2's
-  structured error.
-- Next — the cross-run skip (Phase 2), then the Phase 1 fixes.
+- Done — readable failures: `RunResult.error` is the engine's message, `traceback` rides
+  apart, `ok` is a plain property of `status`; the CLI prints the message with DuckDB's
+  context indented beneath (`439517a..ed58981`).
+- In progress — the cross-run skip (`fix/cross-run-skip`) and `run --json` with exit
+  codes (`feat/run-json`), which finish Phase 2.
+- Next — the Phase 1 fixes, dead code once both branches merge (it touches the same
+  `models.py`/`runner.py` code). The agent-facing CLI beyond `run --json` is planned in
+  `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -35,8 +40,9 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable | 1 |
 | Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 |
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
-| Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 |
-| DuckDB errors print as `FAIL a: ^` | reproduced | 2 (in progress) |
+| Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (in progress) |
+| DuckDB errors print as `FAIL a: ^` | reproduced | 2 (fixed) |
+| DuckDB's `LINE 1:` error context shows the wrapper (`CREATE OR REPLACE TEMP TABLE "a" AS …`), not the cell's SQL (2026-10-30) | reproduced | 3 |
 | Cell protocol duplicated in all 4 executors; `sink_type == "none"` checks | read | 3 |
 | Per-cell `input.duckdb` is silently ignored | reproduced: ran in `:memory:` | 3 |
 | Dropped Postgres connections and expired BigQuery sessions go undetected | read | 3 |
@@ -109,19 +115,22 @@ Sizes are relative: S, M, L.
 - Done: a cell that didn't come out ok leaves `session.materialized`, so an exact rerun
   re-includes it instead of reading its stale temp (Phase 3 also drops it).
 - Done: README notes the behavior change; the CLI prints `skip`, the TUI `⊘`.
-- In progress: `error` is the message — `str(exc)` for quicksql and DuckDB errors, else
+- Done: `error` is the message — `str(exc)` for quicksql and DuckDB errors, else
   prefixed with the exception type — and a separate `traceback` field keeps the
   traceback. The CLI and `RunEvent.line()` print the message, not the traceback's last
-  line. `ok` becomes a plain read-only property (the `InitVar` shim goes).
-- Across runs: `RunSession` remembers each cell's last status, and exact reruns
-  (watch/TUI) pull in any upstream whose last result wasn't ok, the way missing temps
-  already are. Today a same-context upstream is rerun this way, but a cross-context one
-  that failed in an earlier rerun is read stale and its downstream reports ok.
-- `to_dict()` on `RunResult` and `RunEvent`; `quicksql run --json` prints one document and
-  no progress; exit codes 1 = a cell failed, 3 = compile error (2 stays click's usage error).
-- Tests first: the CLI shows DuckDB's `Catalog Error: …`; a cross-context upstream that
-  failed in an earlier rerun is rerun, and its downstream skipped if it fails again; the
-  JSON shape; the exit codes.
+  line; executor errors no longer repeat the cell name. `ok` is a plain read-only
+  property of `status`.
+- In progress (`fix/cross-run-skip`): `RunSession` remembers each cell's last status, and
+  exact reruns (watch/TUI) pull in any upstream whose last result wasn't ok, the way
+  missing temps already are. Today a same-context upstream is rerun this way, but a
+  cross-context one that failed in an earlier rerun is read stale and its downstream
+  reports ok.
+- In progress (`feat/run-json`): `RunResult.to_dict()`; `quicksql run --json [--rows N]`
+  prints one document and no progress; exit codes 1 = a cell failed, 3 = compile error,
+  for every command (2 stays click's usage error). `RunEvent.to_dict()` waits for JSON
+  watch events (`docs/agent-cli-plan.md`).
+- Tests first: a cross-context upstream that failed in an earlier rerun is rerun, and its
+  downstream skipped if it fails again; the JSON shape; the exit codes.
 
 **Phase 3 — the runner owns the cell protocol (L).**
 - Executors open one session per context with `execute(sql)`, `materialize(name, sql)`,
@@ -314,8 +323,8 @@ one focused change at a time, each on its own worktree branch.
 - A from-scratch rewrite, or moving modules into `core/` and `ext/` packages;
   import-linter enforces the layering on the current layout.
 - The agent-facing CLI beyond `run --json` and `status`: `check`, `catalog`,
-  `status --wait`, JSON watch events and a Claude Code skill for notebooks. Separate plan;
-  Phases 2 and 8 lay its foundations.
+  `status --wait`, JSON watch events and a Claude Code skill for notebooks. Planned in
+  `docs/agent-cli-plan.md`; Phases 2 and 8 lay its foundations.
 - An MCP server.
 - pluggy. It fits about half of today's hooks; revisit only if pip-installable
   third-party plugins become a goal.
