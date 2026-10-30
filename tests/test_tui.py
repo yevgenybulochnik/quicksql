@@ -829,6 +829,78 @@ async def test_digits_typed_into_search_or_filter_dont_switch_tabs(deep_catalog)
         assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
 
 
+async def test_escape_leaves_the_catalog_dive_without_popping(deep_catalog) -> None:
+    # Esc hands keys back to the cell list but stays on the Catalog tab with
+    # the dive kept, so h/l cycle tabs again; cycling back and Enter resumes
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        kept = list(app.catalog_stack)
+        tabs = app.query_one(TabbedContent)
+        await pilot.press("escape")
+        await _settle(app, pilot)
+        assert app.mode == "cells"
+        assert tabs.active == "tab_catalog"
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("h")  # a tab cycle now, not a column move
+        await _settle(app, pilot)
+        assert tabs.active == "tab_log"
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("l")
+        await _settle(app, pilot)
+        assert tabs.active == "tab_catalog"
+        assert app.mode == "cells"
+        await pilot.press("enter")
+        assert app.mode == "catalog"
+        assert _same_sheets(app.catalog_stack, kept)
+        assert app.query_one("#catalog", DataTable).cursor_row == 37
+        await pilot.press("q")  # q still pops one level
+        assert len(app.catalog_stack) == 2
+        assert app.mode == "catalog"
+
+
+async def test_escape_that_closes_an_input_or_overlay_stays_in_the_dive(deep_catalog) -> None:
+    # Esc first closes what's on top (filter input, help); only the next Esc
+    # leaves the dive
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        await pilot.press("f", "c", "escape")  # cancel a live filter
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        assert app.catalog_stack[-1].frame.height == 40
+        await pilot.press("question_mark")
+        await pilot.pause()
+        await pilot.press("escape")  # close the help overlay
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        await pilot.press("escape")
+        assert app.mode == "cells"
+
+
+async def test_escape_in_a_data_dive_hands_keys_back_to_the_cell_list(notebook) -> None:
+    # same in data mode: keys back to the cell list on the Data tab (a split
+    # collapses to the focused pane); the sheet then follows the selection
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        tabs = app.query_one(TabbedContent)
+        await pilot.press("enter", "F", "|")  # dive, freq sheet, split
+        assert app.mode == "data" and app.split
+        await pilot.press("escape")
+        await _settle(app, pilot)
+        assert app.mode == "cells"
+        assert tabs.active == "tab_data"
+        assert not app.split
+        await pilot.press("j")  # j moves the cell list; the Data sheet follows
+        assert app.current_cell == "events"
+        assert [s.title for s in app.sheet_stack] == ["events"]
+        await pilot.press("l")  # and l cycles tabs again
+        await _settle(app, pilot)
+        assert tabs.active == "tab_config"
+
+
 async def test_notebook_switch_resets_a_kept_catalog_dive(deep_catalog) -> None:
     other = write_scaffold(deep_catalog.parent / "base.qsql")
     app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
