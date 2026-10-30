@@ -601,9 +601,6 @@ class QsqlApp(App):
         )
         stack = f" · sheets:{len(self.sheet_stack)}" if self.sheet_stack else ""
         self.sub_title = f"{name} · sql:{label}{stack}"
-        result = self.results.get(name)
-        if result and not result.ok and result.error:
-            self.log_line(f"{name} {result.status}:\n{result.error}")
 
     MAX_DATA_ROWS = 200
     MAX_DATA_COLS = 40  # window rendered around the cursor; re-windows at the edges
@@ -1284,6 +1281,11 @@ class QsqlApp(App):
         missing-temp and not-ok upstreams included — the select list undercounts those),
         and each cell_finished retires its cell so status flips one at a time."""
         self.log_line(event.line())
+        result = event.result if event.kind == "cell_finished" else None
+        if result is not None and result.status == "failed" and result.error:
+            # the full message, once per result: the line above keeps only its
+            # first line (a skipped cell's line already says it all)
+            self.log_line(f"{event.cell} failed:\n{result.error}")
         if gen != self._run_gen:
             return  # a replaced run may still be draining: log it, never show it
         if event.kind == "run_started":
