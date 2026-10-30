@@ -82,6 +82,10 @@ cells still run:
 *Behavior change:* earlier versions ran the downstream cells anyway, on the previous run's
 output, and reported them ok.
 
+Across reruns too: when watch or the TUI reruns a cell whose upstream failed (or was
+skipped) earlier in the session, it reruns that upstream first, so the cell never reads its
+stale output.
+
 ## Anatomy of a cell
 
 A cell is **input → engine → output**. The file is parsed into cells at each `-- @cell
