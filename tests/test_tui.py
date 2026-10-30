@@ -1234,6 +1234,29 @@ async def test_failed_cell_detail_log_shows_the_message_not_a_traceback(tmp_path
         assert "Traceback" not in text
 
 
+async def test_failed_cell_message_is_logged_once_not_per_cursor_move(tmp_path) -> None:
+    from textual.widgets import RichLog
+
+    path = tmp_path / "base.qsql"
+    path.write_text("-- @cell a\nSELECT * FROM nope;\n\n-- @cell b\nSELECT 1 AS x;\n")
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one(TabbedContent).active = "tab_log"
+        await pilot.pause()
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        log = app.query_one("#log", RichLog)
+        assert app.current_cell == "a"  # the failed cell is selected
+        logged = len(log.lines)
+        await pilot.press("j", "k", "j", "k")  # away and back, twice
+        await pilot.pause()
+        assert app.current_cell == "a"
+        assert len(log.lines) == logged  # selecting it logs nothing new
+        text = "\n".join(s.text for s in log.lines)
+        assert text.count("a failed:\nCatalog Error") == 1
+
+
 # ---------- one run session per notebook ----------
 
 
