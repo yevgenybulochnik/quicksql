@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import date, time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -107,6 +109,44 @@ class RunResult:
     def pl(self) -> Any:
         """The Polars preview frame of the landed output (None on failure)."""
         return self.preview
+
+    def to_dict(self, rows: int = 0) -> dict[str, Any]:
+        """The outcome as JSON-safe values. ``rows`` > 0 adds ``preview``:
+        up to that many rows of the cached preview (itself at most 100), or
+        None when there is none (a failed or skipped cell)."""
+        out: dict[str, Any] = {
+            "cell": self.cell,
+            "status": self.status,
+            "rows": self.rows,
+            "target": self.target,
+            "elapsed": self.elapsed,
+            "error": self.error,
+            "traceback": self.traceback,
+        }
+        if rows > 0:
+            frame = self.preview
+            out["preview"] = None if frame is None else {
+                "columns": list(frame.columns),
+                "rows": [[_jsonable(v) for v in row] for row in frame.head(rows).rows()],
+            }
+        return out
+
+
+def _jsonable(value: Any) -> Any:
+    """One preview value as JSON: dates as ISO text, non-finite floats as
+    text (JSON has no NaN), lists/structs recursively, anything else —
+    Decimal (kept exact), bytes, timedelta, UUID — as its str()."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (date, time)):  # datetime is a date
+        return value.isoformat()
+    return str(value)
 
 
 @dataclass(frozen=True)
