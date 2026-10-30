@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from jinja2 import StrictUndefined, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
+from pydantic import BaseModel
 
 from .errors import ConfigError
 from .registry import PLUGINS
@@ -106,6 +107,22 @@ def build_context(rctx: RenderContext) -> dict[str, Any]:
     return context
 
 
+class _SqlSandbox(SandboxedEnvironment):
+    """Jinja's sandbox, plus: a pydantic model exposes only its fields.
+
+    The base sandbox hides underscore attributes but lets a template call any
+    public method, and every model has some that reach outside the template
+    (``parse_file(path)`` reads from disk). Every global is checked, the
+    builtin ``config`` included; nested models go through the same check on
+    each attribute lookup.
+    """
+
+    def is_safe_attribute(self, obj: Any, attr: str, value: Any) -> bool:
+        if isinstance(obj, BaseModel):
+            return attr in type(obj).model_fields
+        return super().is_safe_attribute(obj, attr, value)
+
+
 def render_sql(
     name: str,
     sql_raw: str,
@@ -127,7 +144,7 @@ def render_sql(
 
     # sandboxed: a template may call its globals but not walk from them to
     # Python internals (`__globals__`, `__mro__`), so it can't run arbitrary code
-    jinja = SandboxedEnvironment(undefined=StrictUndefined, keep_trailing_newline=True)
+    jinja = _SqlSandbox(undefined=StrictUndefined, keep_trailing_newline=True)
     try:
         sql = jinja.from_string(sql_raw).render(**context)
     except TemplateError as exc:
