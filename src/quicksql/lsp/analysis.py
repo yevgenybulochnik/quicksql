@@ -124,7 +124,7 @@ class Analyzer:
         source = cell.source
         if alias_m is not None:
             source = _patch_dangling(cell, line, character, alias_m.start(1))
-        scope = _resolve_scope(project, cell, source, line, character)
+        scope = _resolve_scope(cell, source, line, character)
         relations = [scope[alias]] if alias and alias in scope else list(scope.values())
 
         seen: set[str] = set()
@@ -283,7 +283,6 @@ def _statement_slice(
 
 
 def _resolve_scope(
-    project: Any,
     cell: Any,
     source: str | None = None,
     line: int | None = None,
