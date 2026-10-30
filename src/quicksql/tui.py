@@ -314,6 +314,7 @@ class QsqlApp(App):
         self.active_pane = 0
         self.catalog_stack: list[Sheet] = []  # the Catalog tab's own dive
         self._catalog_dive_pending = False  # S pressed while the root loads
+        self._catalog_root_loading = False  # a root load is in flight
         self.hashes: dict[str, str] = {}
         self._row_names: list[str] = []
         self._pending_g = False
@@ -444,8 +445,10 @@ class QsqlApp(App):
         self.active_pane = 0
         self.catalog_stack = []
         self._catalog_dive_pending = False
+        self._catalog_root_loading = False
         self._catalog_cache.invalidate()
         self._data_shown = [None] * 3
+        self._refresh_catalog()  # the old listing must not show under this notebook
         self._sync_split_layout()
         self.mode = "cells"
         self.armed = False
@@ -459,6 +462,8 @@ class QsqlApp(App):
         self.hashes = hashes_of(self.project)
         self._refresh_cells()
         self._refresh_detail()
+        if self.query_one(TabbedContent).active == "tab_catalog":
+            self._load_catalog_root()  # no activation fires: browse the new root
         if self.auto_run:
             self.action_run_all()
         else:
@@ -866,12 +871,23 @@ class QsqlApp(App):
             return
         tabs = self.query_one(TabbedContent)
         if tabs.active != "tab_catalog":
-            tabs.active = "tab_catalog"  # the activation handler loads a missing root
+            tabs.active = "tab_catalog"
         if self.catalog_stack:
             self.mode = "catalog"
             self._refresh_catalog()
-        else:  # root still loading (threaded worker): dive when it lands
+        else:  # root loads on a threaded worker: dive when it lands
             self._catalog_dive_pending = True
+            # started here, not left to the activation handler: when the tab
+            # is already active, no activation fires
+            self._load_catalog_root()
+
+    def _load_catalog_root(self) -> None:
+        """Load the root listing unless there's a stack or a load in flight —
+        S/5, the tab activation and a notebook switch can all ask at once."""
+        if self.catalog_stack or self._catalog_root_loading or not self.project:
+            return
+        self._catalog_root_loading = True
+        self._catalog_worker(project_root_node(self.project, connect=self._catalog_connect))
 
     def action_refetch(self) -> None:
         """ctrl+r: drop the current catalog sheet's cached frame and reload it."""
@@ -1163,10 +1179,7 @@ class QsqlApp(App):
                 self._show_current_data()
         elif active == "tab_catalog":
             self._drop_data_dive()
-            if not self.catalog_stack and self.project:
-                self._catalog_worker(
-                    project_root_node(self.project, connect=self._catalog_connect)
-                )
+            self._load_catalog_root()
         else:
             self._drop_data_dive()
             self._leave_catalog_dive()
@@ -1235,6 +1248,7 @@ class QsqlApp(App):
             self.call_from_thread(self.log_line, f"catalog {node.title}: {exc}")
             self.call_from_thread(self.notify, f"catalog: {exc}", severity="error")
             self.call_from_thread(setattr, self, "_catalog_dive_pending", False)
+            self.call_from_thread(setattr, self, "_catalog_root_loading", False)
             self.call_from_thread(self._restore_subtitle)  # drop the loading… note
             return
         sheet = Sheet(frame, title=node.title, drill=node)
@@ -1244,6 +1258,7 @@ class QsqlApp(App):
             self.call_from_thread(self._push_catalog_sheet, sheet)
 
     def _push_catalog_sheet(self, sheet: Sheet) -> None:
+        self._catalog_root_loading = False  # a root push lands on an empty stack
         self.catalog_stack.append(sheet)
         if self._catalog_dive_pending:  # S while the root was loading
             self._catalog_dive_pending = False
