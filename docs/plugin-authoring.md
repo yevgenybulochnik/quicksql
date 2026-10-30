@@ -88,7 +88,8 @@ delegating — `quicksql run --set render_dir=build/sql`.
   `Env` (`env`) — each bundled with the directive it consumes. Templates render in
   Jinja's sandbox: contributed globals (and their public methods) are callable, but
   their underscore attributes aren't reachable — anything public is, so don't contribute
-  a module or a live connection.
+  a module or a live connection. A pydantic model instance exposes only its fields (no
+  `parse_file`, `model_validate`, …); contribute instances, not model classes.
 - `after_render(rctx, sql) -> sql | None` — transform rendered SQL; return None to
   keep it. Transformers compose in `(priority, registration)` order. No builtin
   plugin uses this hook; the scratch `Header`/`Footer` plugins in
