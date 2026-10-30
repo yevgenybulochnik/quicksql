@@ -829,18 +829,24 @@ async def test_digits_typed_into_search_or_filter_dont_switch_tabs(deep_catalog)
         assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
 
 
-async def test_escape_leaves_the_catalog_dive_without_popping(deep_catalog) -> None:
-    # Esc hands keys back to the cell list but stays on the Catalog tab with
-    # the dive kept, so h/l cycle tabs again; cycling back and Enter resumes
+@pytest.mark.parametrize("key", ["escape", "ctrl+k"])
+async def test_esc_and_ctrl_k_leave_the_catalog_dive_without_popping(deep_catalog, key) -> None:
+    # Esc (or Ctrl+k, "up") hands keys back to the cell list but stays on the
+    # Catalog tab with the dive kept, so h/l cycle tabs again; cycling back
+    # and Enter resumes
     app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await _dive_three_levels(app, pilot)
         kept = list(app.catalog_stack)
         tabs = app.query_one(TabbedContent)
-        await pilot.press("escape")
+        await pilot.press(key)
         await _settle(app, pilot)
         assert app.mode == "cells"
         assert tabs.active == "tab_catalog"
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press(key)  # already on the cell list: a no-op
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_catalog", "cells")
         assert _same_sheets(app.catalog_stack, kept)
         await pilot.press("h")  # a tab cycle now, not a column move
         await _settle(app, pilot)
@@ -878,7 +884,8 @@ async def test_escape_that_closes_an_input_or_overlay_stays_in_the_dive(deep_cat
         assert app.mode == "cells"
 
 
-async def test_escape_in_a_data_dive_hands_keys_back_to_the_cell_list(notebook) -> None:
+@pytest.mark.parametrize("key", ["escape", "ctrl+k"])
+async def test_esc_and_ctrl_k_in_a_data_dive_hand_keys_back_to_the_cell_list(notebook, key) -> None:
     # same in data mode: keys back to the cell list on the Data tab (a split
     # collapses to the focused pane); the sheet then follows the selection
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
@@ -888,7 +895,7 @@ async def test_escape_in_a_data_dive_hands_keys_back_to_the_cell_list(notebook) 
         tabs = app.query_one(TabbedContent)
         await pilot.press("enter", "F", "|")  # dive, freq sheet, split
         assert app.mode == "data" and app.split
-        await pilot.press("escape")
+        await pilot.press(key)
         await _settle(app, pilot)
         assert app.mode == "cells"
         assert tabs.active == "tab_data"
@@ -899,6 +906,132 @@ async def test_escape_in_a_data_dive_hands_keys_back_to_the_cell_list(notebook) 
         await pilot.press("l")  # and l cycles tabs again
         await _settle(app, pilot)
         assert tabs.active == "tab_config"
+
+
+async def test_ctrl_h_l_step_through_tabs_from_any_mode(notebook) -> None:
+    # Ctrl+h/l are h/l's tab cycle (wrapping at both ends) from any mode, by
+    # the digit keys' rules: landing on the Catalog dives (loading the root
+    # first), any other tab hands keys back to the cell list
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        tabs = app.query_one(TabbedContent)
+        for tab in ("tab_data", "tab_config", "tab_log"):
+            await pilot.press("ctrl+l")
+            await _settle(app, pilot)
+            assert (tabs.active, app.mode) == (tab, "cells")
+        await pilot.press("ctrl+l")
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
+        assert [s.title for s in app.catalog_stack] == ["catalog"]
+        kept = list(app.catalog_stack)
+        await pilot.press("ctrl+l")  # out of the catalog dive, wrapping to SQL
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_sql", "cells")
+        await pilot.press("ctrl+h")  # wrapping back resumes the kept dive
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("2", "enter", "F", "|")  # data dive, freq sheet, split
+        assert app.mode == "data" and app.split
+        await pilot.press("ctrl+l")
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_config", "cells")
+        assert not app.split
+        assert not app.panes[0]  # the data dive was dropped with the tab
+        await pilot.press("ctrl+h")  # back on Data: browsing, the sheet follows
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_data", "cells")
+        assert [s.title for s in app.sheet_stack] == ["users"]
+        await pilot.press("enter", "F")
+        assert app.mode == "data"
+        await pilot.press("ctrl+h")
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_sql", "cells")
+        assert not app.panes[0]
+
+
+async def test_ctrl_h_l_leave_and_resume_a_deep_catalog_dive(deep_catalog) -> None:
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        kept = list(app.catalog_stack)
+        tabs = app.query_one(TabbedContent)
+        for away, back, tab in (("ctrl+h", "ctrl+l", "tab_log"), ("ctrl+l", "ctrl+h", "tab_sql")):
+            await pilot.press(away)
+            await _settle(app, pilot)
+            assert (tabs.active, app.mode) == (tab, "cells"), away
+            assert _same_sheets(app.catalog_stack, kept), away
+            await pilot.press(back)
+            await _settle(app, pilot)
+            assert (tabs.active, app.mode) == ("tab_catalog", "catalog"), back
+            assert _same_sheets(app.catalog_stack, kept), back
+            assert app.query_one("#catalog", DataTable).cursor_row == 37, back
+
+
+async def test_ctrl_j_dives_like_enter_but_never_drills(deep_catalog) -> None:
+    # Ctrl+j ("down") is Enter on the cell list: dive into the Data sheet,
+    # or resume a kept catalog dive. Inside a sheet it does nothing — Enter
+    # would drill a catalog sheet or reset a data sheet to its preview
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        tabs = app.query_one(TabbedContent)
+        await pilot.press("ctrl+j")
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_data", "data")
+        assert [s.title for s in app.sheet_stack] == ["a"]
+        await pilot.press("F", "ctrl+j")
+        assert len(app.sheet_stack) == 2  # no reset to the preview
+        await pilot.press("S")
+        await _settle(app, pilot)
+        names = app.catalog_stack[-1].frame["name"].to_list()
+        await pilot.press(*["j"] * names.index("sqlite:nums.db"), "ctrl+j")
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        assert len(app.catalog_stack) == 1  # no drill into the context
+        kept = list(app.catalog_stack)
+        await pilot.press("escape", "ctrl+j")
+        await _settle(app, pilot)
+        assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("enter")  # whereas Enter drills
+        await _settle(app, pilot)
+        assert len(app.catalog_stack) == 2
+
+
+async def test_ctrl_nav_keys_dont_act_in_the_search_input_or_an_overlay(deep_catalog) -> None:
+    from textual.widgets import Input
+
+    from quicksql.tui import HelpScreen
+
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+
+        async def press_each_staying_put(tab: str, mode: str) -> None:
+            # one at a time: a pair like ctrl+h, ctrl+l would cancel out
+            for key in ("ctrl+h", "ctrl+j", "ctrl+k", "ctrl+l"):
+                await pilot.press(key)
+                await _settle(app, pilot)
+                assert (tabs.active, app.mode) == (tab, mode), key
+
+        await pilot.pause()
+        tabs = app.query_one(TabbedContent)
+        search = app.query_one("#search", Input)
+        await pilot.press("slash")
+        await press_each_staying_put("tab_sql", "cells")
+        assert search.has_focus
+        await pilot.press("escape", "S")
+        await _settle(app, pilot)
+        await pilot.press("f")
+        await press_each_staying_put("tab_catalog", "catalog")
+        assert search.has_focus
+        await pilot.press("escape", "question_mark")
+        await _settle(app, pilot)
+        await press_each_staying_put("tab_catalog", "catalog")
+        assert isinstance(app.screen, HelpScreen)
 
 
 async def test_notebook_switch_resets_a_kept_catalog_dive(deep_catalog) -> None:
