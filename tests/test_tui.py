@@ -1144,7 +1144,8 @@ async def test_question_mark_opens_help_overlay_covering_all_key_layers(notebook
         for key in keys.split("/")
     }
     # footer bindings and on_key-only keys alike are covered
-    for key in ("r", "R", "S", "y", "f", "gg", "[", "]", "-", "n", "?", "|", "w"):
+    keys = ("r", "R", "S", "y", "f", "gg", "[", "]", "-", "n", "?", "|", "w", "esc", *"12345")
+    for key in keys:
         assert key in documented, f"{key!r} missing from the help overlay"
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
