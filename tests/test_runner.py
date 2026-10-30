@@ -104,6 +104,30 @@ def test_failed_cell_reports_error_and_run_continues(tmp_path) -> None:
     assert results["good"].ok is True
 
 
+def test_failed_result_splits_message_from_traceback(tmp_path) -> None:
+    """error is the engine's own message (self-describing for duckdb);
+    the traceback rides separately for whoever wants to debug."""
+    project = compile_text("-- @cell a\nSELECT * FROM nope;", root=tmp_path)
+    [result] = project.run()
+    assert result.status == "failed"
+    assert result.error.startswith("Catalog Error: Table with name nope does not exist!")
+    assert "LINE 1:" in result.error  # duckdb's context, kept for the terminal
+    assert "Traceback" not in result.error
+    assert "Traceback" in result.traceback
+
+
+def test_plugin_bug_message_names_the_exception_type(tmp_path) -> None:
+    @plugin
+    class Buggy(Plugin):
+        def run(self, cell, ctx, inner):
+            raise KeyError("x")
+
+    [result] = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path).run()
+    assert result.status == "failed"
+    assert result.error == "KeyError: 'x'"
+    assert "Traceback" in result.traceback
+
+
 # ---------- a failed upstream skips its downstream ----------
 
 
@@ -538,9 +562,14 @@ def test_run_event_line_renders_each_kind() -> None:
     assert RunEvent("cell_finished", "a", result=ok).line() == (
         "a: ok — 3 rows in 12 ms -> data/a.parquet"
     )
-    bad = RunResult(cell="a", status="failed", error="Traceback ...\nBinder Error: no table")
+    bad = RunResult(
+        cell="a",
+        status="failed",
+        error="Catalog Error: Table with name nope does not exist!\n"
+        "\nLINE 1: SELECT * FROM nope\n                      ^",
+    )
     assert RunEvent("cell_finished", "a", result=bad).line() == (
-        "a: FAILED — Binder Error: no table"
+        "a: FAILED — Catalog Error: Table with name nope does not exist!"
     )
     assert RunEvent("cell_started", "a", "duckdb → parquet").line() == (
         "a: started (duckdb → parquet)"
