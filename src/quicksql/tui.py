@@ -1029,6 +1029,8 @@ class QsqlApp(App):
             self._switch_pane()
         elif ch in self.TAB_KEYS:
             self._jump_to_tab(self.TAB_KEYS[ch])
+        elif event.key == "escape":
+            self._leave_dive()
 
     TAB_ORDER = ["tab_sql", "tab_data", "tab_config", "tab_log", "tab_catalog"]
     TAB_KEYS = dict(zip("12345", TAB_ORDER))
