@@ -636,11 +636,19 @@ class QsqlApp(App):
     _SELECT_MARK = "▸"
     CATALOG_SLOT = 2  # the catalog table's _data_shown slot
 
-    def _refresh_catalog(self) -> None:
+    def _refresh_catalog(self, deferred: bool = False) -> None:
         table = self.query_one("#catalog", DataTable)
         if not self.catalog_stack:
             table.clear(columns=True)
             self._data_shown[self.CATALOG_SLOT] = None
+            return
+        if self.mode == "catalog" and not table.size and not deferred:
+            # S/5/ctrl+h/l just showed the tab (or a key came in the same frame)
+            # and it isn't laid out yet: a cursor placed now scrolls into a 0x0
+            # viewport, jumping the scroll, and a sizeless widget marks nothing
+            # to repaint, so the terminal keeps the old lines. Render once it
+            # has its size — once only, as a compact terminal never gives it one.
+            self.call_after_refresh(self._refresh_catalog, deferred=True)
             return
         self._render_sheet_table(
             self.catalog_stack[-1],
