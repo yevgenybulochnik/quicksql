@@ -313,6 +313,20 @@ def test_run_json_other_compile_errors_have_no_cell_or_line(tmp_path) -> None:
     ]
 
 
+def test_run_json_other_errors_before_cells_still_print_one_document(tmp_path) -> None:
+    f = _init(tmp_path)
+    result, doc = _json_run(f, "--plugins", "no_such_module")
+    assert result.exit_code == 1
+    assert doc["status"] == "error"
+    assert doc["cells"] == []
+    assert doc["summary"] == {"ok": 0, "failed": 0, "skipped": 0}
+    assert doc["errors"] == [{
+        "cell": None,
+        "line": None,
+        "message": "ModuleNotFoundError: No module named 'no_such_module'",
+    }]
+
+
 def test_run_json_keeps_compile_warnings_on_stderr(tmp_path) -> None:
     f = tmp_path / "warn.sql"
     f.write_text("-- @cell a\n-- @autorun: true\n/*@ autorun: false */\nSELECT 1 AS x;\n")
