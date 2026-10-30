@@ -1214,3 +1214,21 @@ async def test_skipped_downstream_shows_a_distinct_status(tmp_path) -> None:
         assert _row(app, "b")[3] == "⊘"
         assert app.results["b"].status == "skipped"
         assert _row(app, "b")[4] == ""  # nothing landed, so no row count
+
+
+async def test_failed_cell_detail_log_shows_the_message_not_a_traceback(tmp_path) -> None:
+    from textual.widgets import RichLog
+
+    path = tmp_path / "base.qsql"
+    path.write_text("-- @cell a\nSELECT * FROM nope;\n")
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        # a hidden tab's RichLog has no width and defers rendering — show it first
+        app.query_one(TabbedContent).active = "tab_log"
+        await pilot.pause()
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = "\n".join(s.text for s in app.query_one("#log", RichLog).lines)
+        assert "a failed:\nCatalog Error: Table with name nope does not exist!" in text
+        assert "Traceback" not in text
