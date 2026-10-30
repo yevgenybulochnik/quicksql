@@ -167,7 +167,7 @@ class HelpScreen(ModalScreen):
         ("Cells", [
             ("j/k", "move the cell selection"),
             ("gg/G", "first / last cell"),
-            ("h/l", "cycle detail tabs (SQL / Data / Config / Log)"),
+            ("h/l", "cycle detail tabs (SQL / Data / Config / Log / Catalog)"),
             ("enter", "dive into the Data sheet"),
             ("/", "search cell names"),
             ("r/R", "run cell / run all (R also arms watch reruns)"),
@@ -191,10 +191,12 @@ class HelpScreen(ModalScreen):
             ("I", "describe (summary stats)"),
             ("y", "yank cell / selected column to clipboard"),
             ("q", "pop the sheet (back a level)"),
+            ("esc", "back to the cell list without popping"),
         ]),
         ("Catalog tab", [
-            ("S", "jump to the Catalog tab and dive in"),
+            ("S/5", "jump to the Catalog tab and dive in (resumes a kept dive)"),
             ("enter", "dive, then drill: context → dataset → table → fields"),
+            ("esc", "back to the cell list; the dive is kept"),
             ("ctrl+r", "refetch the current level"),
             ("q", "pop back a level, then out to the cell list"),
         ]),
@@ -203,6 +205,7 @@ class HelpScreen(ModalScreen):
             ("w", "switch the focused pane (each navigates on its own)"),
         ]),
         ("General", [
+            ("1/2/3/4/5", "jump to SQL / Data / Config / Log / Catalog"),
             ("?", "this help"),
             ("q", "pop / quit"),
         ]),

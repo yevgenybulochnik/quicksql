@@ -330,10 +330,11 @@ existing `.qsql` files plus starter templates.
 |---|---|---|---|
 | `j`/`k`, `Enter` | move / dive into a cell or catalog | `F` | frequency table for a column |
 | `r` / `R` | run cell / run all | `I` | describe a column |
-| `t` | toggle raw ↔ rendered SQL | `S` | schema-browser catalog |
+| `t` | toggle raw ↔ rendered SQL | `S` | schema-browser catalog (resumes where you left it) |
 | `a` / `A` | toggle autorun (cell / global) | `V` | open the row set in real VisiData |
 | `/` | search | `o` | open another notebook |
 | `?` | help | `Ctrl+R` | refetch |
+| `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the catalog dive is kept) |
 
 `watch` and the TUI hash **SQL bodies** to decide what changed, so config-only edits don't
 trigger reruns (they're logged as `config changed (no rerun)`).
