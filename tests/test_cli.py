@@ -235,6 +235,14 @@ def test_run_json_all_ok(tmp_path) -> None:
     assert "preview" not in users  # only with --rows
 
 
+def test_run_json_piped_is_one_compact_line(tmp_path) -> None:
+    f = _init(tmp_path)
+    result, doc = _json_run(f, "--rows", "2")
+    # a pipe (an agent, jq) gets one line; a terminal gets it indented
+    assert result.stdout.count("\n") == 1
+    assert doc["elapsed"] == round(doc["elapsed"], 4)  # seconds, to 0.1 ms
+
+
 def test_run_json_failed_skipped_and_independent_cells(tmp_path) -> None:
     f = tmp_path / "bad.sql"
     f.write_text(

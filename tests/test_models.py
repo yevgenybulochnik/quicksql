@@ -75,3 +75,8 @@ def test_to_dict_preview_values_are_json_safe() -> None:
         ["2024-01-02"],
         {"at": "2024-01-02"},
     ]]
+
+
+def test_to_dict_elapsed_is_seconds_to_a_tenth_of_a_ms() -> None:
+    result = RunResult(cell="a", status="ok", elapsed=0.123456789)
+    assert result.to_dict()["elapsed"] == 0.1235
