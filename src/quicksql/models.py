@@ -58,7 +58,6 @@ class RenderedCell:
     sink_type: str
     depends_on: list[str] = field(default_factory=list)
     extensions: list[str] = field(default_factory=list)
-    uses_sources: bool = False
     line: int = 0
     line_end: int = 0
     source: str = ""

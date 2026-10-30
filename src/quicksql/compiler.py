@@ -134,7 +134,6 @@ def compile_text(
             sink_type=resolve_sink_type(cfg),
             depends_on=deps,
             extensions=extensions,
-            uses_sources=rec.used_source,
             line=blk.line,
             line_end=blk.line_end,
             source=blk.source,

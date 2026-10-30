@@ -77,7 +77,6 @@ def test_named_source_resolves_reader_and_records_extension(tmp_path) -> None:
     q1 = project.cells["q1"]
     assert f"read_xlsx('{tmp_path}/data/sales.xlsx', sheet='Q1')" in q1.sql
     assert "excel" in q1.extensions
-    assert q1.uses_sources
 
 
 def test_inline_path_source(tmp_path) -> None:
