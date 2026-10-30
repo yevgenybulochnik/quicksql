@@ -1048,21 +1048,31 @@ class QsqlApp(App):
             self._switch_pane()
         elif ch in self.TAB_KEYS:
             self._jump_to_tab(self.TAB_KEYS[ch])
-        elif event.key == "escape":
+        # vim-style ctrl keys, the same from any mode: h/l step through the
+        # tabs, k climbs to the cell list (Esc), j dives from it (Enter)
+        elif event.key in ("ctrl+h", "ctrl+l"):
+            self._jump_to_tab(self._tab_after(1 if event.key == "ctrl+l" else -1))
+        elif event.key in ("escape", "ctrl+k"):
             self._leave_dive()
+        elif event.key == "ctrl+j" and self.mode == "cells":
+            self._activate_current_row()  # not in a sheet, where Enter drills
 
     TAB_ORDER = ["tab_sql", "tab_data", "tab_config", "tab_log", "tab_catalog"]
     TAB_KEYS = dict(zip("12345", TAB_ORDER))
 
-    def _cycle_tab(self, delta: int) -> None:
+    def _tab_after(self, delta: int) -> str:
         tabs = self.query_one(TabbedContent)
         idx = self.TAB_ORDER.index(tabs.active) if tabs.active in self.TAB_ORDER else 0
-        tabs.active = self.TAB_ORDER[(idx + delta) % len(self.TAB_ORDER)]
+        return self.TAB_ORDER[(idx + delta) % len(self.TAB_ORDER)]
+
+    def _cycle_tab(self, delta: int) -> None:
+        self.query_one(TabbedContent).active = self._tab_after(delta)
 
     def _jump_to_tab(self, tab: str) -> None:
-        """1-5, from any mode. 5 is S; 1-4 land with keys back on the cell
-        list — handed back here, since 2 on the Data tab activates nothing —
-        and the activation handler drops a Data dive left behind."""
+        """1-5 and ctrl+h/l, from any mode. The Catalog tab is S; the others
+        land with keys back on the cell list — handed back here, since 2 on
+        the Data tab activates nothing — and the activation handler drops a
+        Data dive left behind."""
         if tab == "tab_catalog":
             self.action_catalog()
             return
