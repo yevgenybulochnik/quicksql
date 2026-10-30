@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -209,3 +210,112 @@ def test_run_streams_progress_lines(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert "users: executing on duckdb" in result.output
     assert "landing via parquet" in result.output
+
+
+def _json_run(f: Path, *args: str):
+    result = runner.invoke(app, ["run", str(f), "--json", *args])
+    # stdout is exactly one JSON document: no progress lines, no colours
+    return result, json.loads(result.stdout)
+
+
+def test_run_json_all_ok(tmp_path) -> None:
+    f = _init(tmp_path)
+    result, doc = _json_run(f)
+    assert result.exit_code == 0, result.output
+    assert doc["file"] == str(f)
+    assert doc["status"] == "ok"
+    assert doc["errors"] == []
+    assert doc["summary"] == {"ok": 3, "failed": 0, "skipped": 0}
+    assert isinstance(doc["elapsed"], float)
+    assert [c["cell"] for c in doc["cells"]] == ["users", "events", "active_user_events"]
+    users = doc["cells"][0]
+    assert users["status"] == "ok"
+    assert users["rows"] == 3
+    assert users["target"].endswith("data/users.parquet")
+    assert "preview" not in users  # only with --rows
+
+
+def test_run_json_failed_skipped_and_independent_cells(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text(
+        "-- @cell broken\nSELECT * FROM no_such_table;\n"
+        "-- @cell downstream\nSELECT * FROM {{ ref('broken') }};\n"
+        "-- @cell independent\nSELECT 1 AS x;\n"
+    )
+    result, doc = _json_run(f)
+    assert result.exit_code == 1
+    assert doc["status"] == "failed"
+    assert doc["summary"] == {"ok": 1, "failed": 1, "skipped": 1}
+    cells = {c["cell"]: c for c in doc["cells"]}
+    assert {name: c["status"] for name, c in cells.items()} == {
+        "broken": "failed", "downstream": "skipped", "independent": "ok",
+    }
+    broken = cells["broken"]
+    # the engine's message, not the traceback's last line
+    assert broken["error"].splitlines()[0] == (
+        "Catalog Error: Table with name no_such_table does not exist!"
+    )
+    assert "Traceback" in broken["traceback"]
+    assert cells["downstream"]["error"] == "upstream 'broken' failed"
+    assert doc["errors"] == []  # cell failures live on the cells
+
+
+def test_run_json_rows_adds_previews(tmp_path) -> None:
+    f = _init(tmp_path)
+    _, doc = _json_run(f, "--rows", "2")
+    for cell in doc["cells"]:
+        assert len(cell["preview"]["rows"]) == 2, cell["cell"]
+    assert doc["cells"][0]["preview"]["columns"][0] == "user_id"
+
+
+def test_run_json_preview_values_survive_json(tmp_path) -> None:
+    f = tmp_path / "types.sql"
+    f.write_text(
+        "-- @cell typed\n"
+        "SELECT DATE '2024-01-02' AS d, 1.50::DECIMAL(4, 2) AS amount, 'nan'::DOUBLE AS r;\n"
+    )
+    result, doc = _json_run(f, "--rows", "1")
+    assert result.exit_code == 0, result.output
+    assert doc["cells"][0]["preview"]["rows"] == [["2024-01-02", "1.50", "nan"]]
+
+
+def test_run_json_compile_error_lists_cell_and_line(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text("-- @cell a\nSELECT 1;\n-- @cell b\n-- @bogus: 1\nSELECT 2;\n")
+    result, doc = _json_run(f)
+    assert result.exit_code == 3
+    assert doc["status"] == "compile_error"
+    assert doc["errors"] == [{"cell": "b", "line": 3, "message": "unknown directive: @bogus"}]
+    assert doc["cells"] == []
+    assert doc["summary"] == {"ok": 0, "failed": 0, "skipped": 0}
+
+
+def test_run_json_other_compile_errors_have_no_cell_or_line(tmp_path) -> None:
+    f = tmp_path / "bad.sql"
+    f.write_text("-- @bogus: 1\n-- @cell a\nSELECT 1;\n")  # header: no cell group
+    result, doc = _json_run(f)
+    assert result.exit_code == 3
+    assert doc["errors"] == [{"cell": None, "line": None, "message": "unknown directive: @bogus"}]
+    ok = _init(tmp_path)
+    result, doc = _json_run(ok, "--select", "ghost")
+    assert result.exit_code == 3
+    assert doc["status"] == "compile_error"
+    assert doc["errors"] == [
+        {"cell": None, "line": None, "message": "unknown cell(s) in --select: ghost"}
+    ]
+
+
+def test_run_json_keeps_compile_warnings_on_stderr(tmp_path) -> None:
+    f = tmp_path / "warn.sql"
+    f.write_text("-- @cell a\n-- @autorun: true\n/*@ autorun: false */\nSELECT 1 AS x;\n")
+    result, doc = _json_run(f)
+    assert result.exit_code == 0, result.output
+    assert doc["status"] == "ok"
+    assert "warning: directive 'autorun' at line 3" in result.stderr
+
+
+def test_run_rows_needs_json(tmp_path) -> None:
+    f = _init(tmp_path)
+    result = runner.invoke(app, ["run", str(f), "--rows", "2"])
+    assert result.exit_code == 2  # a usage error
+    assert "--json" in result.output
