@@ -119,7 +119,7 @@ class RunResult:
             "status": self.status,
             "rows": self.rows,
             "target": self.target,
-            "elapsed": self.elapsed,
+            "elapsed": round(self.elapsed, 4),  # seconds, to 0.1 ms
             "error": self.error,
             "traceback": self.traceback,
         }

@@ -177,12 +177,14 @@ def _run_json(
         "file": str(file),
         "status": status,
         "summary": {s: counts[s] for s in ("ok", "failed", "skipped")},
-        "elapsed": time.perf_counter() - started,
+        "elapsed": round(time.perf_counter() - started, 4),
         "errors": errors,
         "cells": [r.to_dict(rows) for r in results],
     }
+    # indented for a terminal, one line for a pipe (an agent, jq) — like gh.
     # to_dict is JSON-safe; default=str covers a plugin's odd target (a Path, ...)
-    typer.echo(json.dumps(doc, indent=2, default=str))
+    indent = 2 if sys.stdout.isatty() else None
+    typer.echo(json.dumps(doc, indent=indent, default=str))
     if status != "ok":
         raise typer.Exit(EXIT_COMPILE if errors else EXIT_FAILED)
 
