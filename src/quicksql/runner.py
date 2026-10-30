@@ -211,7 +211,6 @@ def run_project(
     ctx = RunContext(
         conn=session.conduit(project),
         root=project.root,
-        overrides=project.overrides,
         config=project.config,
         tmpdir=session.tmpdir,
         ext_cache=session.loaded_extensions,
