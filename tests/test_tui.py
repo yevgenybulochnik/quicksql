@@ -1232,3 +1232,140 @@ async def test_failed_cell_detail_log_shows_the_message_not_a_traceback(tmp_path
         text = "\n".join(s.text for s in app.query_one("#log", RichLog).lines)
         assert "a failed:\nCatalog Error: Table with name nope does not exist!" in text
         assert "Traceback" not in text
+
+
+# ---------- one run session per notebook ----------
+
+
+def _two_notebooks(tmp_path):
+    """Same cell names, different SQL: a reused session would serve
+    notebook one's temp table `a` to notebook two's `b`."""
+    one = tmp_path / "one.qsql"
+    one.write_text("-- @cell a\nSELECT 1 AS x;\n\n-- @cell b\nSELECT x FROM {{ ref('a') }};\n")
+    two = tmp_path / "two.qsql"
+    two.write_text(one.read_text().replace("SELECT 1 AS x", "SELECT 2 AS x"))
+    return one, two
+
+
+async def test_notebook_switch_gets_its_own_run_session(tmp_path) -> None:
+    one, two = _two_notebooks(tmp_path)
+    app = QsqlApp(path=one, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        first = app.session
+        await pilot.press("o")
+        await pilot.pause()
+        await pilot.press("down", "enter")  # [one], two, create base.qsql
+        await pilot.pause()
+        assert app.path == two
+        await pilot.press("p")  # arm watch reruns in notebook two
+        two.write_text(two.read_text().replace("SELECT x FROM", "SELECT x * 10 AS x FROM"))
+        assert app._on_recompiled(compile_file(two)) == ["b"]  # exact rerun of b
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        # b read notebook two's a (2), not notebook one's live temp (1)
+        assert app.results["b"].preview["x"].to_list() == [20]
+        assert app.session is not first
+
+
+async def test_idle_notebook_switch_closes_the_old_session(tmp_path) -> None:
+    one, two = _two_notebooks(tmp_path)
+    app = QsqlApp(path=one, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        first = app.session
+        assert first.conn is not None
+        app._load_notebook(two)
+        assert first.conn is None  # no run uses it: closed right away
+
+
+def _gated_engine():
+    """Register a `gated` engine whose cells block mid-execute until `gate`
+    is set; `reached` fires once one is blocked there."""
+    import threading
+
+    from quicksql.executors.base import Executor, register_frame, result_view
+    from quicksql.registry import executor
+
+    gate = threading.Event()
+    reached = threading.Event()
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def execute(self, cell, ctx):
+            reached.set()
+            assert gate.wait(timeout=10)
+            return register_frame(ctx, result_view(cell.name), pl.DataFrame({"x": [1]}))
+
+    return gate, reached
+
+
+async def test_switch_mid_run_closes_the_old_session_only_after_the_run(tmp_path) -> None:
+    """Closing a DuckDB connection under another thread's query risks a
+    crash: the run that still uses the old session closes it on its way out."""
+    gate, reached = _gated_engine()
+    one = tmp_path / "one.qsql"
+    one.write_text("-- @engine: gated\n\n-- @cell a\nSELECT 1;\n")
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell a\nSELECT 2 AS x;\n")
+    app = QsqlApp(path=one, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        old = app.session
+        try:
+            app._load_notebook(two)
+            assert app.session is not old
+            assert old.conn is not None  # mid-query: not closed underneath the run
+        finally:
+            gate.set()  # never leave the worker thread blocked on a failure
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert old.conn is None  # the run's own exit closed it
+
+
+async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
+    tmp_path, monkeypatch
+) -> None:
+    """A run of the previous notebook still compiling at the switch must not
+    adopt its project, pend its cells or store its results in the new one."""
+    import threading
+
+    from quicksql import tui as tui_mod
+
+    one = tmp_path / "one.qsql"
+    one.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell a\nSELECT 2 AS x;\n\n-- @cell c\nSELECT 3 AS y;\n")
+    gate = threading.Event()
+    reached = threading.Event()
+    real_compile = tui_mod.compile_file
+
+    def compile_gated(path, overrides=None):
+        if path == one and threading.current_thread() is not threading.main_thread():
+            reached.set()  # the run worker, compiling notebook one
+            assert gate.wait(timeout=10)
+        return real_compile(path, overrides)
+
+    monkeypatch.setattr(tui_mod, "compile_file", compile_gated)
+    app = QsqlApp(path=one, watch=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            app._load_notebook(two)
+        finally:
+            gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert list(app.project.cells) == ["a", "c"]  # still notebook two
+        assert app.results == {} and app.running == set()
+        assert _row(app, "a")[3] == "·" and _row(app, "c")[3] == "·"
