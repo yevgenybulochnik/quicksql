@@ -2,7 +2,7 @@
 
 The base cell-runner does the real work (prepare sinks, execute, write, preview);
 plugins overriding ``run`` wrap it as decorators, outermost = lowest priority.
-Cell failures become ``RunResult(ok=False)`` inside the base runner so chain
+Cell failures become ``RunResult(status="failed")`` inside the base runner so chain
 plugins (retries, ...) see error results; a catch-all *outside* the chain turns
 a buggy plugin into an error result too, and the run continues — except that
 every cell downstream of a failure is skipped, never run on stale data.
@@ -163,7 +163,7 @@ def base_runner(project: Project) -> Inner:
             ctx.emit("cell_step", cell.name, f"preview cached ({preview.height} rows)")
             return RunResult(
                 cell=cell.name,
-                ok=True,
+                status="ok",
                 rows=rows,
                 target=target,
                 elapsed=time.perf_counter() - started,
@@ -172,7 +172,7 @@ def base_runner(project: Project) -> Inner:
         except Exception:
             return RunResult(
                 cell=cell.name,
-                ok=False,
+                status="failed",
                 elapsed=time.perf_counter() - started,
                 error=traceback.format_exc(),
             )
@@ -241,7 +241,7 @@ def run_project(
                 try:
                     result = chain(cell, ctx)
                 except Exception:  # a buggy plugin must not kill the run
-                    result = RunResult(cell=name, ok=False, error=traceback.format_exc())
+                    result = RunResult(cell=name, status="failed", error=traceback.format_exc())
             if not result.ok:
                 failed_roots[name] = roots or [name]
                 # any temp table it left is stale; dropping it makes a later

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -84,38 +84,26 @@ Status = Literal["ok", "failed", "skipped"]
 class RunResult:
     """Outcome of running one cell: where it landed, how many rows, or why not.
 
-    ``status`` is the outcome. ``ok`` is still accepted by the constructor
-    (``RunResult(ok=False)`` means failed) and reads back as ``status == "ok"``.
+    ``status`` is the outcome; ``ok`` is read-only, derived from it.
     A skipped cell never ran: an upstream failed, and ``error`` names it.
     """
 
     cell: str
-    ok: InitVar[bool | None] = None
+    status: Status
     rows: int | None = None
     target: str | None = None
     elapsed: float = 0.0
     error: str | None = None
     preview: Any | None = None
-    status: Status | None = None  # None: derived from ok
 
-    def __post_init__(self, ok: bool | None) -> None:
-        if self.status is None:
-            if ok is None:
-                raise TypeError("RunResult needs ok= or status=")
-            self.status = "ok" if ok else "failed"
-        elif ok is not None and ok != (self.status == "ok"):
-            raise ValueError(f"RunResult ok={ok} contradicts status={self.status!r}")
+    @property
+    def ok(self) -> bool:
+        """True when the cell ran and landed."""
+        return self.status == "ok"
 
     def pl(self) -> Any:
         """The Polars preview frame of the landed output (None on failure)."""
         return self.preview
-
-
-# attached after the decorator: a property in the class body would replace the
-# InitVar's None default with the property object itself
-RunResult.ok = property(  # type: ignore[assignment,method-assign]
-    lambda self: self.status == "ok", doc="True when the cell ran and landed."
-)
 
 
 @dataclass(frozen=True)
