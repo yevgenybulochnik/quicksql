@@ -95,10 +95,6 @@ class RunResult:
         """True when the cell ran and landed."""
         return self.status == "ok"
 
-    def pl(self) -> Any:
-        """The Polars preview frame of the landed output (None on failure)."""
-        return self.preview
-
     def to_dict(self, rows: int = 0) -> dict[str, Any]:
         """The outcome as JSON-safe values. ``rows`` > 0 adds ``preview``:
         up to that many rows of the cached preview (itself at most 100), or
