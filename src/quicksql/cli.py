@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import sys
+import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -99,8 +100,12 @@ def _print_results(results: list) -> bool:
             typer.secho(f"  skip {r.cell}: {r.error}", fg="yellow")
         else:
             failed = True
-            reason = (r.error or "unknown error").strip().splitlines()[-1]
-            typer.secho(f"  FAIL {r.cell}: {reason}", fg="red")
+            first, *rest = (r.error or "unknown error").strip().splitlines()
+            typer.secho(f"  FAIL {r.cell}: {first}", fg="red")
+            if rest:
+                # e.g. duckdb's LINE/caret context; one indent for the whole
+                # block keeps the caret under what it points at
+                typer.secho(textwrap.indent("\n".join(rest), "      "), fg="red")
     return failed
 
 
