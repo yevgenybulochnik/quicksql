@@ -21,7 +21,7 @@ from ..errors import ConfigErrorGroup, CycleError, ParseError as QsqlParseError,
 from ..executors.base import statement_spans
 from .googlesql import find_execute_query, parse_errors
 from . import vocab
-from .mask import Opaque, Ref, Source, mask_jinja
+from .mask import Opaque, mask_jinja
 from .schema import SchemaCache, columns_for, relation_names
 
 # quicksql engine names line up with sqlglot dialect names
