@@ -184,16 +184,19 @@ def test_skip_is_transitive_and_names_the_failed_root(tmp_path) -> None:
     assert "1 ok, 1 failed, 2 skipped" in events[-1].detail
 
 
-def test_run_result_status_and_ok_agree() -> None:
+def test_run_result_ok_is_derived_from_status() -> None:
     from quicksql.models import RunResult
 
-    assert RunResult(cell="a", ok=True).status == "ok"
-    assert RunResult(cell="a", ok=False).status == "failed"
     assert RunResult(cell="a", status="ok").ok is True
+    assert RunResult(cell="a", status="failed").ok is False
     skipped = RunResult(cell="b", status="skipped", error="upstream 'a' failed")
     assert skipped.ok is False
-    with pytest.raises(ValueError):
-        RunResult(cell="a", ok=True, status="skipped")
+    skipped.status = "ok"
+    assert skipped.ok is True  # read back from status, never stored
+    with pytest.raises(AttributeError):
+        skipped.ok = False  # read-only
+    with pytest.raises(TypeError):
+        RunResult(cell="a", ok=True)  # status is the only constructor input
 
 
 def test_extensions_directive_is_loaded_by_runner(tmp_path) -> None:
@@ -531,11 +534,11 @@ def test_plugin_lifecycle_failures_surface_as_notes_before_run_finished(tmp_path
 def test_run_event_line_renders_each_kind() -> None:
     from quicksql.models import RunEvent, RunResult
 
-    ok = RunResult(cell="a", ok=True, rows=3, elapsed=0.012, target="data/a.parquet")
+    ok = RunResult(cell="a", status="ok", rows=3, elapsed=0.012, target="data/a.parquet")
     assert RunEvent("cell_finished", "a", result=ok).line() == (
         "a: ok — 3 rows in 12 ms -> data/a.parquet"
     )
-    bad = RunResult(cell="a", ok=False, error="Traceback ...\nBinder Error: no table")
+    bad = RunResult(cell="a", status="failed", error="Traceback ...\nBinder Error: no table")
     assert RunEvent("cell_finished", "a", result=bad).line() == (
         "a: FAILED — Binder Error: no table"
     )

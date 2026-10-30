@@ -1087,7 +1087,7 @@ async def test_run_events_drive_per_cell_status(notebook) -> None:
         await pilot.pause()
         assert app.running == set(names)
         assert all(_row(app, n)[3] == "…" for n in names)
-        done = RunResult(cell=names[0], ok=True, rows=3, elapsed=0.25)
+        done = RunResult(cell=names[0], status="ok", rows=3, elapsed=0.25)
         app._on_run_event(gen, RunEvent("cell_finished", names[0], result=done))
         await pilot.pause()
         assert names[0] not in app.running and names[1] in app.running
@@ -1106,7 +1106,7 @@ async def test_stale_generation_events_do_not_touch_state(notebook) -> None:
         stale = app._run_gen - 1
         app._on_run_event(stale, RunEvent("run_started", cells=("users",)))
         assert app.running == set()
-        done = RunResult(cell="users", ok=True, rows=1, elapsed=0.1)
+        done = RunResult(cell="users", status="ok", rows=1, elapsed=0.1)
         app._on_run_event(stale, RunEvent("cell_finished", "users", result=done))
         assert "users" not in app.results
         app._apply_results(stale, [done])
@@ -1121,7 +1121,7 @@ async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
-        old = RunResult(cell="users", ok=True, rows=42, elapsed=1.234)
+        old = RunResult(cell="users", status="ok", rows=42, elapsed=1.234)
         app._apply_results(app._run_gen, [old])
         await pilot.pause()
         assert _row(app, "users")[4] == "42"
