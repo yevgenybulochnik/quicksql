@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -286,7 +288,12 @@ class QsqlApp(App):
         self.auto_run = auto_run
         self.armed = False  # watch reruns stay dormant until the first run-all
         self.project: Project | None = None
-        self.session = RunSession()  # reused across reruns; run worker is exclusive
+        self.session = RunSession()  # per notebook, reused across its reruns
+        # runs in flight per session: a replaced session is closed by whoever
+        # leaves it last — the switch if it's idle, else that run's finally.
+        # Closing a DuckDB connection under another thread's query risks a crash.
+        self._session_lock = threading.Lock()
+        self._session_runs: dict[RunSession, int] = {}
         self.results: dict[str, RunResult] = {}
         self.running: set[str] = set()
         # bumped on the UI thread per run; events/results tagged with an older
@@ -424,6 +431,10 @@ class QsqlApp(App):
     def _load_notebook(self, path: Path | str) -> None:
         """Open a notebook (fresh state), arming and watching per-notebook."""
         self.path = Path(path)
+        # the old session's temps/statuses describe the old notebook, and an
+        # in-flight run of it must not paint this one
+        self._replace_session()
+        self._run_gen += 1
         self.results = {}
         self.running = set()
         self.panes = [[]]
@@ -503,6 +514,28 @@ class QsqlApp(App):
 
     def on_unmount(self) -> None:
         self.session.close()
+
+    def _replace_session(self) -> None:
+        with self._session_lock:
+            old, self.session = self.session, RunSession()
+            idle = old not in self._session_runs
+        if idle:
+            old.close()
+
+    @contextmanager
+    def _session_in_use(self, session: RunSession):
+        with self._session_lock:
+            self._session_runs[session] = self._session_runs.get(session, 0) + 1
+        try:
+            yield
+        finally:
+            with self._session_lock:
+                left = self._session_runs.pop(session) - 1
+                if left:
+                    self._session_runs[session] = left
+                retired = not left and session is not self.session
+            if retired:  # its notebook was switched away mid-run
+                session.close()
 
     # ---------- state helpers ----------
 
@@ -1202,33 +1235,45 @@ class QsqlApp(App):
         blocking run_project keeps draining events, so the generation tag is
         what keeps a replaced run from repainting the table."""
         self._run_gen += 1
-        self._run_thread(select, closure, self._run_gen)
+        # bound now: a notebook switch before the thread starts must not
+        # redirect this run to the new notebook or its session
+        self._run_thread(select, closure, self._run_gen, self.path, self.session)
 
     @work(thread=True, exclusive=True, group="run")
-    def _run_thread(self, select: Optional[list[str]], closure: bool, gen: int) -> None:
-        try:
-            project = compile_file(self.path, self.overrides)
-        except QsqlError as exc:
-            self.call_from_thread(self.log_line, f"compile error: {exc}")
-            return
-        self.call_from_thread(self._adopt_project, project)
-        results: list[RunResult] = []
-        try:
-            results = run_project(
-                project,
-                select=select,
-                closure=closure,
-                session=self.session,
-                on_event=lambda e: self.call_from_thread(self._on_run_event, gen, e),
-            )
-        except Exception:  # never leave cells stuck at "…" on a runner crash
-            import traceback
+    def _run_thread(
+        self,
+        select: Optional[list[str]],
+        closure: bool,
+        gen: int,
+        path: Path,
+        session: RunSession,
+    ) -> None:
+        with self._session_in_use(session):
+            try:
+                project = compile_file(path, self.overrides)
+            except QsqlError as exc:
+                self.call_from_thread(self.log_line, f"compile error: {exc}")
+                return
+            self.call_from_thread(self._adopt_project, gen, project)
+            results: list[RunResult] = []
+            try:
+                results = run_project(
+                    project,
+                    select=select,
+                    closure=closure,
+                    session=session,
+                    on_event=lambda e: self.call_from_thread(self._on_run_event, gen, e),
+                )
+            except Exception:  # never leave cells stuck at "…" on a runner crash
+                import traceback
 
-            self.call_from_thread(self.log_line, f"run failed:\n{traceback.format_exc()}")
-        finally:
-            self.call_from_thread(self._apply_results, gen, results)
+                self.call_from_thread(self.log_line, f"run failed:\n{traceback.format_exc()}")
+            finally:
+                self.call_from_thread(self._apply_results, gen, results)
 
-    def _adopt_project(self, project: Project) -> None:
+    def _adopt_project(self, gen: int, project: Project) -> None:
+        if gen != self._run_gen:
+            return  # a replaced run's compile may be older, or another notebook's
         self.project = project
         self.hashes = hashes_of(project)
         self._refresh_cells()
