@@ -11,7 +11,6 @@ every cell downstream of a failure is skipped, never run on stale data.
 from __future__ import annotations
 
 import shutil
-import tempfile
 import time
 import traceback
 from collections import Counter
