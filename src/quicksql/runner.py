@@ -21,7 +21,7 @@ import duckdb
 import polars as pl
 
 from .errors import QsqlError
-from .models import RenderedCell, RunContext, RunEvent, RunResult
+from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import EXECUTORS, PLUGINS
 from .sinks import make_sink
 
@@ -56,7 +56,8 @@ def _load_ext_cached(ctx: RunContext, ext: str, cell: str | None = None) -> None
 
 
 class RunSession:
-    """Reusable conduit state across runs: connection, temp dir, extension cache.
+    """Reusable conduit state across runs: connection, temp dir, extension cache,
+    and each cell's last status here (exact reruns rerun an upstream that wasn't ok).
 
     watch/TUI pass one session so reruns skip reconnect/re-LOAD; the conduit
     reconnects automatically when the project's target database changes.
@@ -69,6 +70,7 @@ class RunSession:
         self.loaded_extensions: set[str] = set()
         self.engine_sessions: dict[str, Any] = {}  # context key -> engine session
         self.materialized: set[str] = set()  # cells with a live temp table
+        self.last_status: dict[str, Status] = {}  # cell -> its latest result's status
         self._target: str | None = None
 
     def conduit(self, project: Project) -> Any:
@@ -95,6 +97,7 @@ class RunSession:
                 close()
         self.engine_sessions = {}
         self.materialized = set()
+        self.last_status = {}
         if self.tmpdir:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
             self.tmpdir = None
@@ -119,15 +122,21 @@ def _selection(project: Project, select: list[str] | None, closure: bool) -> lis
     return [n for n in project.order if n in wanted]
 
 
-def _expand_missing_temps(project: Project, names: list[str], session: RunSession) -> list[str]:
-    """Exact-set runs (watch) still need same-context upstreams whose temp
-    tables aren't live in this session — landed artifacts can't stand in for
-    an in-engine temp reference."""
+def _expand_stale_upstreams(project: Project, names: list[str], session: RunSession) -> list[str]:
+    """Exact-set runs (watch/TUI) still need, transitively, the upstreams whose
+    output this session can't vouch for: a same-context upstream whose temp
+    table isn't live (landed artifacts can't stand in for an in-engine temp
+    reference), and any upstream whose last result here wasn't ok (its landed
+    output is stale or missing). Autorun doesn't apply: rerunning is the honest
+    way to fresh data. An upstream never run in this session is trusted, as before."""
     wanted = set(names)
     stack = list(names)
     while stack:
-        for upstream in project.cells[stack.pop()].context_refs:
-            if upstream not in wanted and upstream not in session.materialized:
+        cell = project.cells[stack.pop()]
+        for upstream in cell.depends_on:  # ref() and @depends_on edges
+            missing_temp = upstream in cell.context_refs and upstream not in session.materialized
+            not_ok = session.last_status.get(upstream, "ok") != "ok"
+            if upstream not in wanted and (missing_temp or not_ok):
                 wanted.add(upstream)
                 stack.append(upstream)
     return [n for n in project.order if n in wanted]
@@ -212,7 +221,7 @@ def run_project(
     chain = build_chain(project)
     names = _selection(project, select, closure)
     if select is not None and not closure:
-        names = _expand_missing_temps(project, names, session)
+        names = _expand_stale_upstreams(project, names, session)
     results: list[RunResult] = []
     run_started = time.perf_counter()
     try:
@@ -243,6 +252,8 @@ def run_project(
                 # any temp table it left is stale; dropping it makes a later
                 # exact rerun (watch/TUI) re-include the cell
                 session.materialized.discard(name)
+            # a later exact rerun pulls the cell back in unless this says ok
+            session.last_status[name] = result.status
             results.append(result)
             ctx.emit("cell_finished", name, result=result)
         _notify(ctx, "after_run", lambda p: p.after_run(project, results))

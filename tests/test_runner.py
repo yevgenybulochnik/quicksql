@@ -571,7 +571,7 @@ def test_on_event_streams_the_cell_lifecycle_in_order(tmp_path) -> None:
 
 def test_run_started_carries_the_post_expansion_cell_list(tmp_path) -> None:
     """run_started.cells is the authoritative list of what will actually run —
-    including upstreams pulled in by _expand_missing_temps, which a consumer
+    including upstreams pulled in by _expand_stale_upstreams, which a consumer
     (the TUI cell table) cannot recover from its own select list."""
     from quicksql.models import RunEvent
 

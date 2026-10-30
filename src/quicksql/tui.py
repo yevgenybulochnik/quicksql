@@ -1235,8 +1235,8 @@ class QsqlApp(App):
 
     def _on_run_event(self, gen: int, event: RunEvent) -> None:
         """Route the runner's live events: everything is logged; run_started
-        seeds the pending set from the *post-expansion* cell list (closure and
-        missing-temp upstreams included — the select list undercounts those),
+        seeds the pending set from the *post-expansion* cell list (closure,
+        missing-temp and not-ok upstreams included — the select list undercounts those),
         and each cell_finished retires its cell so status flips one at a time."""
         self.log_line(event.line())
         if gen != self._run_gen:
