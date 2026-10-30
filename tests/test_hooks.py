@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 import pytest
+from pydantic import BaseModel
 
 from quicksql.compiler import compile_text
 from quicksql.errors import ConfigError
@@ -95,6 +96,29 @@ def test_contributed_globals_hide_their_underscore_attributes(tmp_path) -> None:
 
     with pytest.raises(ConfigError, match="template error: .*'_secret'.*unsafe"):
         compile_text("-- @cell a\nSELECT '{{ helpers._secret }}';", root=tmp_path)
+
+
+class _Settings(BaseModel):
+    schema_name: str = "analytics"
+
+
+def test_contributed_pydantic_models_expose_only_their_fields(tmp_path) -> None:
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"schema_name": "read-from-disk"}')
+
+    @plugin
+    class Settings(Plugin):
+        def render_context(self, rctx):
+            return {"settings": _Settings()}
+
+    project = compile_text(
+        "-- @cell a\nSELECT * FROM {{ settings.schema_name }}.t;", root=tmp_path
+    )
+    assert "FROM analytics.t" in project.cells["a"].sql
+    text = "-- @cell a\nSELECT '{{ settings.parse_file(\"SECRET\").schema_name }}';"
+    with pytest.raises(ConfigError, match="template error: .*'parse_file'.*unsafe") as excinfo:
+        compile_text(text.replace("SECRET", str(secret)), root=tmp_path)
+    assert "read-from-disk" not in str(excinfo.value)
 
 
 def test_render_context_receives_capabilities(tmp_path) -> None:

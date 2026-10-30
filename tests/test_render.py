@@ -137,6 +137,22 @@ def test_template_cannot_reach_python_internals(tmp_path, payload) -> None:
     assert not marker.exists()
 
 
+def test_template_cannot_call_config_model_methods(tmp_path) -> None:
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"tags": ["read-from-disk"]}')
+    text = "-- @cell a\nSELECT '{{ config.parse_file(\"SECRET\").tags[0] }}' AS x;"
+    with pytest.raises(ConfigError, match=r"template error: .*'parse_file'.*unsafe") as excinfo:
+        compile_text(text.replace("SECRET", str(secret)), root=tmp_path)
+    assert "read-from-disk" not in str(excinfo.value)
+
+
+def test_config_fields_still_render(tmp_path) -> None:
+    project = compile_text(
+        "-- @cell a\n-- @engine: duckdb\nSELECT '{{ config.engine }}' AS e;", root=tmp_path
+    )
+    assert "'duckdb' AS e" in project.cells["a"].sql
+
+
 def test_loops_conditionals_filters_and_macros_still_render(tmp_path) -> None:
     project = compile_text(
         "-- @vars: { cols: [id, name], dedupe: true }\n"
