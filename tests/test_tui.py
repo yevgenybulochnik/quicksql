@@ -1369,7 +1369,8 @@ async def test_question_mark_opens_help_overlay_covering_all_key_layers(notebook
         for key in keys.split("/")
     }
     # footer bindings and on_key-only keys alike are covered
-    keys = ("r", "R", "S", "y", "f", "gg", "[", "]", "-", "n", "?", "|", "w", "esc", *"12345")
+    keys = ("r", "R", "S", "y", "f", "gg", "[", "]", "-", "n", "?", "|", "w", "esc", *"12345",
+            "ctrl+h", "ctrl+j", "ctrl+k", "ctrl+l")
     for key in keys:
         assert key in documented, f"{key!r} missing from the help overlay"
 
