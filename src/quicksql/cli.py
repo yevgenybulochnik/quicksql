@@ -32,6 +32,10 @@ PLUGINS_OPT = typer.Option(
     None, "--plugins", help="Extra plugin module (dotted name or path/to/file.py, repeatable)"
 )
 
+# 2 is click's usage error
+EXIT_FAILED = 1  # a cell failed (a skip always has a failed root in the same run)
+EXIT_COMPILE = 3  # the notebook didn't compile, or the selection names an unknown cell
+
 
 @app.callback()
 def main(ctx: typer.Context) -> None:
@@ -84,7 +88,7 @@ def _project(file: Path, sets: list[str] | None, plugins: list[str] | None) -> P
         return project
     except QsqlError as exc:
         typer.secho(str(exc), fg="red")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_COMPILE)
 
 
 def _print_results(results: list) -> bool:
@@ -122,11 +126,11 @@ def run(
         results = run_project(
             project, select=list(select) if select else None, on_event=_live_event
         )
-    except QsqlError as exc:
+    except QsqlError as exc:  # an unknown --select cell
         typer.secho(str(exc), fg="red")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_COMPILE)
     if _print_results(results):
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_FAILED)
 
 
 def _live_event(event) -> None:
@@ -166,7 +170,7 @@ def show(
     project = _project(file, set_, plugins)
     if cell not in project.cells:
         typer.secho(f"unknown cell: {cell}", fg="red")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_COMPILE)
     typer.echo(project.cells[cell].sql)
 
 
@@ -179,6 +183,10 @@ def compile_cmd(
 ) -> None:
     """Print rendered SQL for all (or selected) cells."""
     project = _project(file, set_, plugins)
+    unknown = [s for s in select or [] if s not in project.cells]
+    if unknown:
+        typer.secho(f"unknown cell(s) in --select: {', '.join(unknown)}", fg="red")
+        raise typer.Exit(EXIT_COMPILE)
     for name in project.order:
         if select and name not in select:
             continue
