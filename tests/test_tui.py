@@ -1,5 +1,9 @@
+import re
+
 import polars as pl
 import pytest
+from textual._compositor import CompositorUpdate
+from textual.geometry import Region
 from textual.widgets import DataTable, TabbedContent
 
 from quicksql.compiler import compile_file
@@ -968,6 +972,153 @@ async def test_ctrl_h_l_leave_and_resume_a_deep_catalog_dive(deep_catalog) -> No
             assert (tabs.active, app.mode) == ("tab_catalog", "catalog"), back
             assert _same_sheets(app.catalog_stack, kept), back
             assert app.query_one("#catalog", DataTable).cursor_row == 37, back
+
+
+@pytest.fixture
+def long_catalog(tmp_path):
+    """A @catalog sqlite context whose one table has 60 columns: a column
+    list tall enough to scroll to the middle of, clear of both ends."""
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "wh.db")
+    con.execute(f"CREATE TABLE wide ({', '.join(f'c{i:02d} INTEGER' for i in range(60))})")
+    con.commit()
+    con.close()
+    path = tmp_path / "long.qsql"
+    path.write_text("/*@ catalog: { sqlite: [wh.db] } */\n-- @cell a\nSELECT 1 AS x;\n")
+    return path
+
+
+async def _scroll_mid_column_list(app, pilot) -> DataTable:
+    """S, drill root → sqlite context → `wide`, then j×45 and k×5: the
+    cursor on row 40, mid-viewport, the viewport mid-list."""
+    await pilot.press("S")
+    await _settle(app, pilot)
+    names = app.catalog_stack[-1].frame["name"].to_list()
+    await pilot.press(*["j"] * names.index("sqlite:wh.db"), "enter")
+    await _settle(app, pilot)
+    await pilot.press("enter")  # the context's one table
+    await _settle(app, pilot)
+    await pilot.press(*["j"] * 45, *["k"] * 5)
+    table = app.query_one("#catalog", DataTable)
+    assert app.catalog_stack[-1].title == "sqlite:wh.db/wide"
+    assert app.catalog_stack[-1].cursor[0] == table.cursor_row == 40
+    assert 0 < table.scroll_y < table.max_scroll_y
+    return table
+
+
+class _TerminalMirror:
+    """The screen as a real terminal holds it: every compositor update the
+    app writes, replayed onto a character grid. A terminal keeps whatever
+    isn't resent, so a stale picture shows here; the headless pilot writes
+    nothing, and a screenshot re-renders whole lines from the widgets."""
+
+    _CODES = re.compile(r"\x1b\[(\d+);(\d+)H|\x1b\[[\d;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|(.)")
+
+    def __init__(self, app: QsqlApp) -> None:
+        self.cells: dict[tuple[int, int], str] = {}
+        display = app._display
+
+        def mirrored(screen, update) -> None:
+            if isinstance(update, CompositorUpdate):
+                self._feed(update.render_segments(app.console))
+            display(screen, update)
+
+        app._display = mirrored
+
+    def _feed(self, data: str) -> None:
+        y = x = 0
+        for m in self._CODES.finditer(data):
+            if m[1]:  # cursor move; every update line starts with one
+                y, x = int(m[1]) - 1, int(m[2]) - 1
+            elif m[3]:
+                self.cells[y, x] = m[3]
+                x += 1
+
+    def lines(self, region: Region) -> list[str]:
+        return [
+            "".join(self.cells.get((y, x), " ") for x in range(region.x, region.right))
+            for y in range(region.y, region.bottom)
+        ]
+
+
+# leave a kept dive scrolled mid-list, then come back: Ctrl+l/Ctrl+h and
+# 4/5 resume it directly; Esc + h browses away, l browses back, Enter resumes
+_CATALOG_ROUND_TRIPS = [
+    pytest.param(("ctrl+l",), ("ctrl+h",), id="ctrl+l,ctrl+h"),
+    pytest.param(("4",), ("5",), id="4,5"),
+    pytest.param(("escape", "h"), ("l", "enter"), id="esc+h,l+enter"),
+]
+
+
+@pytest.mark.parametrize(("away", "back"), _CATALOG_ROUND_TRIPS)
+async def test_returning_to_a_kept_catalog_dive_holds_the_viewport(long_catalog, away, back) -> None:
+    # back on the dive, the same rows are on screen with the cursor on the
+    # same one, and j moves on from there. The viewport used to jump: the
+    # cursor was scrolled into view before the tab was laid out again, i.e.
+    # into a 0x0 viewport
+    app = QsqlApp(path=long_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        table = await _scroll_mid_column_list(app, pilot)
+        scroll = table.scroll_y
+        await pilot.press(*away)
+        await _settle(app, pilot)
+        assert app.query_one(TabbedContent).active != "tab_catalog"
+        await pilot.press(*back)
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        assert (table.scroll_y, table.cursor_row) == (scroll, 40)
+        await pilot.press("j")
+        await pilot.pause()
+        assert app.catalog_stack[-1].cursor[0] == table.cursor_row == 41
+        assert table.scroll_y == scroll  # row 41 was already on screen
+
+
+@pytest.mark.parametrize(("away", "back"), _CATALOG_ROUND_TRIPS)
+async def test_returning_to_a_kept_catalog_dive_redraws_its_rows(long_catalog, away, back) -> None:
+    # every row the terminal shows is the table's row at that height: a scroll
+    # made while the pane had no size marked nothing to repaint, so the old
+    # lines stayed up and each j redrew just the cursor cells over them,
+    # leaving rows like "c40  c26  INTEGER"
+    app = QsqlApp(path=long_catalog, watch=False, auto_run=False)
+    screen = _TerminalMirror(app)
+    async with app.run_test(size=(100, 40)) as pilot:
+        table = await _scroll_mid_column_list(app, pilot)
+        await pilot.press(*away)
+        await _settle(app, pilot)
+        await pilot.press(*back)
+        await _settle(app, pilot)
+        _assert_screen_shows_the_catalog_rows(app, screen, table, "returned")
+        await pilot.press("j")
+        await pilot.pause()
+        _assert_screen_shows_the_catalog_rows(app, screen, table, "j")
+
+
+def _assert_screen_shows_the_catalog_rows(app, screen, table, step: str) -> None:
+    rows = screen.lines(table.content_region)[1:]  # under the header
+    top = int(table.scroll_y)
+    names = app.catalog_stack[-1].frame["column"][top : top + len(rows)]
+    shown = [re.findall(r"\bc\d\d\b", row) for row in rows]
+    assert shown == [[name, name] for name in names], step  # column, field_path
+
+
+async def test_a_key_handled_before_the_returning_catalog_is_laid_out(long_catalog) -> None:
+    # 5 and j typed in one burst are both handled before the next frame, so
+    # j moves the cursor while the shown-again pane has no size yet: it
+    # still lands one row down with the viewport and the screen in step
+    app = QsqlApp(path=long_catalog, watch=False, auto_run=False)
+    screen = _TerminalMirror(app)
+    async with app.run_test(size=(100, 40)) as pilot:
+        table = await _scroll_mid_column_list(app, pilot)
+        scroll = table.scroll_y
+        await pilot.press("4")
+        await _settle(app, pilot)
+        app._jump_to_tab("tab_catalog")  # what on_key does for 5...
+        app._move(1, 0)  # ...and for j, with no frame between them
+        await _settle(app, pilot)
+        assert app.catalog_stack[-1].cursor[0] == table.cursor_row == 41
+        assert table.scroll_y == scroll
+        _assert_screen_shows_the_catalog_rows(app, screen, table, "5+j")
 
 
 async def test_ctrl_j_dives_like_enter_but_never_drills(deep_catalog) -> None:
