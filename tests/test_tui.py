@@ -741,6 +741,94 @@ async def test_leaving_the_catalog_tab_keeps_the_dive(deep_catalog) -> None:
         assert app.query_one("#catalog", DataTable).cursor_row == 38
 
 
+async def test_digit_keys_jump_to_tabs_and_5_resumes_the_catalog_dive(deep_catalog) -> None:
+    # 1-5 jump straight to SQL/Data/Config/Log/Catalog from any mode: 1-4
+    # land with keys back on the cell list, 5 is S — resume the kept dive at
+    # its top sheet and row, no root reload
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        kept = list(app.catalog_stack)
+        tabs = app.query_one(TabbedContent)
+        await pilot.press("4")
+        await _settle(app, pilot)
+        assert tabs.active == "tab_log"
+        assert app.mode == "cells"
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("5")
+        await _settle(app, pilot)
+        assert tabs.active == "tab_catalog"
+        assert app.mode == "catalog"
+        assert _same_sheets(app.catalog_stack, kept)
+        assert app.query_one("#catalog", DataTable).cursor_row == 37
+        for key, tab in (("1", "tab_sql"), ("2", "tab_data"), ("3", "tab_config")):
+            await pilot.press(key)
+            await _settle(app, pilot)
+            assert (tabs.active, app.mode) == (tab, "cells"), key
+            await pilot.press("5")
+            await _settle(app, pilot)
+            assert (tabs.active, app.mode) == ("tab_catalog", "catalog"), key
+            assert _same_sheets(app.catalog_stack, kept), key
+
+
+async def test_5_without_a_dive_loads_and_dives_into_the_root(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("5")
+        await _settle(app, pilot)
+        assert app.query_one(TabbedContent).active == "tab_catalog"
+        assert app.mode == "catalog"
+        assert len(app.catalog_stack) == 1
+        assert app.catalog_stack[-1].title == "catalog"
+
+
+async def test_digit_keys_leave_a_data_dive(notebook) -> None:
+    # 2 on the Data tab hands keys back to the cell list (the sheet then
+    # follows the selection); 1/3/4 leave the tab, dropping the dive as
+    # leaving the Data tab always has
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        tabs = app.query_one(TabbedContent)
+        await pilot.press("enter", "F")  # dive, freq sheet on top
+        assert app.mode == "data" and len(app.sheet_stack) == 2
+        await pilot.press("2")
+        await _settle(app, pilot)
+        assert tabs.active == "tab_data"
+        assert app.mode == "cells"
+        await pilot.press("j")  # the cell list moves; the Data sheet follows
+        assert app.current_cell == "events"
+        assert [s.title for s in app.sheet_stack] == ["events"]
+        await pilot.press("enter")
+        assert app.mode == "data"
+        await pilot.press("4")
+        await _settle(app, pilot)
+        assert tabs.active == "tab_log"
+        assert app.mode == "cells"
+        assert not app.panes[0]  # the data dive was dropped with the tab
+
+
+async def test_digits_typed_into_search_or_filter_dont_switch_tabs(deep_catalog) -> None:
+    from textual.widgets import Input
+
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        tabs = app.query_one(TabbedContent)
+        search = app.query_one("#search", Input)
+        await pilot.press("slash", "4", "2")
+        assert search.value == "42"
+        assert tabs.active == "tab_sql"
+        await pilot.press("escape", "S")
+        await _settle(app, pilot)
+        await pilot.press("f", "1")
+        await _settle(app, pilot)
+        assert search.value == "1"
+        assert (tabs.active, app.mode) == ("tab_catalog", "catalog")
+
+
 async def test_notebook_switch_resets_a_kept_catalog_dive(deep_catalog) -> None:
     other = write_scaffold(deep_catalog.parent / "base.qsql")
     app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
