@@ -22,6 +22,9 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — dead code removed: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
   `RunContext.overrides`, three unused imports, two unused `project` parameters
   (`3c2929b..1e120e7`).
+- Done — SQL templates render in Jinja's sandbox, and a pydantic model in a template
+  exposes only its fields, so compiling (and the LSP) can't run Python or read files
+  through `config.parse_file` (`84e9239..64cc7f4`).
 - Next — the remaining Phase 1 fixes, and the Phase 0 safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
@@ -44,7 +47,8 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Append-mode sinks report the table's total rows | `count(*)` after `INSERT` | 1 |
 | TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 |
 | A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 |
-| Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable | 1 |
+| Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable; a template ran a shell command at compile time | 1 (fixed) |
+| A non-template exception while rendering (`{{ 1/0 }}`, the sandbox's `range()` cap) crashes `compile` with a traceback and exit 1, not a template error and exit 3 (2026-10-30) | reproduced | 1 |
 | Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 |
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
 | Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
@@ -106,8 +110,11 @@ Sizes are relative: S, M, L.
 - The TUI's `_preview_frame` falls back to the cell's own sink (`make_sink(...).ref_expr`),
   not `data/<cell>.parquet`.
 - `plan_rerun` propagates only from changed cells that will rerun.
-- Templates render in `jinja2.sandbox.SandboxedEnvironment`. A prototype compiled both
-  demo notebooks unchanged and blocked `''.__class__`.
+- Done: templates render in a `SandboxedEnvironment` subclass (`render._SqlSandbox`) where
+  a pydantic model instance exposes only its fields. A plugin that contributes a model
+  *class* still exposes its classmethods; the plugin-authoring guide says to contribute
+  instances.
+- Rendering reports any exception as a template error (exit 3), not only Jinja's own.
 - Cache the composed models on the tuple of plugin `Config` classes being composed:
   ~23 → ~5 ms. Keyed on the classes themselves, it stays correct when registries change
   and survives Phase 4 without a generation counter. Test call counts, not wall time.
