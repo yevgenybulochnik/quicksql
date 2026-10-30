@@ -112,3 +112,42 @@ def test_jinja_only_touches_sql_not_config(tmp_path) -> None:
         root=tmp_path,
     )
     assert project.config.vars["greeting"] == "{{ not rendered }}"
+
+
+# ---------- sandbox: compiling never runs Python ----------
+
+_ESCAPES = {
+    # a default global's function globals hold the os module
+    "global": '{{ cycler.__init__.__globals__.os.popen("touch MARKER").read() }}',
+    # every class hangs off a literal's MRO; os._wrap_close's globals hold popen
+    "mro": (
+        "{% for c in ''.__class__.__mro__[1].__subclasses__()"
+        " if c.__name__ == '_wrap_close' %}"
+        '{{ c.__init__.__globals__.popen("touch MARKER").read() }}{% endfor %}'
+    ),
+}
+
+
+@pytest.mark.parametrize("payload", _ESCAPES.values(), ids=_ESCAPES.keys())
+def test_template_cannot_reach_python_internals(tmp_path, payload) -> None:
+    marker = tmp_path / "escaped"
+    text = f"-- @cell a\nSELECT '{payload.replace('MARKER', str(marker))}' AS x;"
+    with pytest.raises(ConfigError, match=r"cell 'a' \(line 1\): template error: .*unsafe"):
+        compile_text(text, root=tmp_path)
+    assert not marker.exists()
+
+
+def test_loops_conditionals_filters_and_macros_still_render(tmp_path) -> None:
+    project = compile_text(
+        "-- @vars: { cols: [id, name], dedupe: true }\n"
+        "-- @cell a\n"
+        "{% macro quoted(n) %}\"{{ n | lower }}\"{% endmacro %}"
+        "SELECT {% if var('dedupe') %}DISTINCT {% endif %}"
+        "{{ var('cols') | map('upper') | join(', ') }}, {{ quoted('Total') }}\n"
+        "FROM {% for t in ['x', 'y'] %}{{ t }}{% if not loop.last %} CROSS JOIN {% endif %}"
+        "{% endfor %};",
+        root=tmp_path,
+    )
+    assert project.cells["a"].sql.strip() == (
+        'SELECT DISTINCT ID, NAME, "total"\nFROM x CROSS JOIN y;'
+    )

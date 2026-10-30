@@ -68,6 +68,35 @@ def test_render_context_plugin_contributes_jinja_globals(tmp_path) -> None:
     assert "'hello' AS g" in project.cells["a"].sql
 
 
+class _Helpers:
+    _secret = "leaked"
+
+    def quote(self, name: str) -> str:
+        return f'"{name}"'
+
+
+def test_contributed_callables_and_methods_render_in_the_sandbox(tmp_path) -> None:
+    @plugin
+    class Macros(Plugin):
+        def render_context(self, rctx):
+            return {"helpers": _Helpers(), "shout": lambda s: s.upper()}
+
+    project = compile_text(
+        "-- @cell a\nSELECT {{ helpers.quote('id') }}, '{{ shout('hi') }}';", root=tmp_path
+    )
+    assert "SELECT \"id\", 'HI';" in project.cells["a"].sql
+
+
+def test_contributed_globals_hide_their_underscore_attributes(tmp_path) -> None:
+    @plugin
+    class Macros(Plugin):
+        def render_context(self, rctx):
+            return {"helpers": _Helpers()}
+
+    with pytest.raises(ConfigError, match="template error: .*'_secret'.*unsafe"):
+        compile_text("-- @cell a\nSELECT '{{ helpers._secret }}';", root=tmp_path)
+
+
 def test_render_context_receives_capabilities(tmp_path) -> None:
     @plugin
     class UsesCtx(Plugin):

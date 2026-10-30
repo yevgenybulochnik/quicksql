@@ -169,6 +169,23 @@ def test_diagnostics_flag_cross_context_source_on_non_duckdb(tmp_path) -> None:
     assert any("duckdb" in d.message for d in diags)
 
 
+def test_diagnostics_flag_a_template_escaping_the_sandbox_without_running_it(
+    tmp_path,
+) -> None:
+    from quicksql.lsp.analysis import Analyzer
+
+    marker = tmp_path / "escaped"
+    text = (
+        "-- @engine: duckdb\n-- @cell a\n"
+        "SELECT '{{ cycler.__init__.__globals__.os.popen(\"touch MARKER\").read() }}' AS x;\n"
+        .replace("MARKER", str(marker))
+    )
+    diags = Analyzer().diagnostics(text, tmp_path)
+    flagged = [(d.line, d.severity) for d in diags if "template error" in d.message]
+    assert flagged == [(1, "error")]  # the `-- @cell a` line (0-indexed)
+    assert not marker.exists()
+
+
 def test_diagnostics_surface_sqlglot_syntax_errors(tmp_path) -> None:
     from quicksql.lsp.analysis import Analyzer
 

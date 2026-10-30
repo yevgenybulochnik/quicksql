@@ -131,6 +131,21 @@ def test_compile_error_reported(tmp_path) -> None:
     assert "unknown directive" in result.output
 
 
+def test_compile_rejects_a_template_escaping_the_sandbox(tmp_path) -> None:
+    marker = tmp_path / "escaped"
+    f = tmp_path / "evil.qsql"
+    f.write_text(
+        "-- @cell a\n"
+        "SELECT '{{ cycler.__init__.__globals__.os.popen(\"touch MARKER\").read() }}' AS x;\n"
+        .replace("MARKER", str(marker))
+    )
+    result = runner.invoke(app, ["compile", str(f)])
+    assert result.exit_code == 3, result.output
+    assert "cell 'a' (line 1): template error" in result.output
+    assert "-- cell:" not in result.output
+    assert [p.name for p in tmp_path.iterdir()] == ["evil.qsql"]  # nothing written
+
+
 def test_compile_error_exits_3_for_every_command(tmp_path) -> None:
     f = tmp_path / "bad.sql"
     f.write_text("-- @cell a\n-- @bogus: 1\nSELECT 1;")
