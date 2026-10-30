@@ -85,7 +85,10 @@ delegating — `quicksql run --set render_dir=build/sql`.
   plus verbs `add_edge(cell)`, `producer_expr(cell)`, `require_extensions(exts)`,
   `mark_source_used()`, `resolve_path(path)`. The builtin globals are themselves
   plugin contributions — `Refs` (`ref`), `Sources` (`source`), `Vars` (`var`/`vars`),
-  `Env` (`env`) — each bundled with the directive it consumes.
+  `Env` (`env`) — each bundled with the directive it consumes. Templates render in
+  Jinja's sandbox: contributed globals (and their public methods) are callable, but
+  their underscore attributes aren't reachable — anything public is, so don't contribute
+  a module or a live connection.
 - `after_render(rctx, sql) -> sql | None` — transform rendered SQL; return None to
   keep it. Transformers compose in `(priority, registration)` order. No builtin
   plugin uses this hook; the scratch `Header`/`Footer` plugins in

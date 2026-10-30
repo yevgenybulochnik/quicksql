@@ -50,6 +50,12 @@ first `@cell`) inherited by every cell.
 - **Config resolution:** global → cell → run overrides (`--set k.v=x`, `QUICKSQL_K__V=x`),
   per-field merge strategy (OVERRIDE / DEEP / EXTEND). Config values are literal; Jinja
   applies to SQL bodies only.
+- **Templates render sandboxed.** `render.py` (the only Jinja environment in `src/`) uses
+  `jinja2.sandbox.SandboxedEnvironment`: templates call globals but can't reach
+  underscore/internal attributes, so compiling (which the LSP does on every open and edit)
+  can't run arbitrary Python; a blocked access is a `SecurityError` → `template error`,
+  exit 3. Not covered: `run` executes the notebook's SQL, CLI commands import
+  `quicksqlrc.py` (directory trust is Phase 7), `env()` reads environment variables by design.
 - **Watch/TUI are reflect-only.** The file is edited elsewhere; change detection hashes
   SQL bodies only, so config-only edits don't trigger reruns (known limitation; the
   watch/TUI log flags them as `config changed (no rerun)` via

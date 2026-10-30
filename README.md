@@ -243,6 +243,13 @@ where it may appear (global header, per-cell, or both).
 Jinja globals available in SQL bodies: `ref('cell')`, `source('name_or_path')`,
 `var('key'[, default])`, `vars` (the whole dict), `env('VAR'[, default])`.
 
+SQL templates render in Jinja's sandbox: they can call these globals but can't reach
+Python internals through them (`''.__class__`, `__globals__`), so compiling a notebook,
+or opening it in the language server, can't run arbitrary Python. A blocked access is a
+`template error` at compile time. The sandbox covers templates only: `quicksql run` still
+executes the notebook's SQL, CLI commands still import a `quicksqlrc.py` next to it
+(trusting a directory is planned), and `env()` reads environment variables by design.
+
 ## Engines, sinks, and sources
 
 **Engines** (where a cell executes):
