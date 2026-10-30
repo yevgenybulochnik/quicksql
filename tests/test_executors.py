@@ -141,6 +141,18 @@ def test_sqlite_executor_bad_sql_raises(ctx) -> None:
         EXECUTORS.get("sqlite").execute(cell, ctx)
 
 
+def test_sqlite_failure_message_does_not_repeat_the_cell_name(tmp_path) -> None:
+    """The CLI prints "FAIL a: <message>": the engine prefix is news, the
+    cell name isn't."""
+    from quicksql.compiler import compile_text
+
+    project = compile_text(
+        "-- @cell a\n-- @input: {sqlite: \":memory:\"}\nSELECT * FROM nope\n", root=tmp_path
+    )
+    [result] = project.run()
+    assert result.error == "sqlite: no such table: nope"
+
+
 def test_duckdb_setup_then_terminal_lands_terminal(ctx) -> None:
     cell = _cell(
         "enriched",
@@ -166,7 +178,7 @@ def test_sqlite_terminal_without_result_set_raises(ctx) -> None:
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1)",  # terminal INSERT: no result set
         {"input": {"sqlite": ":memory:"}},
     )
-    with pytest.raises(ExecutorError, match="no result set"):
+    with pytest.raises(ExecutorError, match="^sqlite query returned no result set$"):
         EXECUTORS.get("sqlite").execute(cell, ctx)
 
 
@@ -463,13 +475,13 @@ def test_postgres_executor_string_shorthand_and_env_dsn(monkeypatch) -> None:
 
 def test_postgres_executor_missing_dsn_raises(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT 1", {"engine": "postgres"})
-    with pytest.raises(ExecutorError, match="dsn"):
+    with pytest.raises(ExecutorError, match="^postgres engine needs input.postgres.dsn$"):
         EXECUTORS.get("postgres").execute(cell, ctx)
 
 
 def test_postgres_executor_wraps_driver_errors(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT boom", {"input": {"postgres": {"dsn": "postgresql://x"}}})
-    with pytest.raises(ExecutorError, match="postgres.*relation missing"):
+    with pytest.raises(ExecutorError, match="^postgres: relation missing$"):
         EXECUTORS.get("postgres").execute(cell, ctx)
 
 
