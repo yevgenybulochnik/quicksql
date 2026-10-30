@@ -631,7 +631,7 @@ async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
 async def test_catalog_tab_browses_then_enter_dives(notebook) -> None:
     # cycling onto the Catalog tab loads the root listing but stays in cells
     # mode (browse pass-through, like the Data tab); Enter is what dives.
-    # Leaving the tab drops the listing; re-entry reloads the root.
+    # Leaving the tab keeps the listing; re-entry shows it without a reload.
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
@@ -642,17 +642,120 @@ async def test_catalog_tab_browses_then_enter_dives(notebook) -> None:
         assert app.mode == "cells"  # browsing, not dived
         assert app.catalog_stack and app.catalog_stack[-1].title == "catalog"
         assert app.query_one("#catalog", DataTable).row_count > 0
+        root = app.catalog_stack[-1]
         await pilot.press("l")  # still browsing: h/l cycles on (catalog -> sql)
         await pilot.pause()
         assert app.query_one(TabbedContent).active == "tab_sql"
-        assert app.catalog_stack == []  # leaving the tab drops the dive state
-        await pilot.press("h")  # back onto Catalog: the root reloads
+        assert app.catalog_stack == [root]  # leaving the tab keeps the dive state
+        await pilot.press("h")  # back onto Catalog: the kept listing, no reload
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert app.catalog_stack
+        assert len(app.catalog_stack) == 1 and app.catalog_stack[-1] is root
         await pilot.press("enter")  # dive: keys now live in the listing
         assert app.mode == "catalog"
         assert app.sheet_stack is app.catalog_stack  # active surface routes
+
+
+@pytest.fixture
+def deep_catalog(tmp_path):
+    """A notebook whose catalog goes three levels deep: the root listing →
+    the @catalog sqlite context's tables → a table's 40 columns (taller than
+    the catalog viewport, so a lost scroll position would show)."""
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "nums.db")
+    con.execute("CREATE TABLE alpha (a INTEGER)")
+    con.execute(f"CREATE TABLE wide ({', '.join(f'c{i:02d} INTEGER' for i in range(40))})")
+    con.commit()
+    con.close()
+    path = tmp_path / "deep.qsql"
+    path.write_text("/*@ catalog: { sqlite: [nums.db] } */\n-- @cell a\nSELECT 1 AS x;\n")
+    return path
+
+
+async def _settle(app, pilot) -> None:
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def _dive_three_levels(app, pilot) -> None:
+    """S, drill root → sqlite context → `wide`, then cursor to row 37."""
+    await pilot.press("S")
+    await _settle(app, pilot)
+    names = app.catalog_stack[-1].frame["name"].to_list()
+    await pilot.press(*["j"] * names.index("sqlite:nums.db"), "enter")
+    await _settle(app, pilot)
+    await pilot.press("j", "enter")  # alpha, [wide]
+    await _settle(app, pilot)
+    await pilot.press("G", "k", "k")
+    assert app.mode == "catalog"
+    assert len(app.catalog_stack) == 3
+    assert app.catalog_stack[-1].title == "sqlite:nums.db/wide"
+    assert app.catalog_stack[-1].cursor[0] == 37
+
+
+async def _click_tab(app, pilot, pane_id: str) -> None:
+    await pilot.click(f"#--content-tab-{pane_id}")
+    await _settle(app, pilot)
+
+
+def _same_sheets(stack, kept) -> bool:
+    return len(stack) == len(kept) and all(a is b for a, b in zip(stack, kept))
+
+
+async def test_leaving_the_catalog_tab_keeps_the_dive(deep_catalog) -> None:
+    # a click on another tab hands keys back to the cell list but keeps the
+    # catalog stack (each Sheet holds its own cursor/sort/filter): a run
+    # doesn't reload it, a click back shows the same sheet at the same row,
+    # and Enter — or S — resumes the dive there instead of reloading the root
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        kept = list(app.catalog_stack)
+        tabs = app.query_one(TabbedContent)
+        await _click_tab(app, pilot, "tab_log")
+        assert tabs.active == "tab_log"
+        assert app.mode == "cells"  # keys back on the cell list
+        assert _same_sheets(app.catalog_stack, kept)
+        await pilot.press("R")  # a run invalidates the cache, not the dive
+        await _settle(app, pilot)
+        assert _same_sheets(app.catalog_stack, kept)
+        await _click_tab(app, pilot, "tab_catalog")
+        assert tabs.active == "tab_catalog"
+        assert app.mode == "cells"  # a click browses; Enter resumes
+        assert _same_sheets(app.catalog_stack, kept)  # no root reload
+        await pilot.press("enter")
+        assert app.mode == "catalog"
+        assert app.sheet_stack[-1] is kept[-1]
+        assert app.query_one("#catalog", DataTable).cursor_row == 37
+        await pilot.press("j")  # moves on from the kept row, not the viewport top
+        assert app.catalog_stack[-1].cursor[0] == 38
+        moved = list(app.catalog_stack)
+        await _click_tab(app, pilot, "tab_sql")
+        assert app.mode == "cells"
+        await pilot.press("S")  # S resumes the kept dive the same way
+        await _settle(app, pilot)
+        assert tabs.active == "tab_catalog"
+        assert app.mode == "catalog"
+        assert _same_sheets(app.catalog_stack, moved)
+        assert app.query_one("#catalog", DataTable).cursor_row == 38
+
+
+async def test_notebook_switch_resets_a_kept_catalog_dive(deep_catalog) -> None:
+    other = write_scaffold(deep_catalog.parent / "base.qsql")
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        await _click_tab(app, pilot, "tab_log")
+        assert len(app.catalog_stack) == 3  # kept across the tab switch
+        app._load_notebook(other)
+        assert app.catalog_stack == []  # ...but not across notebooks
+        await pilot.press("S")
+        await _settle(app, pilot)
+        assert app.mode == "catalog"
+        assert len(app.catalog_stack) == 1
+        assert app.catalog_stack[-1].title == "catalog"
+        assert "users" in app.catalog_stack[-1].frame["name"].to_list()
 
 
 async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
