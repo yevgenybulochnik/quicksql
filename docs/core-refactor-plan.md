@@ -19,8 +19,10 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — the TUI gives each opened notebook its own `RunSession`, so a rerun after `o`
   can't read the previous notebook's temps, and logs a failed cell's full message once
   instead of on every cursor move (`d65a35b..247fcd5`). Two Phase 9 issues, fixed early.
-- Next — the Phase 1 fixes, including the dead code (now unblocked), and the Phase 0
-  safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
+- Done — dead code removed: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
+  `RunContext.overrides`, three unused imports, two unused `project` parameters
+  (`3c2929b..1e120e7`).
+- Next — the remaining Phase 1 fixes, and the Phase 0 safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
 ## Context
@@ -109,9 +111,11 @@ Sizes are relative: S, M, L.
 - Cache the composed models on the tuple of plugin `Config` classes being composed:
   ~23 → ~5 ms. Keyed on the classes themselves, it stays correct when registries change
   and survives Phase 4 without a generation counter. Test call counts, not wall time.
-- Remove dead code: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
+- Done: remove dead code: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
   `RunContext.overrides`, unused imports (`tempfile` in `runner.py`; `Ref`/`Source` in
   `lsp/analysis.py`), unused `project` parameters (`_resolve_scope`, `relation_names`).
+  Left for later: unused imports in three test files (`Merge`, `hashes_of`,
+  `PluginRegistry`).
 
 **Phase 2 — honest run outcomes (M; done).**
 - Done: `RunResult.status`: `ok` | `failed` | `skipped`.
@@ -180,6 +184,10 @@ Sizes are relative: S, M, L.
   stays rc-free until Phase 7.
 - Hook participant lists are computed once per registry; `overriding()` re-sorts on every
   call today.
+- Decide `Project.overrides` while reshaping `Project`: nothing in `src` reads it since
+  `RunContext.overrides` went, but `after_compile` hooks receive the `Project`, so a
+  plugin could. Keep it as a documented field or drop it with this phase's breaking
+  changes.
 - The autouse snapshot/restore fixture in `tests/conftest.py` becomes a per-test registry.
 - Tests first: two notebooks with different rc plugins in one process don't see each
   other's directives; two rc files defining the same plugin name both load; `o` into a
