@@ -206,6 +206,9 @@ class HelpScreen(ModalScreen):
         ]),
         ("General", [
             ("1/2/3/4/5", "jump to SQL / Data / Config / Log / Catalog"),
+            ("ctrl+h/ctrl+l", "previous / next tab, from any mode"),
+            ("ctrl+k", "up to the cell list without popping (esc)"),
+            ("ctrl+j", "down into the sheet (enter on the cell list)"),
             ("?", "this help"),
             ("q", "pop / quit"),
         ]),

@@ -335,6 +335,11 @@ existing `.qsql` files plus starter templates.
 | `/` | search | `o` | open another notebook |
 | `?` | help | `Ctrl+R` | refetch |
 | `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the catalog dive is kept) |
+| `Ctrl+H` / `Ctrl+L` | previous / next tab, from any mode | `Ctrl+K` / `Ctrl+J` | up to the cell list (like `Esc`) / down into the sheet (like `Enter` on the cell list) |
+
+`Ctrl+H` needs a terminal with the kitty keyboard protocol (herdr, kitty, WezTerm, foot,
+ghostty…); under tmux's defaults it arrives as Backspace and does nothing, while `1`–`5`
+work everywhere.
 
 `watch` and the TUI hash **SQL bodies** to decide what changed, so config-only edits don't
 trigger reruns (they're logged as `config changed (no rerun)`).
