@@ -85,7 +85,9 @@ class RunResult:
     """Outcome of running one cell: where it landed, how many rows, or why not.
 
     ``status`` is the outcome; ``ok`` is read-only, derived from it.
-    A skipped cell never ran: an upstream failed, and ``error`` names it.
+    ``error`` is the human message: why it failed, or for a skipped cell
+    (which never ran) the upstream that did. ``traceback`` is the failure's
+    full trace, for debugging.
     """
 
     cell: str
@@ -94,6 +96,7 @@ class RunResult:
     target: str | None = None
     elapsed: float = 0.0
     error: str | None = None
+    traceback: str | None = None
     preview: Any | None = None
 
     @property
@@ -132,7 +135,7 @@ class RunEvent:
                 return f"{self.cell}: ok — {rows} rows in {r.elapsed * 1000:.0f} ms -> {r.target}"
             if r.status == "skipped":
                 return f"{self.cell}: skipped — {r.error}"
-            reason = (r.error or "unknown error").strip().splitlines()[-1]
+            reason = (r.error or "unknown error").strip().splitlines()[0]
             return f"{self.cell}: FAILED — {reason}"
         if self.kind == "cell_started":
             return f"{self.cell}: started ({self.detail})"

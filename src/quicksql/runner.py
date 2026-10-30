@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import duckdb
 import polars as pl
 
+from .errors import QsqlError
 from .models import RenderedCell, RunContext, RunEvent, RunResult
 from .registry import EXECUTORS, PLUGINS
 from .sinks import make_sink
@@ -169,13 +170,8 @@ def base_runner(project: Project) -> Inner:
                 elapsed=time.perf_counter() - started,
                 preview=preview,
             )
-        except Exception:
-            return RunResult(
-                cell=cell.name,
-                status="failed",
-                elapsed=time.perf_counter() - started,
-                error=traceback.format_exc(),
-            )
+        except Exception as exc:
+            return _failed(cell.name, exc, elapsed=time.perf_counter() - started)
 
     return run_cell
 
@@ -240,8 +236,8 @@ def run_project(
                 ctx.emit("cell_started", name, f"{cell.engine} → {cell.sink_type}")
                 try:
                     result = chain(cell, ctx)
-                except Exception:  # a buggy plugin must not kill the run
-                    result = RunResult(cell=name, status="failed", error=traceback.format_exc())
+                except Exception as exc:  # a buggy plugin must not kill the run
+                    result = _failed(name, exc)
             if not result.ok:
                 failed_roots[name] = roots or [name]
                 # any temp table it left is stale; dropping it makes a later
@@ -265,6 +261,25 @@ def run_project(
         if owns_session:
             session.close()
     return results
+
+
+def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:
+    """Call from inside the ``except``: the traceback is the one being handled."""
+    return RunResult(
+        cell=name,
+        status="failed",
+        elapsed=elapsed,
+        error=_message(exc),
+        traceback=traceback.format_exc(),
+    )
+
+
+def _message(exc: Exception) -> str:
+    """Our errors and duckdb's ("Catalog Error: ...") describe themselves;
+    anything else, e.g. a plugin bug, needs its type to read: "KeyError: 'x'"."""
+    if isinstance(exc, (QsqlError, duckdb.Error)) and str(exc):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _skipped(name: str, roots: list[str]) -> RunResult:
