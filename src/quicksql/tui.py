@@ -797,10 +797,34 @@ class QsqlApp(App):
             return result.preview
         if result is not None and result.ok and result.target and result.target.endswith(".parquet"):
             return self._read_parquet_head(result.target)
-        target = self.project.root / "data" / f"{name}.parquet" if self.project else None
-        if target and target.exists():
-            return self._read_parquet_head(str(target))
+        if self.project and name in self.project.cells:
+            landed = self._read_landed(name)
+            if landed is not None:
+                return landed
         return pl.DataFrame({"info": [f"no output for {name!r} yet — press r to run"]})
+
+    def _read_landed(self, name: str) -> pl.DataFrame | None:
+        """An earlier run's output, read back through the cell's own sink but
+        never its prepare(): previews follow the cursor, and an ATTACH creates a
+        missing database file or connects to a server. So a database sink
+        previews only once a run this session has attached it to the conduit."""
+        import duckdb
+
+        from .runner import _preview
+        from .sinks import make_sink
+
+        sink = make_sink(self.project.cells[name].config, self.project.root)
+        if not sink.lands_output:
+            return pl.DataFrame(
+                {"info": [f"{name!r} is effect-only (output: {sink.name}): it lands nothing to preview"]}
+            )
+        con = self._catalog_connect()
+        try:
+            return _preview(con, sink.ref_expr(name), self.PREVIEW_ROWS)
+        except (duckdb.Error, QsqlError):
+            return None  # never landed, or its database isn't attached this session
+        finally:
+            con.close()
 
     # ---------- actions (footer bindings) ----------
 
