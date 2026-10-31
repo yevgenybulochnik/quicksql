@@ -1,6 +1,10 @@
+from collections import Counter
+
 import pytest
 from pydantic import BaseModel, field_validator
 
+from quicksql import config
+from quicksql.compiler import compile_text
 from quicksql.config import (
     build_models,
     resolve_cell,
@@ -11,7 +15,7 @@ from quicksql.config import (
 from quicksql.errors import ConfigError
 from quicksql.models import Merge, Scope
 from quicksql.plugins.base import Plugin, qfield
-from quicksql.registry import plugin
+from quicksql.registry import PLUGINS, plugin
 
 
 def test_build_models_fields_and_defaults() -> None:
@@ -138,8 +142,9 @@ def test_duplicate_validator_names_across_plugins_are_rejected() -> None:
             def _shape(cls, v: list[str]) -> list[str]:  # clashes with Sources
                 return v
 
-    with pytest.raises(ConfigError, match="_shape"):
-        build_models()
+    for _ in range(2):  # a failed compose must not be cached
+        with pytest.raises(ConfigError, match="_shape"):
+            build_models()
 
 
 def test_override_keys_scoped_to_target_model() -> None:
@@ -160,3 +165,99 @@ def test_override_keys_scoped_to_target_model() -> None:
 def test_unknown_override_key_raises() -> None:
     with pytest.raises(ConfigError, match="unknown directive: @zap"):
         resolve_cell({}, {}, overrides={"zap": 1})
+
+
+NOTEBOOK = """\
+-- @vars: { n: 2 }
+
+-- @cell a
+SELECT 1 AS x;
+
+-- @cell b
+SELECT * FROM {{ ref('a') }};
+
+-- @cell c
+-- @depends_on: [b]
+SELECT {{ var('n') }} AS y;
+"""
+
+
+@pytest.fixture
+def composed(monkeypatch) -> list[str]:
+    """Names of the config models composed (``create_model`` calls) from here on."""
+    made: list[str] = []
+    real = config.create_model
+
+    def spy(name, **kwargs):
+        made.append(name)
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(config, "create_model", spy)
+    return made
+
+
+def _register_row_limit(where: Scope = Scope.CELL, *, positive: bool = False) -> None:
+    """Register a scratch plugin owning @row_limit; each call defines fresh classes."""
+
+    @plugin
+    class RowLimit(Plugin):
+        scope = where
+
+        class Config(BaseModel):
+            row_limit: int | None = qfield(None)
+
+            @field_validator("row_limit")
+            @classmethod
+            def _row_limit_sign(cls, v: int | None) -> int | None:
+                if positive and v is not None and v <= 0:
+                    raise ValueError("row_limit must be positive")
+                return v
+
+
+def test_compile_composes_each_config_model_once(tmp_path, composed) -> None:
+    _register_row_limit(Scope.BOTH)  # fresh bases for both models: no compile has seen them
+    compile_text(NOTEBOOK, root=tmp_path)
+    assert Counter(composed) == {"GlobalConfig": 1, "CellConfig": 1}
+
+
+def test_recompile_with_same_registry_composes_nothing(tmp_path, composed) -> None:
+    compile_text(NOTEBOOK, root=tmp_path)
+    composed.clear()
+    compile_text(NOTEBOOK, root=tmp_path)
+    assert composed == []
+
+
+def test_registering_a_plugin_between_compiles_composes_anew(tmp_path, composed) -> None:
+    compile_text(NOTEBOOK, root=tmp_path)
+    composed.clear()
+    _register_row_limit()  # cell scope: only CellConfig's bases change
+    project = compile_text(
+        NOTEBOOK.replace("-- @cell a\n", "-- @cell a\n-- @row_limit: 10\n"), root=tmp_path
+    )
+    assert composed == ["CellConfig"]
+    assert project.cells["a"].config.row_limit == 10
+
+
+def test_unregistering_a_plugin_between_compiles_rejects_its_directive(tmp_path) -> None:
+    snap = PLUGINS.snapshot()  # what the autouse fixture restores between tests
+    _register_row_limit()
+    text = "-- @cell a\n-- @row_limit: 10\nSELECT 1;\n"
+    assert compile_text(text, root=tmp_path).cells["a"].config.row_limit == 10
+    PLUGINS.restore(snap)
+    with pytest.raises(ConfigError, match="unknown directive: @row_limit"):
+        compile_text(text, root=tmp_path)
+    cfg = compile_text("-- @cell a\nSELECT 1;\n", root=tmp_path).cells["a"].config
+    assert "row_limit" not in type(cfg).model_fields
+
+
+def test_reregistering_a_plugin_name_composes_its_new_config(tmp_path) -> None:
+    # same plugin name and field key, new Config class: the composed model must
+    # follow the class, not the name
+    snap = PLUGINS.snapshot()
+    _register_row_limit()
+    text = "-- @cell a\n-- @row_limit: -1\nSELECT 1;\n"
+    assert compile_text(text, root=tmp_path).cells["a"].config.row_limit == -1
+    PLUGINS.restore(snap)
+    _register_row_limit(positive=True)
+    with pytest.raises(ConfigError, match="positive"):
+        compile_text(text, root=tmp_path)
