@@ -36,6 +36,7 @@ dev = [
     "openpyxl>=3.1",
     "pyarrow>=15",  # arrow-type normalization tests only; core stays pyarrow-free
     "pygls>=1.3",  # lsp extra, in dev so the language-server tests run by default
+    "import-linter>=2.15",
 ]
 
 [tool.pytest.ini_options]
@@ -47,6 +48,123 @@ markers = [
     "bigquery: needs the compose bigquery-emulator (deselected by default)",
     "postgres: needs a Postgres server (deselected by default)",
     "terminal: drives the TUI in a real tmux terminal (deselected by default)",
+]
+
+# Layering contracts: the Target in docs/core-refactor-plan.md, on the current module layout.
+# Every module is classified core, extension or front-end.
+# The ignore_imports lists are the refactor's debt register: each phase deletes its entries
+# and Phase 6 ends with both lists empty. An entry that matches no import is an error.
+[tool.importlinter]
+root_package = "quicksql"
+
+[[tool.importlinter.contracts]]
+id = "core"
+name = "core imports no extension or front-end"
+type = "forbidden"
+as_packages = false
+unmatched_ignore_imports_alerting = "error"
+source_modules = [
+    # every `import quicksql.x` runs the root __init__ first, so it must stay core
+    "quicksql",
+    "quicksql.compiler",
+    "quicksql.config",
+    "quicksql.errors",
+    "quicksql.graph",
+    "quicksql.models",
+    "quicksql.overrides",
+    "quicksql.parser",
+    "quicksql.registry",
+    "quicksql.render",
+    "quicksql.runner",
+    # the contracts extensions implement; the package __init__s are core because after
+    # Phase 4 they only re-export their base module
+    "quicksql.executors",
+    "quicksql.executors.base",
+    "quicksql.plugins",
+    "quicksql.plugins.base",
+    "quicksql.sinks",
+    "quicksql.sinks.base",
+]
+forbidden_modules = [
+    # extensions
+    "quicksql.executors.bigquery_exec",
+    "quicksql.executors.duckdb_exec",
+    "quicksql.executors.postgres_exec",
+    "quicksql.executors.sqlite_exec",
+    "quicksql.plugins.builtin",
+    "quicksql.plugins.emit_sql",
+    "quicksql.sinks.duckdb_sink",
+    "quicksql.sinks.none_sink",
+    "quicksql.sinks.parquet_sink",
+    "quicksql.sinks.postgres_sink",
+    # the builtin readers live here; only extensions and front-ends use reader_for
+    "quicksql.sources",
+    # front-ends, and bootstrap: the composition root
+    "quicksql.bootstrap",
+    "quicksql.catalog",
+    "quicksql.cli",
+    "quicksql.lsp",
+    "quicksql.lsp.**",
+    "quicksql.scaffold",
+    "quicksql.sheet",
+    "quicksql.tui",
+    "quicksql.watcher",
+]
+ignore_imports = [
+    # Phase 4: built-ins load from the app-layer composition root, not from the compiler.
+    "quicksql.compiler -> quicksql.bootstrap",
+    # Phase 4: the eager package __init__s. Importing a contract (config -> plugins.base)
+    # runs its package __init__, which imports every implementation. Grimp doesn't model
+    # that implicit parent-package import, so the debt is recorded here, at the __init__.
+    "quicksql.executors -> quicksql.executors.bigquery_exec",
+    "quicksql.executors -> quicksql.executors.duckdb_exec",
+    "quicksql.executors -> quicksql.executors.postgres_exec",
+    "quicksql.executors -> quicksql.executors.sqlite_exec",
+    "quicksql.plugins -> quicksql.plugins.builtin",
+    "quicksql.plugins -> quicksql.plugins.emit_sql",
+    "quicksql.sinks -> quicksql.sinks.duckdb_sink",
+    "quicksql.sinks -> quicksql.sinks.none_sink",
+    "quicksql.sinks -> quicksql.sinks.parquet_sink",
+    "quicksql.sinks -> quicksql.sinks.postgres_sink",
+]
+
+[[tool.importlinter.contracts]]
+id = "extensions"
+name = "extensions import neither the runner, the compiler nor any front-end"
+type = "forbidden"
+as_packages = false
+unmatched_ignore_imports_alerting = "error"
+source_modules = [
+    "quicksql.executors.bigquery_exec",
+    "quicksql.executors.duckdb_exec",
+    "quicksql.executors.postgres_exec",
+    "quicksql.executors.sqlite_exec",
+    "quicksql.plugins.builtin",
+    "quicksql.plugins.emit_sql",
+    "quicksql.sinks.duckdb_sink",
+    "quicksql.sinks.none_sink",
+    "quicksql.sinks.parquet_sink",
+    "quicksql.sinks.postgres_sink",
+    "quicksql.sources",
+]
+forbidden_modules = [
+    "quicksql.compiler",
+    "quicksql.runner",
+    "quicksql.bootstrap",
+    "quicksql.catalog",
+    "quicksql.cli",
+    "quicksql.lsp",
+    "quicksql.lsp.**",
+    "quicksql.scaffold",
+    "quicksql.sheet",
+    "quicksql.tui",
+    "quicksql.watcher",
+]
+ignore_imports = [
+    # Phase 6: conduit.py takes over extension loading from the runner's privates.
+    # Module-level only: front-ends importing runner privates (catalog, lsp.schema, tui,
+    # cli) is front-end -> core, which both contracts allow; the plan's findings track it.
+    "quicksql.plugins.builtin -> quicksql.runner",
 ]
 
 [build-system]
