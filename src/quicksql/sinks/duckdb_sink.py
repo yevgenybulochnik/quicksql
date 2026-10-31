@@ -38,10 +38,11 @@ class DuckDBSink(Sink):
             conn.execute(
                 f'CREATE TABLE IF NOT EXISTS {target} AS SELECT * FROM "{view}" WHERE 1=0'
             )
-            conn.execute(f'INSERT INTO {target} SELECT * FROM "{view}"')
+            insert = f'INSERT INTO {target} SELECT * FROM "{view}"'
+            (rows,) = conn.execute(insert).fetchone()  # this run's rows, not the table's
         else:
-            conn.execute(f'CREATE OR REPLACE TABLE {target} AS SELECT * FROM "{view}"')
-        (rows,) = conn.execute(f"SELECT count(*) FROM {target}").fetchone()
+            create = f'CREATE OR REPLACE TABLE {target} AS SELECT * FROM "{view}"'
+            (rows,) = conn.execute(create).fetchone()
         return int(rows), f"{self.db_path}::{self.schema}.{self.cfg.get('table') or cell.name}"
 
     def ref_expr(self, cell_name: str) -> str:

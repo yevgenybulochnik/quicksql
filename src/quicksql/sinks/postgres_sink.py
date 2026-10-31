@@ -47,11 +47,11 @@ class PostgresSink(Sink):
     def write(self, cell: RenderedCell, view: str, conn: Any) -> tuple[int, str]:
         target = self._target(cell.name)
         if self.cfg.get("mode", "replace") == "append":
-            conn.execute(f'INSERT INTO {target} SELECT * FROM "{view}"')
+            insert = f'INSERT INTO {target} SELECT * FROM "{view}"'
+            (rows,) = conn.execute(insert).fetchone()  # this run's rows, not the table's
         else:
             conn.execute(f"DROP TABLE IF EXISTS {target}")
-            conn.execute(f'CREATE TABLE {target} AS SELECT * FROM "{view}"')
-        (rows,) = conn.execute(f"SELECT count(*) FROM {target}").fetchone()
+            (rows,) = conn.execute(f'CREATE TABLE {target} AS SELECT * FROM "{view}"').fetchone()
         schema, table = self._schema_table(cell.name)
         return int(rows), f"postgres::{schema}.{table}"
 
