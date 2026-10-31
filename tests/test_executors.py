@@ -477,6 +477,32 @@ def test_bigquery_string_shorthand_names_the_project() -> None:
     assert EXECUTORS.get("bigquery").context_key(cfg) == "bigquery:my-proj"
 
 
+@pytest.mark.parametrize(
+    ("dsn", "key"),
+    [
+        ("postgresql://u:s3cret@h:5432/db", "postgres:postgresql://u:***@h:5432/db"),
+        ("postgresql://u@h/db", "postgres:postgresql://u@h/db"),
+        (
+            "postgresql://u@h/db?sslmode=require&password=s3cret",
+            "postgres:postgresql://u@h/db?sslmode=require&password=***",
+        ),
+        ("host=h user=u password=s3cret dbname=db", "postgres:host=h user=u password=*** dbname=db"),
+        ("host=h password='s3 cret' dbname=db", "postgres:host=h password=*** dbname=db"),
+    ],
+    ids=["uri", "uri-no-password", "uri-query", "keywords", "keywords-quoted"],
+)
+def test_a_postgres_context_key_hides_the_password(dsn, key) -> None:
+    # context keys are shown: explain, the catalog, the TUI's log
+    cfg = resolve_cell({}, {"input": {"postgres": dsn}})
+    assert EXECUTORS.get("postgres").context_key(cfg) == key
+
+
+def test_a_postgres_context_key_hides_a_password_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PG_DSN", "postgresql://u:s3cret@h/db")
+    cfg = resolve_cell({}, {"input": {"postgres": "$PG_DSN"}})
+    assert "s3cret" not in EXECUTORS.get("postgres").context_key(cfg)
+
+
 def test_postgres_executor_missing_dsn_raises(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT 1", {"engine": "postgres"})
     with pytest.raises(ExecutorError, match="^postgres engine needs input.postgres.dsn$"):

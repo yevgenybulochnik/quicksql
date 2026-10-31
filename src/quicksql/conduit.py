@@ -45,6 +45,11 @@ class ConduitSession(EngineSession):
         self._wrapped(f'CREATE OR REPLACE TEMP TABLE "{name}" AS ', sql)
         return f'SELECT * FROM "{name}"'
 
+    def check(self, sql: str) -> None:
+        # runs the whole query and discards its rows; a count(*) over it would
+        # let duckdb prune the very column that fails
+        self._wrapped("EXPLAIN ANALYZE ", sql)
+
     def drop(self, name: str) -> None:
         self.conn.execute(f'DROP TABLE IF EXISTS temp."{name}"')
 

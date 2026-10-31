@@ -196,6 +196,12 @@ class EngineSession(ABC):
         ``view``; return the name to read them from."""
         return register_frame(ctx, view, self.fetch(sql, scoped=scoped))
 
+    def check(self, sql: str) -> None:
+        """Run ``sql`` to the end, keeping no rows, so it raises its own error.
+        Asked when landing a result this session extracted lazily failed, to
+        tell the query's error from the sink's; an extract that fetched the
+        rows already ran the query, so by default there's nothing to do."""
+
     def materialize(self, name: str, sql: str) -> str:
         """Replace the session temp table ``name`` with the rows of ``sql``;
         return the query that reads it back. Only engines with
