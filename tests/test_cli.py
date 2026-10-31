@@ -446,7 +446,7 @@ def test_each_watch_cycle_ends_with_one_final_status(capsys) -> None:
     from quicksql.errors import ConfigError
     from quicksql.models import RunResult
 
-    _watch_cycle(object(), [])  # a save that changed nothing
+    _watch_cycle(object(), [])  # a save with nothing to rerun
     _watch_cycle(None, ConfigError("boom"))
     _watch_cycle(
         object(),
@@ -454,6 +454,15 @@ def test_each_watch_cycle_ends_with_one_final_status(capsys) -> None:
          RunResult(cell="b", status="failed", error="nope")],
     )
     lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
-    assert lines[0] == "no changes"
+    assert lines[0] == "nothing to rerun"
     assert lines[1] == "compile error: boom"
     assert lines[-1] == "1 ok, 1 failed, 0 skipped"
+
+
+def test_status_json_reports_a_compile_error_as_json(tmp_path) -> None:
+    f = tmp_path / "base.qsql"
+    f.write_text("-- @cell a\nSELECT * FROM {{ ref('ghost') }};\n")
+    result = runner.invoke(app, ["status", str(f), "--json"])
+    assert result.exit_code == 3
+    doc = json.loads(result.output)
+    assert doc["cells"] == [] and doc["errors"][0]["cell"] == "a"

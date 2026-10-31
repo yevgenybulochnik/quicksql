@@ -21,6 +21,7 @@ from .errors import ConfigErrorGroup, QsqlError
 from .overrides import gather_overrides
 from .runner import _message, run_project
 from .scaffold import write_scaffold
+from .state import statuses
 
 app = typer.Typer(
     add_completion=False,
@@ -300,18 +301,63 @@ def watch(
     """Re-run changed cells (+ downstream dependents) on every save."""
     from .watcher import watch_events
 
-    _project(file, set_, plugins)  # load plugins + fail fast on compile errors
+    project = _project(file, set_, plugins)  # load plugins + fail fast on compile errors
     typer.echo(f"watching {file} — Ctrl+C to stop")
     try:
         for project, event in watch_events(
-            file, overrides=gather_overrides(list(set_ or [])), on_event=_live_event
+            file, overrides=gather_overrides(list(set_ or [])), on_event=_live_event,
+            project=project,
         ):
-            if project is None:
-                typer.secho(f"  compile error: {event}", fg="red")
-            elif event:
-                _print_results(event)
+            _watch_cycle(project, event)
     except KeyboardInterrupt:
         pass
+
+
+def _watch_cycle(project: Project | None, event: Any) -> None:
+    """One save's outcome, ending in exactly one final status line: the
+    compile error, "nothing to rerun", or the rerun's counts after its results."""
+    if project is None:
+        typer.secho(f"  compile error: {event}", fg="red")
+    elif not event:
+        typer.secho("  nothing to rerun", dim=True)
+    else:
+        _print_results(event)
+        counts = Counter(r.status for r in event)
+        typer.echo(f"  {counts['ok']} ok, {counts['failed']} failed, {counts['skipped']} skipped")
+
+
+_STATUS_COLORS = {"ok": "green", "failed": "red", "skipped": "yellow", "stale": "yellow"}
+
+
+@app.command()
+def status(
+    file: Path = FILE_ARG,
+    json_out: bool = typer.Option(False, "--json", help="Print one JSON document instead"),
+    set_: Optional[list[str]] = SET_OPT,
+    plugins: Optional[list[str]] = PLUGINS_OPT,
+) -> None:
+    """Each cell's state: ok, failed or skipped (its last run), stale, or new
+    (never run). Stale: its landed output was built from something else than
+    the cell would be built from now, because its SQL or result-affecting
+    config changed, or an upstream landed a new output since it ran.
+
+    Stale is relative to the notebook: source files and remote tables aren't
+    fingerprinted, so a changed CSV or warehouse table leaves a cell ok."""
+    if json_out:  # like run --json: stdout gets one document, whatever goes wrong
+        try:
+            doc = {"file": str(file), "errors": [], "cells": [
+                vars(row) for row in statuses(_compile(file, set_, plugins))
+            ]}
+        except QsqlError as exc:
+            doc = {"file": str(file), "errors": _error_dicts(exc), "cells": []}
+        typer.echo(json.dumps(doc, indent=2 if sys.stdout.isatty() else None))
+        if doc["errors"]:
+            raise typer.Exit(EXIT_COMPILE)
+        return
+    rows = statuses(_project(file, set_, plugins))
+    for row in rows:
+        line = f"  {row.status:<7} {row.cell:<24} {row.reason}".rstrip()
+        typer.secho(line, fg=_STATUS_COLORS.get(row.status))
 
 
 @app.command()

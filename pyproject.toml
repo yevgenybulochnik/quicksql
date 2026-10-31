@@ -77,6 +77,7 @@ source_modules = [
     "quicksql.registry",
     "quicksql.render",
     "quicksql.runner",
+    "quicksql.state",
     # the contracts extensions implement; the package __init__s are core because after
     # Phase 4 they only re-export their base module
     "quicksql.executors",

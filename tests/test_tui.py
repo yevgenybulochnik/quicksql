@@ -1760,7 +1760,7 @@ async def test_a_config_edit_reruns_the_cell(notebook) -> None:
         await app.workers.wait_for_complete()
 
 
-async def test_a_save_that_changes_nothing_logs_no_changes(notebook) -> None:
+async def test_a_save_with_nothing_to_rerun_says_so(notebook) -> None:
     from textual.widgets import RichLog
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
@@ -1770,7 +1770,7 @@ async def test_a_save_that_changes_nothing_logs_no_changes(notebook) -> None:
         assert app._on_recompiled(compile_file(notebook)) == []
         await pilot.pause()
         lines = [s.text for s in app.query_one("#log", RichLog).lines]
-        assert lines[-1] == "no changes"
+        assert lines[-1] == "nothing to rerun"
 
 
 async def test_a_save_compiles_the_notebook_once(notebook, monkeypatch) -> None:

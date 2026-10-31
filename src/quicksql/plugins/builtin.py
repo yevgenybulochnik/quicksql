@@ -137,7 +137,7 @@ class Autorun(Plugin):
     """The autorun: directive plus the watch-mode rerun filter it drives."""
 
     class Config(BaseModel):
-        autorun: bool = qfield(True)
+        autorun: bool = qfield(True, affects_results=False)
 
     def should_rerun(self, cell: Any) -> bool | None:
         return bool(cell.config.autorun)
@@ -222,7 +222,7 @@ class Catalog(Plugin):
     scope = Scope.GLOBAL
 
     class Config(BaseModel):
-        catalog: dict[str, list[str]] = qfield({}, merge=Merge.DEEP)
+        catalog: dict[str, list[str]] = qfield({}, merge=Merge.DEEP, affects_results=False)
 
         # nb: validator names must be unique across all composed plugin
         # Configs — a duplicate (e.g. Sources' _shape) is silently shadowed
@@ -244,4 +244,4 @@ class Catalog(Plugin):
 @plugin
 class Tags(Plugin):
     class Config(BaseModel):
-        tags: list[str] = qfield([], merge=Merge.EXTEND)
+        tags: list[str] = qfield([], merge=Merge.EXTEND, affects_results=False)
