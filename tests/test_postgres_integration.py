@@ -193,3 +193,30 @@ def test_round_trip_through_postgres_sink(seeded, tmp_path) -> None:
     with psycopg.connect(seeded) as con:
         rows = con.execute("SELECT n, twice FROM public.doubled ORDER BY n").fetchall()
     assert rows == [(1, 2), (2, 4), (3, 6), (4, 8), (5, 10)]
+
+
+def test_postgres_sink_reports_the_rows_each_write_landed(seeded, tmp_path) -> None:
+    """replace reports the table's rows; append only the rows it inserted"""
+    import psycopg
+
+    from quicksql.models import RenderedCell
+    from quicksql.registry import SINKS
+
+    cell = RenderedCell(
+        name="acc", config=None, sql_raw="", sql="", hash="",
+        engine="duckdb", sink_type="postgres",
+    )
+    conn = duckdb.connect()
+    try:
+        conn.execute("LOAD postgres")
+        conn.execute("CREATE TEMP VIEW v AS SELECT 1 AS x UNION ALL SELECT 2")
+        replace = SINKS.get("postgres")({"dsn": seeded}, tmp_path)
+        append = SINKS.get("postgres")({"dsn": seeded, "mode": "append"}, tmp_path)
+        replace.prepare(conn)
+        replaced, _ = replace.write(cell, "v", conn)
+        appended, _ = append.write(cell, "v", conn)
+    finally:
+        conn.close()
+    assert (replaced, appended) == (2, 2)
+    with psycopg.connect(seeded) as con:
+        assert con.execute("SELECT count(*) FROM public.acc").fetchone() == (4,)

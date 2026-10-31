@@ -78,12 +78,15 @@ def test_duckdb_sink_writes_table_readable_via_ref_expr(conn, tmp_path) -> None:
     assert (tmp_path / "wh.db").exists()
 
 
-def test_duckdb_sink_append_mode_accumulates(conn, tmp_path) -> None:
+def test_duckdb_sink_append_mode_accumulates_and_reports_the_rows_it_inserted(
+    conn, tmp_path
+) -> None:
     sink = SINKS.get("duckdb")({"path": "wh.db", "mode": "append"}, tmp_path)
     sink.prepare(conn)
     sink.write(_cell("acc"), "v", conn)
     rows, _ = sink.write(_cell("acc"), "v", conn)
-    assert rows == 4
+    assert rows == 2  # this run's rows, not the table's total
+    assert conn.sql(f"SELECT count(*) FROM {sink.ref_expr('acc')}").fetchone() == (4,)
 
 
 def test_duckdb_sink_custom_schema(conn, tmp_path) -> None:
