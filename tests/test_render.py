@@ -1,8 +1,10 @@
 import pytest
 
 from quicksql.compiler import compile_text
-from quicksql.errors import ConfigError
-from quicksql.render import RenderContext
+from quicksql.errors import ConfigError, ExecutorError
+from quicksql.plugins.base import Plugin
+from quicksql.registry import plugin
+from quicksql.render import RenderContext, render_sql
 
 
 def test_render_context_capability_verbs(tmp_path) -> None:
@@ -167,3 +169,67 @@ def test_loops_conditionals_filters_and_macros_still_render(tmp_path) -> None:
     assert project.cells["a"].sql.strip() == (
         'SELECT DISTINCT ID, NAME, "total"\nFROM x CROSS JOIN y;'
     )
+
+
+# ---------- any exception while rendering is a template error ----------
+
+
+def _render(tmp_path, body: str):
+    config = compile_text("-- @cell a\nSELECT 1;", root=tmp_path).cells["a"].config
+    return render_sql("a", body, config, producers={}, root=tmp_path)
+
+
+_PYTHON_ERRORS = {
+    "zero-division": ("SELECT {{ 1/0 }};", ZeroDivisionError, "division by zero"),
+    # the sandbox caps range() with a plain OverflowError, not a TemplateError
+    "range-cap": (
+        "SELECT 1{% for i in range(100001) %}{% endfor %};", OverflowError, "Range too big"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("body", "exc_type", "detail"), _PYTHON_ERRORS.values(), ids=_PYTHON_ERRORS.keys()
+)
+def test_a_python_error_while_rendering_is_a_type_prefixed_template_error(
+    tmp_path, body, exc_type, detail
+) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _render(tmp_path, body)
+    assert str(excinfo.value).startswith(
+        f"cell 'a': template error: {exc_type.__name__}: {detail}"
+    )
+    assert isinstance(excinfo.value.__cause__, exc_type)
+
+
+def test_a_jinja_error_while_rendering_keeps_its_unprefixed_message(tmp_path) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _render(tmp_path, "SELECT {{ nope }};")
+    assert str(excinfo.value) == "cell 'a': template error: 'nope' is undefined"
+
+
+def test_an_unknown_ref_keeps_its_own_message_not_a_template_error(tmp_path) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _render(tmp_path, "SELECT * FROM {{ ref('ghost') }};")
+    assert type(excinfo.value) is ConfigError
+    assert str(excinfo.value) == "cell 'a': unknown cell 'ghost' in ref()"
+    assert excinfo.value.__cause__ is None  # raised as-is, not re-wrapped
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConfigError("cell 'a': no lookup table"), ExecutorError("warehouse unreachable")],
+    ids=["config-error", "executor-error"],
+)
+def test_a_quicksql_error_from_a_contributed_global_passes_through(tmp_path, error) -> None:
+    @plugin
+    class Lookups(Plugin):
+        def render_context(self, rctx):
+            def lookup():
+                raise error
+
+            return {"lookup": lookup}
+
+    with pytest.raises(type(error)) as excinfo:
+        _render(tmp_path, "SELECT {{ lookup() }};")
+    assert excinfo.value is error  # the very exception, not a wrapper around it

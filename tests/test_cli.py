@@ -146,6 +146,19 @@ def test_compile_rejects_a_template_escaping_the_sandbox(tmp_path) -> None:
     assert [p.name for p in tmp_path.iterdir()] == ["evil.qsql"]  # nothing written
 
 
+def test_compile_reports_a_python_error_in_a_template_as_a_template_error(tmp_path) -> None:
+    f = tmp_path / "bad.qsql"
+    f.write_text("-- @cell a\nSELECT {{ 1/0 }} AS x;\n")
+    result = runner.invoke(app, ["compile", str(f)])
+    assert result.exit_code == 3, result.output
+    assert (
+        "cell 'a' (line 1): template error: ZeroDivisionError: division by zero"
+        in result.output
+    )
+    assert "Traceback" not in result.output
+    assert "-- cell:" not in result.output
+
+
 def test_compile_error_exits_3_for_every_command(tmp_path) -> None:
     f = tmp_path / "bad.sql"
     f.write_text("-- @cell a\n-- @bogus: 1\nSELECT 1;")
@@ -311,6 +324,20 @@ def test_run_json_compile_error_lists_cell_and_line(tmp_path) -> None:
     assert doc["errors"] == [{"cell": "b", "line": 3, "message": "unknown directive: @bogus"}]
     assert doc["cells"] == []
     assert doc["summary"] == {"ok": 0, "failed": 0, "skipped": 0}
+
+
+def test_run_json_reports_a_python_error_in_a_template_under_its_cell(tmp_path) -> None:
+    f = tmp_path / "bad.qsql"
+    f.write_text("-- @cell a\nSELECT {{ 1/0 }} AS x;\n")
+    result, doc = _json_run(f)
+    assert result.exit_code == 3
+    assert doc["status"] == "compile_error"
+    assert doc["errors"] == [{
+        "cell": "a",
+        "line": 1,
+        "message": "template error: ZeroDivisionError: division by zero",
+    }]
+    assert doc["cells"] == []
 
 
 def test_run_json_other_compile_errors_have_no_cell_or_line(tmp_path) -> None:

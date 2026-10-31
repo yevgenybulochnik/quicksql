@@ -740,6 +740,36 @@ def test_server_registers_the_lsp_features_and_maps_diagnostics() -> None:
     assert lsp_diag.source == "sqlglot" and lsp_diag.message == "boom"
 
 
+def test_opening_a_document_with_a_python_error_in_a_template_publishes_a_diagnostic(
+    tmp_path,
+) -> None:
+    pytest.importorskip("pygls", reason="install the 'lsp' extra")
+    from types import SimpleNamespace
+
+    from lsprotocol import types
+
+    from quicksql.lsp.server import create_server
+
+    nb = tmp_path / "n.qsql"
+    text = "-- @engine: duckdb\n-- @cell a\nSELECT {{ 1/0 }} AS x;\n"
+    published: list = []
+    ls = SimpleNamespace(  # just what the handler touches: the open document, publishing
+        workspace=SimpleNamespace(
+            get_text_document=lambda uri: SimpleNamespace(source=text, path=str(nb))
+        ),
+        text_document_publish_diagnostics=published.append,
+    )
+    # pygls binds each handler to its server with functools.partial
+    did_open = create_server().protocol.fm.features[types.TEXT_DOCUMENT_DID_OPEN].func
+    did_open(ls, types.DidOpenTextDocumentParams(
+        types.TextDocumentItem(uri=nb.as_uri(), language_id="qsql", version=1, text=text)
+    ))
+    [params] = published
+    assert [(d.range.start.line, d.message) for d in params.diagnostics] == [
+        (1, "template error: ZeroDivisionError: division by zero")  # the `-- @cell a` line
+    ]
+
+
 def test_completion_scopes_each_join_alias_to_its_own_ref(tmp_path) -> None:
     from quicksql.lsp.analysis import Analyzer
 
