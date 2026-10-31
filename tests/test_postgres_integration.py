@@ -220,3 +220,21 @@ def test_postgres_sink_reports_the_rows_each_write_landed(seeded, tmp_path) -> N
     assert (replaced, appended) == (2, 2)
     with psycopg.connect(seeded) as con:
         assert con.execute("SELECT count(*) FROM public.acc").fetchone() == (4,)
+
+
+def test_postgres_sink_append_mode_creates_its_table_on_the_first_run(seeded, tmp_path) -> None:
+    import psycopg
+
+    with psycopg.connect(seeded, autocommit=True) as con:
+        con.execute("DROP TABLE IF EXISTS public.events_log")
+    project = compile_text(
+        f"-- @cell events_log\n/*@ output: {{ type: postgres, dsn: '{seeded}', mode: append }} */\n"
+        "SELECT 1 AS n UNION ALL SELECT 2;",
+        root=tmp_path,
+    )
+    for _ in range(2):  # the first run creates the table, the second appends to it
+        [result] = project.run()
+        assert result.ok, result.error
+        assert result.rows == 2
+    with psycopg.connect(seeded) as con:
+        assert con.execute("SELECT count(*) FROM public.events_log").fetchone() == (4,)
