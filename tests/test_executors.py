@@ -5,19 +5,20 @@ import duckdb
 import polars as pl
 import pytest
 
-from quicksql.config import resolve_cell, resolve_sink_type
+from quicksql.config import resolve_cell, resolve_engine, resolve_sink_type
 from quicksql.errors import ExecutorError
-from quicksql.executors.bigquery_exec import BigQueryExecutor
+from quicksql.executors.bigquery_exec import BigQueryExecutor, BigQuerySession
 from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.models import RenderedCell, RunContext
 from quicksql.registry import EXECUTORS
+from quicksql.runner import execute_cell
 
 
 def _cell(name: str, sql: str, cell_raw: dict | None = None) -> RenderedCell:
     cfg = resolve_cell({}, cell_raw or {})
     return RenderedCell(
         name=name, config=cfg, sql_raw=sql, sql=sql, hash="",
-        engine="duckdb", sink_type=resolve_sink_type(cfg),
+        engine=resolve_engine(cfg), sink_type=resolve_sink_type(cfg),
     )
 
 
@@ -118,7 +119,7 @@ def test_multistatement_materialization_capability() -> None:
 
 
 def test_duckdb_executor_creates_view(ctx) -> None:
-    view = EXECUTORS.get("duckdb").execute(_cell("a", "SELECT 42 AS x;"), ctx)
+    view = execute_cell(_cell("a", "SELECT 42 AS x;"), ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(42,)]
 
 
@@ -131,14 +132,14 @@ def test_sqlite_executor_registers_result(ctx, tmp_path) -> None:
     con.close()
 
     cell = _cell("sq", "SELECT n FROM nums ORDER BY n", {"input": {"sqlite": "nums.sqlite"}})
-    view = EXECUTORS.get("sqlite").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,), (2,), (3,)]
 
 
 def test_sqlite_executor_bad_sql_raises(ctx) -> None:
     cell = _cell("sq", "SELECT * FROM missing", {"input": {"sqlite": ":memory:"}})
     with pytest.raises(ExecutorError, match="sqlite"):
-        EXECUTORS.get("sqlite").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_sqlite_failure_message_does_not_repeat_the_cell_name(tmp_path) -> None:
@@ -158,7 +159,7 @@ def test_duckdb_setup_then_terminal_lands_terminal(ctx) -> None:
         "enriched",
         "CREATE TEMP TABLE staging AS SELECT 1 AS n;\nSELECT n * 2 AS m FROM staging",
     )
-    view = EXECUTORS.get("duckdb").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(2,)]
 
 
@@ -168,7 +169,7 @@ def test_sqlite_setup_then_terminal_lands_terminal(ctx) -> None:
         "CREATE TEMP TABLE staging AS SELECT 5 AS n;\nSELECT n + 1 AS m FROM staging",
         {"input": {"sqlite": ":memory:"}},
     )
-    view = EXECUTORS.get("sqlite").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(6,)]
 
 
@@ -178,8 +179,8 @@ def test_sqlite_terminal_without_result_set_raises(ctx) -> None:
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1)",  # terminal INSERT: no result set
         {"input": {"sqlite": ":memory:"}},
     )
-    with pytest.raises(ExecutorError, match="^sqlite query returned no result set$"):
-        EXECUTORS.get("sqlite").execute(cell, ctx)
+    with pytest.raises(ExecutorError, match="^statement 2 of 2: sqlite query returned no result set$"):
+        execute_cell(cell, ctx)
 
 
 def test_duckdb_effect_only_runs_all_statements_lands_nothing(ctx) -> None:
@@ -188,7 +189,7 @@ def test_duckdb_effect_only_runs_all_statements_lands_nothing(ctx) -> None:
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1), (2)",
         {"output": {"type": "none"}},
     )
-    view = EXECUTORS.get("duckdb").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert view == ""  # effect-only: nothing to land
     assert ctx.conn.sql("SELECT count(*) FROM t").fetchone() == (2,)
 
@@ -220,9 +221,7 @@ def test_bigquery_same_context_cells_share_a_session(tmp_path, monkeypatch) -> N
             return FakeJob(sql, first=len(calls) == 1)
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(
-        BigQueryExecutor, "_job_config", lambda self, state: {"session": state["session_id"]}
-    )
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: {"session": self.session_id})
     project = compile_text(
         "/*@ input: { bigquery: { project: p } } */\n"
         "-- @cell parent\nSELECT * FROM src;\n"
@@ -274,7 +273,7 @@ def test_bigquery_reffed_cte_parent_materializes_unwrapped(tmp_path, monkeypatch
             return FakeJob()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(BigQueryExecutor, "_job_config", lambda self, state: None)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: None)
     body = "WITH totals AS (\n  SELECT n FROM src\n)\nSELECT n FROM totals  -- trailing note"
     project = compile_text(
         "/*@ input: { bigquery: { project: p } } */\n"
@@ -305,7 +304,7 @@ def test_bigquery_executor_with_fake_client(ctx, monkeypatch) -> None:
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
     cell = _cell("bq", "SELECT * FROM events", {"input": {"bigquery": {"project": "p"}}})
-    view = EXECUTORS.get("bigquery").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT count(*) FROM "{view}"').fetchone() == (2,)
 
 
@@ -335,7 +334,7 @@ def test_bigquery_emulator_endpoint_disables_retries(tmp_path, monkeypatch) -> N
             return FakeJob()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(BigQueryExecutor, "_job_config", lambda self, state: None)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: None)
     project = compile_text(
         "/*@ input: { bigquery: { project: p, endpoint: http://localhost:9050 } } */\n"
         "-- @cell parent\nSELECT 1 AS x;\n"
@@ -445,7 +444,7 @@ def fake_pg(monkeypatch):
 
 def test_postgres_executor_registers_result(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT n FROM nums;", {"input": {"postgres": {"dsn": "postgresql://x"}}})
-    view = EXECUTORS.get("postgres").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,), (2,), (3,)]
     # trailing semicolon stripped; no session -> the ephemeral connection is closed
     assert fake_pg[0].sqls == ["SELECT n FROM nums"]
@@ -458,7 +457,7 @@ def test_postgres_setup_then_terminal_runs_in_order(ctx, fake_pg) -> None:
         "CREATE TEMP TABLE staging AS SELECT n FROM src;\nSELECT n FROM staging",
         {"input": {"postgres": {"dsn": "postgresql://x"}}},
     )
-    EXECUTORS.get("postgres").execute(cell, ctx)
+    execute_cell(cell, ctx)
     # setup statement runs for effect, then the terminal statement is the result
     assert fake_pg[0].sqls == [
         "CREATE TEMP TABLE staging AS SELECT n FROM src",
@@ -473,16 +472,21 @@ def test_postgres_executor_string_shorthand_and_env_dsn(monkeypatch) -> None:
     assert key == "postgres:postgresql://quicksql@localhost/quicksql"
 
 
+def test_bigquery_string_shorthand_names_the_project() -> None:
+    cfg = resolve_cell({}, {"input": {"bigquery": "my-proj"}})
+    assert EXECUTORS.get("bigquery").context_key(cfg) == "bigquery:my-proj"
+
+
 def test_postgres_executor_missing_dsn_raises(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT 1", {"engine": "postgres"})
     with pytest.raises(ExecutorError, match="^postgres engine needs input.postgres.dsn$"):
-        EXECUTORS.get("postgres").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_postgres_executor_wraps_driver_errors(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT boom", {"input": {"postgres": {"dsn": "postgresql://x"}}})
     with pytest.raises(ExecutorError, match="^postgres: relation missing$"):
-        EXECUTORS.get("postgres").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> None:
@@ -509,3 +513,164 @@ def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> No
     # landing-by-default: both cells still inspectable as parquet
     assert (tmp_path / "data" / "parent.parquet").exists()
     assert (tmp_path / "data" / "child.parquet").exists()
+
+
+def test_a_dead_postgres_session_is_reopened_and_its_temps_rematerialized(tmp_path, fake_pg) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    project = compile_text(
+        "/*@ input: { postgres: { dsn: 'postgresql://x' } } */\n"
+        "-- @cell parent\nSELECT n FROM src;\n"
+        "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};",
+        root=tmp_path,
+    )
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        fake_pg[0].broken = True  # psycopg's mark once an operation finds the connection dead
+        results = run_project(project, select=["child"], closure=False, session=session)
+        assert [r.cell for r in results] == ["parent", "child"]  # parent's temp died too
+        assert all(r.ok for r in results), [r.error for r in results]
+    finally:
+        session.close()
+    assert len(fake_pg) == 2 and fake_pg[0].closed
+    assert 'CREATE TEMP TABLE "parent" AS SELECT n FROM src' in fake_pg[1].sqls
+
+
+def _expiring_bigquery(monkeypatch, expired: set):
+    """A fake client whose sessions are numbered sess-1, sess-2, ...: a job in a
+    session listed in ``expired`` fails the way BigQuery reports an expired one,
+    and a query reading a temp its session never created fails as not found.
+    Returns (jobs as (sql, session), clients made)."""
+    import re
+
+    jobs: list[tuple[str, object]] = []
+    clients: list[object] = []
+    sessions = iter(f"sess-{n}" for n in range(1, 100))
+    temps: dict[str, set] = {}  # session -> its temp tables
+
+    class FakeJob:
+        def __init__(self, sql, session):
+            self.sql = sql
+            self.session = session
+            self.session_info = SimpleNamespace(session_id=next(sessions)) if session is None else None
+
+        def result(self):
+            if self.session in expired:
+                raise RuntimeError(
+                    f"400 Session {self.session} has expired and is no longer available."
+                )
+            session = self.session or self.session_info.session_id
+            created = re.match(r"CREATE OR REPLACE TEMP TABLE (\w+)", self.sql)
+            if created:
+                temps.setdefault(session, set()).add(created[1])
+            else:
+                for table in re.findall(r"FROM (\w+)", self.sql):
+                    if table.startswith("parent") and table not in temps.get(session, ()):
+                        raise RuntimeError(f"404 Not found: Table {table}")
+            return self
+
+        def to_arrow(self):
+            return pl.DataFrame({"n": [1]})
+
+    class FakeClient:
+        def query(self, sql, job_config=None, **kwargs):
+            jobs.append((sql, job_config))
+            return FakeJob(sql, job_config)
+
+    def make(self, spec):
+        clients.append(FakeClient())
+        return clients[-1]
+
+    monkeypatch.setattr(BigQueryExecutor, "make_client", make)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: self.session_id)
+    return jobs, clients
+
+
+BQ_PARENT_CHILD = (
+    "/*@ input: { bigquery: { project: p } } */\n"
+    "-- @cell parent\nSELECT * FROM src;\n"
+    "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};"
+)
+
+
+def test_bigquery_reuses_one_client_per_context(tmp_path, monkeypatch) -> None:
+    from quicksql.compiler import compile_text
+
+    jobs, clients = _expiring_bigquery(monkeypatch, expired=set())
+    project = compile_text(
+        "/*@ input: { bigquery: { project: p } } */\n"
+        "-- @cell a\nSELECT 1 AS n;\n-- @cell b\nSELECT 2 AS n;\n-- @cell c\nSELECT 3 AS n;",
+        root=tmp_path,
+    )
+    assert all(r.ok for r in project.run())
+    assert len(clients) == 1 and len(jobs) == 3
+
+
+def test_an_expired_bigquery_session_is_reopened_rematerialized_and_retried(
+    tmp_path, monkeypatch
+) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired: set = set()
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(BQ_PARENT_CHILD, root=tmp_path)
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        expired.add("sess-1")  # the session expires between runs
+        jobs.clear()
+        [result] = run_project(project, select=["child"], closure=False, session=session)
+        assert result.ok, result.error
+    finally:
+        session.close()
+    assert [(sql.split(" AS ")[0], s) for sql, s in jobs] == [
+        ("SELECT count(*)", "sess-1"),  # rejected: the session expired
+        ("CREATE OR REPLACE TEMP TABLE parent", None),  # a new session, parent's temp again
+        ("SELECT count(*)", "sess-2"),  # the retry
+    ]
+
+
+def test_a_bigquery_retry_that_finds_its_session_gone_again_fails(tmp_path, monkeypatch) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired = {f"sess-{n}" for n in range(2, 100)}  # every session after the first
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(BQ_PARENT_CHILD, root=tmp_path)
+    session = RunSession()
+    try:
+        run_project(project, select=["parent"], session=session)  # sess-1, still fine
+        expired.add("sess-1")
+        [result] = run_project(project, select=["child"], closure=False, session=session)
+    finally:
+        session.close()
+    assert result.status == "failed"
+    assert "has expired and is no longer available" in result.error
+
+
+def test_after_a_lost_session_every_later_cell_gets_the_temps_it_reads(tmp_path, monkeypatch) -> None:
+    """Losing the session loses every temp in it, not just the ones the retried
+    cell reads: a later cell re-creates its own before it runs."""
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired: set = set()
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(
+        "/*@ input: { bigquery: { project: p } } */\n"
+        "-- @cell parent1\nSELECT 1 AS n;\n-- @cell parent2\nSELECT 2 AS n;\n"
+        "-- @cell child1\nSELECT * FROM {{ ref('parent1') }};\n"
+        "-- @cell child2\nSELECT * FROM {{ ref('parent2') }};",
+        root=tmp_path,
+    )
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        expired.add("sess-1")
+        results = run_project(project, select=["child1", "child2"], closure=False, session=session)
+    finally:
+        session.close()
+    assert all(r.ok for r in results), [r.error for r in results]

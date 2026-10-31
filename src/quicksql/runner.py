@@ -14,14 +14,17 @@ import shutil
 import time
 import traceback
 from collections import Counter
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
 import polars as pl
 
-from .errors import QsqlError, describe
+from .conduit import ConduitSession, conduit_target
+from .errors import ExecutorError, QsqlError, describe
+from .executors.base import EngineSession, SessionLost, result_view
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
-from .registry import EXECUTORS, PLUGINS
+from .registry import EXECUTORS, PLUGINS, SINKS
 from .sinks import make_sink
 
 if TYPE_CHECKING:
@@ -73,9 +76,7 @@ class RunSession:
         self._target: str | None = None
 
     def conduit(self, project: Project) -> Any:
-        spec = (project.config.input or {}).get("duckdb")
-        path = spec.get("path") if isinstance(spec, dict) else spec
-        target = str(project.root / path) if path else ":memory:"
+        target = conduit_target(project.config, project.root)
         if self.conn is None or target != self._target:
             if self.conn is not None:
                 self.conn.close()
@@ -83,6 +84,10 @@ class RunSession:
             self._target = target
             self.loaded_extensions = set()
             self.materialized = set()  # conduit temps died with the connection
+            self.engine_sessions = {  # and the sessions on it
+                key: live for key, live in self.engine_sessions.items()
+                if not isinstance(live, ConduitSession)
+            }
         return self.conn
 
     def close(self) -> None:
@@ -141,6 +146,144 @@ def _expand_stale_upstreams(project: Project, names: list[str], session: RunSess
     return [n for n in project.order if n in wanted]
 
 
+class StatementError(ExecutorError):
+    """One of a cell's statements failed: ``index`` of ``count``, from 1. The
+    message numbers it only when there's more than one to tell apart."""
+
+    def __init__(self, index: int, count: int, cause: Exception) -> None:
+        self.index = index
+        detail = _message(cause)
+        super().__init__(f"statement {index} of {count}: {detail}" if count > 1 else detail)
+
+
+def _context_key(cell: RenderedCell) -> str:
+    return EXECUTORS.get(cell.engine).context_key(cell.config)
+
+
+def _context_session(cell: RenderedCell, ctx: RunContext) -> tuple[EngineSession, bool]:
+    """The cell's context session, opened on the context's first cell and kept
+    by the run session; without one, a private session the caller closes."""
+    executor = EXECUTORS.get(cell.engine)
+    if ctx.session is None:
+        return executor.open_session(cell.config, ctx), True
+    key = _context_key(cell)
+    if key not in ctx.session.engine_sessions:
+        ctx.session.engine_sessions[key] = executor.open_session(cell.config, ctx)
+    return ctx.session.engine_sessions[key], False
+
+
+def execute_cell(cell: RenderedCell, ctx: RunContext, land: bool = True) -> str:
+    """The cell protocol, once for every engine; returns the conduit view the
+    sink lands from, or '' when the cell lands nothing.
+
+    Setup statements run for effect; the terminal statement is the result. A
+    cell some same-context cell refs materializes it as a session temp, once,
+    and lands by reading the temp back; any other cell extracts it directly.
+    A cell whose sink lands nothing runs every statement for effect.
+    ``land=False`` stops after the temp: its landed output already stands.
+    """
+    session, private = _context_session(cell, ctx)
+    lands_output = SINKS.get(cell.sink_type).lands_output
+    scoped = cell.reffed_in_context or bool(cell.context_refs)
+    statements = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    *setup, final = statements
+
+    def numbered(index: int, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return call(*args, **kwargs)
+        except SessionLost:
+            raise  # nothing ran: the runner reopens the session and retries
+        except Exception as exc:
+            raise StatementError(index, len(statements), exc) from exc
+
+    try:
+        for index, stmt in enumerate(setup if lands_output else statements, start=1):
+            numbered(index, session.execute, stmt, scoped=scoped)
+        if not lands_output:
+            return ""
+        last = len(statements)
+        if cell.reffed_in_context:
+            final = numbered(last, session.materialize, cell.name, final)
+            if ctx.session is not None:
+                ctx.session.materialized.add(cell.name)
+            ctx.emit("cell_step", cell.name, "materialized temp for downstream refs")
+        if not land:
+            return ""
+        return numbered(last, session.extract, final, result_view(cell.name), ctx, scoped=scoped)
+    finally:
+        if private:
+            session.close()
+
+
+def _forget_context(project: Project, session: RunSession, key: str) -> None:
+    """Close and drop a context's session. Its temps went with it, so they
+    leave session.materialized, and an exact rerun re-materializes them."""
+    gone = session.engine_sessions.pop(key, None)
+    if gone is not None:
+        with suppress(Exception):  # it may be dead already
+            gone.close()
+    session.materialized -= {
+        n for n in session.materialized
+        if n in project.cells and _context_key(project.cells[n]) == key
+    }
+
+
+def _context_upstreams(project: Project, cell: RenderedCell) -> list[str]:
+    """The same-context cells whose temps ``cell`` reads, transitively."""
+    needed: set[str] = set()
+    stack = list(cell.context_refs)
+    while stack:
+        name = stack.pop()
+        if name not in needed:
+            needed.add(name)
+            stack.extend(project.cells[name].context_refs)
+    return [n for n in project.order if n in needed]
+
+
+def _restore_temps(project: Project, cell: RenderedCell, ctx: RunContext) -> None:
+    """Re-create the same-context temps ``cell`` reads that the run session no
+    longer holds: a lost session took every temp in it, also those of cells
+    that ran before the loss. A no-op otherwise, since upstreams run first."""
+    if ctx.session is None:
+        return
+    missing = [n for n in _context_upstreams(project, cell) if n not in ctx.session.materialized]
+    if missing:
+        ctx.emit("cell_step", cell.name, f"re-materializing {', '.join(map(repr, missing))}")
+    for name in missing:
+        execute_cell(project.cells[name], ctx, land=False)
+
+
+def _retry_in_a_new_session(project: Project, cell: RenderedCell, ctx: RunContext) -> str:
+    """The engine rejected a statement because the context's session is gone.
+    Nothing ran, so reopen the session, re-create the temps the cell reads,
+    and run it once more; losing the new session too fails the cell."""
+    key = _context_key(cell)
+    _forget_context(project, ctx.session, key)
+    ctx.emit("cell_step", cell.name, f"{key} session lost: reopening")
+    _restore_temps(project, cell, ctx)
+    return execute_cell(cell, ctx)
+
+
+def _drop_stale_temp(cell: RenderedCell, session: RunSession) -> None:
+    """A cell that didn't come out ok may have a temp left from an earlier
+    run; drop it so nothing reads it stale."""
+    live = session.engine_sessions.get(_context_key(cell)) if cell.reffed_in_context else None
+    if live is not None:
+        with suppress(Exception):  # a dead session took its temps along
+            live.drop(cell.name)
+
+
+def _drop_dead_sessions(project: Project, session: RunSession) -> list[str]:
+    """Before the run plans its cells: a session known dead is dropped, so its
+    context's next cell opens a fresh one, and its temps leave
+    session.materialized, so an exact rerun re-materializes them. Returns the
+    dropped contexts' keys."""
+    dead = [key for key, live in session.engine_sessions.items() if not live.alive()]
+    for key in dead:
+        _forget_context(project, session, key)
+    return dead
+
+
 def base_runner(project: Project) -> Inner:
     """The innermost cell-runner; `project` rides in via closure so the chain
     signature stays (cell, ctx)."""
@@ -161,10 +304,13 @@ def base_runner(project: Project) -> Inner:
                 up_sink.prepare(ctx.conn)
             sink.prepare(ctx.conn)
             ctx.emit("cell_step", cell.name, f"executing on {cell.engine}")
-            view = EXECUTORS.get(cell.engine).execute(cell, ctx)
-            if cell.reffed_in_context and ctx.session is not None:
-                ctx.session.materialized.add(cell.name)
-                ctx.emit("cell_step", cell.name, "materialized temp for downstream refs")
+            try:
+                _restore_temps(project, cell, ctx)
+                view = execute_cell(cell, ctx)
+            except SessionLost:
+                if ctx.session is None:
+                    raise
+                view = _retry_in_a_new_session(project, cell, ctx)
             ctx.emit("cell_step", cell.name, f"landing via {cell.sink_type}")
             rows, target = sink.write(cell, view, ctx.conn)
             # effect-only sinks (none) land nothing, so there's nothing to read back
@@ -217,6 +363,7 @@ def run_project(
         on_event=on_event,
     )
     chain = build_chain(project)
+    reopened = _drop_dead_sessions(project, session)
     names = _selection(project, select, closure)
     if select is not None and not closure:
         names = _expand_stale_upstreams(project, names, session)
@@ -228,6 +375,8 @@ def run_project(
             detail=f"{len(names)} cell(s): {', '.join(names)}",
             cells=tuple(names),
         )
+        for key in reopened:
+            ctx.emit("note", detail=f"{key}: session lost; reopening it")
         _notify(ctx, "before_run", lambda p: p.before_run(project, ctx))
         # cell that didn't come out ok -> the failed cells behind it (itself if
         # it failed); depends_on carries both ref() and @depends_on edges
@@ -247,9 +396,10 @@ def run_project(
                     result = _failed(name, exc)
             if not result.ok:
                 failed_roots[name] = roots or [name]
-                # any temp table it left is stale; dropping it makes a later
+                # any temp table it left is stale; forgetting it makes a later
                 # exact rerun (watch/TUI) re-include the cell
                 session.materialized.discard(name)
+                _drop_stale_temp(cell, session)
             # a later exact rerun pulls the cell back in unless this says ok
             session.last_status[name] = result.status
             results.append(result)
@@ -280,6 +430,7 @@ def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:
         elapsed=elapsed,
         error=_message(exc),
         traceback=traceback.format_exc(),
+        statement=exc.index if isinstance(exc, StatementError) else None,
     )
 
 

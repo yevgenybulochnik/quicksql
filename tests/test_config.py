@@ -261,3 +261,32 @@ def test_reregistering_a_plugin_name_composes_its_new_config(tmp_path) -> None:
     _register_row_limit(positive=True)
     with pytest.raises(ConfigError, match="positive"):
         compile_text(text, root=tmp_path)
+
+
+# ---------- input_spec: an engine's input as a dict ----------
+
+
+@pytest.mark.parametrize(
+    ("engine", "raw", "spec"),
+    [
+        ("duckdb", "wh.db", {"path": "wh.db"}),
+        ("sqlite", "x.sqlite", {"path": "x.sqlite"}),
+        ("postgres", "$PG_DSN", {"dsn": "$PG_DSN"}),
+        ("bigquery", "my-proj", {"project": "my-proj"}),
+        ("sqlite", {"path": "x.sqlite"}, {"path": "x.sqlite"}),
+        ("bigquery", {"project": "p", "endpoint": "e"}, {"project": "p", "endpoint": "e"}),
+    ],
+    ids=["duckdb-str", "sqlite-str", "postgres-str", "bigquery-str", "sqlite-dict", "bigquery-dict"],
+)
+def test_input_spec_expands_the_engines_string_shorthand(engine, raw, spec) -> None:
+    from quicksql.config import input_spec
+
+    assert input_spec(resolve_cell({}, {"input": {engine: raw}}), engine) == spec
+
+
+def test_input_spec_of_an_absent_or_empty_input_is_empty() -> None:
+    from quicksql.config import input_spec
+
+    assert input_spec(resolve_cell({}, {}), "duckdb") == {}
+    assert input_spec(resolve_cell({}, {"input": {"duckdb": None}}), "duckdb") == {}
+    assert input_spec(resolve_cell({}, {"input": {"sqlite": "x.db"}}), "duckdb") == {}

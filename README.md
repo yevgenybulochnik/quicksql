@@ -105,20 +105,24 @@ usage error). The failing run above, as JSON (messages cut short):
   "cells": [
     {"cell": "users", "status": "failed", "rows": null, "target": null, "elapsed": 0.0219,
      "error": "Catalog Error: Table with name user_seed does not exist!\nDid you mean ...",
-     "traceback": "Traceback (most recent call last):\n ...", "preview": null},
+     "statement": 1, "traceback": "Traceback (most recent call last):\n ...",
+     "preview": null},
     {"cell": "events", "status": "ok", "rows": 10, "target": "data/events.parquet",
-     "elapsed": 0.0045, "error": null, "traceback": null,
+     "elapsed": 0.0045, "error": null, "statement": null, "traceback": null,
      "preview": {"columns": ["user_id", "event"], "rows": [[1, "event_0"]]}},
     {"cell": "active_user_events", "status": "skipped", "rows": null, "target": null,
-     "elapsed": 0.0, "error": "upstream 'users' failed", "traceback": null, "preview": null}
+     "elapsed": 0.0, "error": "upstream 'users' failed", "statement": null,
+     "traceback": null, "preview": null}
   ]
 }
 ```
 
 `status` is `ok`, `failed`, `compile_error`, or `error` when something else stopped the run
 before any cell ran, such as a `--plugins` module that won't import (exit 1). A cell's
-`error` is the message the summary prints and `traceback` the full trace; `elapsed` is in
-seconds. `preview` appears only with
+`error` is the message the summary prints and `traceback` the full trace; `statement`
+numbers, from 1, the cell's statement that failed (`null` when the failure was outside
+them, such as connecting), and the message starts `statement 2 of 3:` when the cell has
+more than one. `elapsed` is in seconds. `preview` appears only with
 `--rows`. Its values are JSON-safe: dates and times as ISO text, decimals as exact text,
 NaN as `"nan"`. On `compile_error` or `error`, `cells` is empty and `errors` lists each
 problem as `{"cell", "line", "message"}`; `cell` and `line` are `null` when the problem
@@ -193,8 +197,10 @@ on one for ordering with `@depends_on`.
 INSERT INTO warehouse.fact SELECT * FROM {{ ref('enriched') }};
 ```
 
-Notes: on Postgres/SQLite the statements share the cell's (autocommit) session, so a failure
-partway leaves earlier statements' effects in place. On DuckDB, `CREATE TEMP TABLE` in a setup
+Notes: a failure names its statement when the cell has several (`statement 2 of 3: ...`).
+On Postgres/SQLite the statements share the cell's (autocommit) session, so a failure
+partway leaves earlier statements' effects in place. A Postgres connection that drops is
+reopened on the next run, and its temps re-created. On DuckDB, `CREATE TEMP TABLE` in a setup
 statement lives on the shared conduit — prefer `CREATE OR REPLACE TEMP TABLE` to avoid clashes
 across cells. BigQuery runs the whole body as one native script (its terminal statement's rows
 land); a BigQuery cell that is `ref()`'d in-context must be a single statement.
@@ -256,10 +262,10 @@ executes the notebook's SQL, CLI commands still import a `quicksqlrc.py` next to
 
 | Engine | Notes |
 |---|---|
-| `duckdb` | Default. The cross-context conduit; the only engine that can serve cross-context `ref()`/`source()`/`@extensions`. |
+| `duckdb` | Default. The cross-context conduit; the only engine that can serve cross-context `ref()`/`source()`/`@extensions`. Its database is the header's `input: { duckdb: path.db }` (in memory without one); a cell naming a different one is a compile error, since every duckdb cell runs on the conduit. |
 | `sqlite` | `input: { sqlite: path.db }`. Same-file cells share one connection so in-engine `ref()` works. |
 | `postgres` | `input: { postgres: { dsn: "$PG_DSN" } }`. Needs the `postgres` extra; same-DSN cells share a session. |
-| `bigquery` | `input: { bigquery: { project: ..., endpoint: ... } }`. Needs the `bigquery` extra; `endpoint` targets an emulator. |
+| `bigquery` | `input: { bigquery: { project: ..., endpoint: ... } }` (or just `{ bigquery: project }`). Needs the `bigquery` extra; `endpoint` targets an emulator. Same-project cells share one client; an expired session is reopened and the cell retried once. |
 
 **Sinks** (where a cell lands, and how it's read back):
 
@@ -425,8 +431,9 @@ without Docker.
 | `render.py` | Jinja on SQL bodies; `ref`/`source`/`var`/`env`; records edges + extensions |
 | `graph.py` | topo sort, cycle detection, downstream sets |
 | `compiler.py` | parse → config → render → graph ⇒ a `Project` |
-| `runner.py` | topo run; per-cell executor + sink; the plugin run-chain; the shared conduit session |
-| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines, sinks, and file readers |
+| `runner.py` | topo run; the cell protocol (`execute_cell`) over each context's engine session; the plugin run-chain; the run session |
+| `conduit.py` | the DuckDB conduit: its target, and the duckdb engine's session on it |
+| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
 | `cli.py`, `watcher.py`, `tui.py`, `sheet.py`, `scaffold.py` | CLI, watch loop, TUI |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |

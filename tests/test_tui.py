@@ -1856,19 +1856,26 @@ async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
 
     import polars as pl
 
-    from quicksql.executors.base import Executor, register_frame, result_view
+    from quicksql.executors.base import EngineSession, Executor
     from quicksql.registry import executor
 
     gate = threading.Event()
     reached_second = threading.Event()
 
-    @executor("gated")
-    class GatedExecutor(Executor):
-        def execute(self, cell, ctx):
-            if cell.name == "second":
+    class GatedSession(EngineSession):
+        def execute(self, sql, *, scoped=True):
+            pass
+
+        def fetch(self, sql, *, scoped=True):
+            if sql == "SELECT 2":  # the second cell
                 reached_second.set()
                 assert gate.wait(timeout=10)
-            return register_frame(ctx, result_view(cell.name), pl.DataFrame({"x": [1]}))
+            return pl.DataFrame({"x": [1]})
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def open_session(self, config, ctx):
+            return GatedSession()
 
     path = tmp_path / "base.qsql"
     path.write_text(
@@ -2013,18 +2020,25 @@ def _gated_engine():
     is set; `reached` fires once one is blocked there."""
     import threading
 
-    from quicksql.executors.base import Executor, register_frame, result_view
+    from quicksql.executors.base import EngineSession, Executor
     from quicksql.registry import executor
 
     gate = threading.Event()
     reached = threading.Event()
 
-    @executor("gated")
-    class GatedExecutor(Executor):
-        def execute(self, cell, ctx):
+    class GatedSession(EngineSession):
+        def execute(self, sql, *, scoped=True):
+            pass
+
+        def fetch(self, sql, *, scoped=True):
             reached.set()
             assert gate.wait(timeout=10)
-            return register_frame(ctx, result_view(cell.name), pl.DataFrame({"x": [1]}))
+            return pl.DataFrame({"x": [1]})
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def open_session(self, config, ctx):
+            return GatedSession()
 
     return gate, reached
 

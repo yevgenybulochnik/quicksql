@@ -1,12 +1,16 @@
-"""The primary executor and cross-cell conduit: everything stays in DuckDB SQL."""
+"""The primary executor: duckdb cells run on the conduit itself."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from ..models import RenderedCell, RunContext
+# the module, not the class: conduit imports executors.base, whose package
+# __init__ imports this module mid-way (Phase 4 makes the __init__s lazy)
+from .. import conduit
+from ..config import input_spec
+from ..models import RunContext
 from ..registry import executor
-from .base import Executor, result_view
+from .base import EngineSession, Executor
 
 
 @executor("duckdb")
@@ -14,24 +18,7 @@ class DuckDBExecutor(Executor):
     supports_context_refs = True
 
     def context_key(self, config: Any) -> str:
-        spec = (config.input or {}).get("duckdb")
-        path = spec.get("path") if isinstance(spec, dict) else spec
-        return f"duckdb:{path or ':memory:'}"
+        return f"duckdb:{input_spec(config, 'duckdb').get('path') or ':memory:'}"
 
-    def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
-        *setup, final = self.split_statements(cell.sql)
-        if cell.sink_type == "none":
-            # effect-only: run every statement for its side effects, land nothing
-            for stmt in [*setup, final]:
-                ctx.conn.execute(stmt)
-            return ""
-        for stmt in setup:  # build-up statements run for effect on the conduit
-            ctx.conn.execute(stmt)
-        if cell.reffed_in_context:
-            # same-context consumers reference the bare cell name: materialize
-            # once as a temp table (a view would recompute per consumer)
-            ctx.conn.execute(f'CREATE OR REPLACE TEMP TABLE "{cell.name}" AS {final}')
-            return cell.name
-        view = result_view(cell.name)
-        ctx.conn.execute(f'CREATE OR REPLACE TEMP VIEW "{view}" AS {final}')
-        return view
+    def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
+        return conduit.ConduitSession(ctx.conn)

@@ -23,8 +23,14 @@ def test_to_dict_carries_the_outcome_and_no_preview_by_default() -> None:
         "target": "data/users.parquet",
         "elapsed": 0.25,
         "error": None,
+        "statement": None,
         "traceback": None,
     }
+
+
+def test_to_dict_carries_the_failed_statement() -> None:
+    failed = RunResult(cell="a", status="failed", error="boom", statement=2)
+    assert failed.to_dict()["statement"] == 2
 
 
 def test_to_dict_rows_adds_that_many_preview_rows() -> None:

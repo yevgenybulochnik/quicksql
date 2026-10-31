@@ -76,6 +76,36 @@ def test_ref_to_none_sink_cell_rejected(tmp_path) -> None:
         )
 
 
+def test_ref_to_any_sink_that_lands_nothing_rejected(tmp_path, discard_sink) -> None:
+    # lands_output, not the sink's name, says whether there is anything to read back
+    with pytest.raises(ConfigError, match="cannot ref\\('effect'\\): it uses sink 'discard' and lands nothing"):
+        compile_text(
+            "-- @cell effect\n-- @output: { type: discard }\nCREATE TABLE t AS SELECT 1 AS n;\n"
+            "-- @cell reader\nSELECT * FROM {{ ref('effect') }};",
+            root=tmp_path,
+        )
+
+
+def test_a_duckdb_cell_with_its_own_duckdb_input_is_rejected(tmp_path) -> None:
+    # every duckdb cell runs on the one conduit the header names; a cell's own
+    # input.duckdb used to be ignored silently, running it in memory
+    with pytest.raises(
+        ConfigError,
+        match=r"cell 'a' \(line 1\): input.duckdb 'other.db' isn't the conduit's \(':memory:'\)",
+    ):
+        compile_text("-- @cell a\n-- @input: { duckdb: other.db }\nSELECT 1;", root=tmp_path)
+
+
+def test_a_duckdb_cell_naming_the_conduits_database_compiles(tmp_path) -> None:
+    project = compile_text(
+        "-- @input: { duckdb: wh.db }\n"
+        "-- @cell inherits\nSELECT 1;\n"
+        "-- @cell repeats\n-- @input: { duckdb: ./wh.db }\nSELECT 2;\n",
+        root=tmp_path,
+    )
+    assert list(project.cells) == ["inherits", "repeats"]
+
+
 def test_depends_on_to_none_sink_cell_allowed(tmp_path) -> None:
     # ordering-only dependency reads no data, so it's fine to depend on an effect-only cell
     project = compile_text(

@@ -25,6 +25,22 @@ def test_run_lands_parquet_and_previews(tmp_path) -> None:
     assert results[1].elapsed > 0
 
 
+def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_sink) -> None:
+    # effect-only is the sink's lands_output, not its name: the terminal INSERT
+    # runs for effect instead of being wrapped as the result to land
+    project = compile_text(
+        "-- @cell load\n-- @output: { type: discard }\n"
+        "CREATE TABLE staged (n INT);\nINSERT INTO staged VALUES (1), (2), (3);\n"
+        "-- @cell counted\n-- @depends_on: [load]\n"
+        "SELECT count(*) AS c FROM staged;\n",
+        root=tmp_path,
+    )
+    results = {r.cell: r for r in project.run()}
+    assert results["load"].ok, results["load"].error
+    assert (results["load"].rows, results["load"].target) == (0, "discarded")
+    assert results["counted"].preview["c"].to_list() == [3]
+
+
 def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> None:
     project = compile_text(
         "-- @cell load\n-- @output: { type: none }\n"
@@ -699,3 +715,197 @@ def test_run_event_line_renders_a_skipped_result() -> None:
     assert RunEvent("cell_finished", "b", result=skipped).line() == (
         "b: skipped — upstream 'a' failed"
     )
+
+
+# ---------- the cell protocol: the runner drives every engine's session ----------
+
+
+def _recording_session(calls: list):
+    from quicksql.executors.base import EngineSession
+
+    class Recording(EngineSession):
+        """Records what the runner asks; a materialized temp reads back as 'READ <name>'."""
+
+        def execute(self, sql, *, scoped=True):
+            calls.append(("execute", sql, scoped))
+
+        def materialize(self, name, sql):
+            calls.append(("materialize", name, sql))
+            return f"READ {name}"
+
+        def fetch(self, sql, *, scoped=True):
+            calls.append(("fetch", sql, scoped))
+            return pl.DataFrame({"x": [1]})
+
+        def close(self):
+            calls.append(("close",))
+
+    return Recording()
+
+
+@pytest.fixture
+def recording_engine():
+    """Engine `rec`, whose sessions record the runner's calls; yields the calls."""
+    from quicksql.executors.base import Executor, split_statements
+    from quicksql.registry import executor
+
+    calls: list = []
+
+    @executor("rec")
+    class Rec(Executor):
+        supports_context_refs = True
+
+        def split_statements(self, sql):
+            return split_statements(sql, "duckdb")
+
+        def open_session(self, config, ctx):
+            calls.append(("open",))
+            return _recording_session(calls)
+
+    return calls
+
+
+def test_a_plain_cell_runs_its_setup_then_extracts_its_terminal_statement(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\nCREATE TEMP TABLE s AS SELECT 1;\nSELECT * FROM s;",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.ok, result.error
+    assert recording_engine == [
+        ("open",),
+        ("execute", "CREATE TEMP TABLE s AS SELECT 1", False),
+        ("fetch", "SELECT * FROM s", False),
+        ("close",),  # with the run's private run session
+    ]
+    assert pl.read_parquet(tmp_path / "data" / "a.parquet")["x"].to_list() == [1]
+
+
+def test_an_effect_only_cell_runs_every_statement_and_extracts_nothing(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\n-- @output: { type: none }\n"
+        "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1);",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.ok, result.error
+    assert recording_engine == [
+        ("open",),
+        ("execute", "CREATE TABLE t (n INT)", False),
+        ("execute", "INSERT INTO t VALUES (1)", False),
+        ("close",),
+    ]
+
+
+def test_a_cell_reffed_in_context_materializes_once_and_lands_from_its_temp(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
+        root=tmp_path,
+    )
+    results = project.run()
+    assert all(r.ok for r in results), [r.error for r in results]
+    assert recording_engine == [
+        ("open",),  # one session for the context
+        ("materialize", "a", "SELECT 1 AS x"),
+        ("fetch", "READ a", True),  # a lands from its temp instead of running again
+        ("fetch", "SELECT * FROM a", True),  # b reads the temp in-engine
+        ("close",),
+    ]
+
+
+def test_without_a_run_session_a_cell_gets_a_private_session(tmp_path, recording_engine) -> None:
+    import duckdb
+
+    from quicksql.models import RunContext
+    from quicksql.runner import execute_cell
+
+    cell = compile_text("-- @engine: rec\n-- @cell a\nSELECT 1 AS x;", root=tmp_path).cells["a"]
+    conn = duckdb.connect()
+    try:
+        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path))
+        assert conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,)]
+    finally:
+        conn.close()
+    assert recording_engine == [("open",), ("fetch", "SELECT 1 AS x", False), ("close",)]
+
+
+# ---------- a failure names its statement and quotes the cell's own SQL ----------
+
+
+def test_a_failure_names_its_statement_when_the_cell_has_several(tmp_path) -> None:
+    project = compile_text(
+        "-- @cell a\nCREATE TEMP TABLE s AS SELECT 1 AS n;\nINSERT INTO s SELECT nope;\n"
+        "SELECT * FROM s;",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.statement == 2
+    assert result.error.startswith('statement 2 of 3: Binder Error: Referenced column "nope"')
+
+
+def test_a_single_statement_failure_is_statement_1_with_no_prefix(tmp_path) -> None:
+    [result] = compile_text("-- @cell a\nSELECT nope;", root=tmp_path).run()
+    assert result.statement == 1
+    assert result.error.startswith('Binder Error: Referenced column "nope"')
+
+
+def test_a_failure_outside_the_cells_statements_has_no_statement(tmp_path) -> None:
+    [result] = compile_text("-- @cell a\n-- @engine: postgres\nSELECT 1;", root=tmp_path).run()
+    assert result.error == "postgres engine needs input.postgres.dsn"
+    assert result.statement is None
+
+
+@pytest.mark.parametrize(
+    "notebook",
+    [
+        "-- @cell a\nSELECT nope FROM range(1);",  # extracted: wrapped in a temp view
+        "-- @cell a\nSELECT nope FROM range(1);\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
+    ],
+    ids=["extracted", "materialized"],
+)
+def test_duckdb_error_context_quotes_the_cells_sql_not_its_wrapper(tmp_path, notebook) -> None:
+    result = compile_text(notebook, root=tmp_path).run()[0]
+    assert "CREATE" not in result.error
+    assert result.error.endswith(
+        "\nLINE 1: SELECT nope FROM range(1)\n" + " " * len("LINE 1: SELECT ") + "^"
+    )
+
+
+# ---------- sessions that die, and temps that go stale ----------
+
+
+def test_a_failed_cells_stale_temp_is_dropped(tmp_path) -> None:
+    """A rerun that fails leaves no earlier temp behind for anything to read stale."""
+    session = RunSession()
+    try:
+        body = "-- @cell b\nSELECT * FROM {{ ref('a') }};"
+        good = compile_text("-- @cell a\nSELECT 1 AS x;\n" + body, root=tmp_path)
+        assert all(r.ok for r in run_project(good, session=session))
+        broken = compile_text("-- @cell a\nSELECT nope;\n" + body, root=tmp_path)
+        [result] = run_project(broken, select=["a"], closure=False, session=session)
+        assert not result.ok
+        temps = "SELECT count(*) FROM duckdb_tables() WHERE temporary AND table_name = 'a'"
+        assert session.conn.sql(temps).fetchone() == (0,)
+    finally:
+        session.close()
+
+
+def test_a_conduit_that_moves_away_and_back_runs_on_the_live_connection(tmp_path) -> None:
+    """The run session reconnects when the header's input.duckdb changes; a
+    duckdb session cached for the first database mustn't keep its closed one."""
+    session = RunSession()
+    try:
+        for db in ("a.db", "b.db", "a.db"):
+            project = compile_text(
+                f"-- @input: {{ duckdb: {db} }}\n-- @cell x\nSELECT 1 AS n;", root=tmp_path
+            )
+            [result] = run_project(project, session=session)
+            assert result.ok, (db, result.error)
+    finally:
+        session.close()

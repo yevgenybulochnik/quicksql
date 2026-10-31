@@ -11,8 +11,12 @@ first `@cell`) inherited by every cell.
   `@depends_on`, topo-sorted with cycle detection (`graph.py`).
 - **A cell body may be multiple statements.** `executors/base.split_statements` (sqlglot
   tokenizer, engine dialect, comment/string-aware, original text preserved) splits on
-  top-level `;`; setup statements run for effect and the **terminal** statement is wrapped/
-  landed as today. `@output: {type: none}` (`sinks/none_sink.py`, `lands_output=False`) is
+  top-level `;`; setup statements run for effect and the **terminal** statement is the
+  result. The runner owns this cell protocol (`runner.execute_cell`): executors only open
+  an `EngineSession` per context (`execute`/`fetch`/`extract`/`materialize`/`drop`/
+  `alive`/`close`; DB-API engines share `DbApiSession`), and a failure records its
+  statement (`RunResult.statement`, `statement 2 of 3:` in the message). A sink with
+  `lands_output=False` (`@output: {type: none}`, `sinks/none_sink.py`) makes the cell
   effect-only — runs every statement, lands nothing, can't be `ref()`'d (compiler rejects
   the ref). BigQuery overrides `split_statements` to *never* split (native scripting runs the
   whole body in one job); `supports_multistatement_materialization=False` makes the compiler
@@ -28,10 +32,17 @@ first `@cell`) inherited by every cell.
   `Executor.context_key`. Same-context `ref()` resolves to a bare temp-table name in
   the engine's own dialect (session-scoped: duckdb conduit / shared sqlite connection /
   BigQuery session), executing the dependency next to the data; the cell still lands
-  via its sink from that temp — one execution, two consumers.
+  via its sink from that temp — one execution, two consumers. Sessions live in the
+  `RunSession` by context key; a session whose `alive()` is False is dropped at run
+  start (its temps re-materialize), a failed cell's temp is dropped, and `SessionLost`
+  (an expired BigQuery session) reopens, re-materializes, and retries the cell once;
+  before each cell the runner re-creates any same-context temp it reads that's gone.
+  Read an engine's input with `config.input_spec(config, engine)`, never by hand.
 - **DuckDB is the cross-context conduit.** Cells using *cross-context*
   `ref()`/`source()`/`@extensions` must run on duckdb (compile-time guardrail); other
-  engines extract to Polars/Arrow and DuckDB lands it in any sink.
+  engines extract to Polars/Arrow and DuckDB lands it in any sink. Every duckdb cell runs
+  on the conduit (`conduit.py`: `conduit_target`, `ConduitSession`), so a cell whose own
+  `input.duckdb` differs from the header's is a compile error.
 - **Everything is a plugin.** `@plugin` / `@executor` / `@source_reader` / `@sink`
   decorators register into registries (`registry.py`). A `Plugin` bundles a pydantic
   `Config` (its fields become directives; validators run on merged config; merge
@@ -100,10 +111,12 @@ first `@cell`) inherited by every cell.
 - `sources.py` — file reader registry (csv/parquet/json/excel)
 - `graph.py` — topo sort, cycle detection, downstream sets
 - `compiler.py` — parse → config → render → graph ⇒ `Project`
-- `runner.py` — topo run; per-cell executor+sink; plugin run-chain; RunSession holds
-  the conduit connection + extension cache across watch/TUI reruns
-- `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery;
-  parquet/duckdb/postgres)
+- `runner.py` — topo run; the cell protocol (`execute_cell`); plugin run-chain;
+  RunSession holds the conduit connection, engine sessions, and extension cache across
+  watch/TUI reruns
+- `conduit.py` — the DuckDB conduit's target and the duckdb engine's session on it
+- `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
+  opening an `EngineSession`; parquet/duckdb/postgres)
 - `scaffold.py`, `cli.py`, `watcher.py`, `sheet.py` + `tui.py` — CLI, watch loop, TUI
 - `lsp/` — `analysis.py` (diagnostics/completions on sqlglot + length-preserving
   Jinja mask), `server.py` (pygls stdio); bigquery cells prefer the googlesql

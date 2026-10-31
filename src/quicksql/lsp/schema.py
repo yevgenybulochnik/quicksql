@@ -24,6 +24,7 @@ import polars as pl
 from dataclasses import dataclass
 
 from .. import catalog
+from ..config import input_spec
 from ..sources import reader_for
 
 Column = tuple[str, str]  # (name, type)
@@ -116,7 +117,7 @@ def _table_frame(project: Any, cell: Any, name: str) -> pl.DataFrame | None:
         elif engine == "sqlite":
             leaf = root.child({"table": table})
         elif engine == "bigquery":
-            spec = (cell.config.input or {}).get("bigquery") or {}
+            spec = input_spec(cell.config, "bigquery")
             if len(parts) >= 3:
                 # project.dataset.table — introspect that project, not the
                 # spec's default (endpoint etc. carry over)
@@ -146,7 +147,7 @@ def relation_names(
     (project.dataset.), that project's dataset's tables."""
     if cell.engine != "bigquery" or len(parts) > 2:
         return []
-    spec = (cell.config.input or {}).get("bigquery") or {}
+    spec = input_spec(cell.config, "bigquery")
     key = ("relations", getattr(cell, "context", ""), tuple(parts))
 
     def datasets(s: dict) -> list[Column]:

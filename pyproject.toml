@@ -67,6 +67,7 @@ source_modules = [
     # every `import quicksql.x` runs the root __init__ first, so it must stay core
     "quicksql",
     "quicksql.compiler",
+    "quicksql.conduit",
     "quicksql.config",
     "quicksql.errors",
     "quicksql.graph",
