@@ -2,6 +2,15 @@ class QsqlError(Exception):
     """Base class for all quicksql errors."""
 
 
+def describe(exc: BaseException, self_describing: tuple[type[BaseException], ...]) -> str:
+    """One line for a person: errors of a ``self_describing`` type say what's
+    wrong in their own words; anything else, e.g. a plugin bug, needs its type
+    to read: "KeyError: 'x'", not "'x'"."""
+    if isinstance(exc, self_describing) and str(exc):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
 class ParseError(QsqlError):
     """The .qsql/.sql file could not be parsed into blocks."""
 

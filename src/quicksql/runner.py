@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import duckdb
 import polars as pl
 
-from .errors import QsqlError
+from .errors import QsqlError, describe
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import EXECUTORS, PLUGINS
 from .sinks import make_sink
@@ -286,9 +286,7 @@ def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:
 def _message(exc: Exception) -> str:
     """Our errors and duckdb's ("Catalog Error: ...") describe themselves;
     anything else, e.g. a plugin bug, needs its type to read: "KeyError: 'x'"."""
-    if isinstance(exc, (QsqlError, duckdb.Error)) and str(exc):
-        return str(exc)
-    return f"{type(exc).__name__}: {exc}"
+    return describe(exc, (QsqlError, duckdb.Error))
 
 
 def _skipped(name: str, roots: list[str]) -> RunResult:

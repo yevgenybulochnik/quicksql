@@ -19,7 +19,7 @@ from jinja2 import StrictUndefined, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel
 
-from .errors import ConfigError
+from .errors import ConfigError, QsqlError, describe
 from .registry import PLUGINS
 from .sinks.base import Sink
 
@@ -147,8 +147,11 @@ def render_sql(
     jinja = _SqlSandbox(undefined=StrictUndefined, keep_trailing_newline=True)
     try:
         sql = jinja.from_string(sql_raw).render(**context)
-    except TemplateError as exc:
-        raise ConfigError(f"cell {name!r}: template error: {exc}") from exc
+    except QsqlError:
+        raise  # already says what's wrong: an unknown ref(), a plugin global's own error
+    except Exception as exc:  # Jinja's own, or Python's from inside it: {{ 1/0 }}
+        detail = describe(exc, (TemplateError,))
+        raise ConfigError(f"cell {name!r}: template error: {detail}") from exc
 
     for plug in PLUGINS.overriding("after_render"):
         out = plug.after_render(rctx, sql)
