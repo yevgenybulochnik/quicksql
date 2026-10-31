@@ -132,3 +132,36 @@ def test_rerunning_an_edited_manual_upstream_by_hand_leaves_its_downstream_stale
         assert _statuses(path)["b"] == ("stale", "upstream 'a' changed")
     finally:
         session.close()
+
+
+def test_a_fingerprint_is_the_same_in_every_process(tmp_path) -> None:
+    """status compares fingerprints across processes: a set-valued field (a
+    plugin's) must not hash in the hash-seeded order Python iterates it in."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(f"""
+        from pydantic import BaseModel
+        from quicksql.compiler import compile_text
+        from quicksql.plugins.base import Plugin, qfield
+        from quicksql.registry import plugin
+        from quicksql.state import current_fingerprints
+
+        @plugin
+        class Labels(Plugin):
+            class Config(BaseModel):
+                labels: set[str] = qfield(set())
+
+        text = "-- @labels: [alpha, beta, gamma, delta, epsilon]\\n-- @cell a\\nSELECT 1;"
+        print(current_fingerprints(compile_text(text, root={str(tmp_path)!r}), {{}})["a"])
+    """)
+    prints = {
+        subprocess.run(
+            [sys.executable, "-c", script], env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for seed in (1, 2, 3)
+    }
+    assert len(prints) == 1, prints
