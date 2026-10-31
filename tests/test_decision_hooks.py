@@ -6,6 +6,7 @@ from quicksql.compiler import compile_file, compile_text
 from quicksql.errors import ConfigError
 from quicksql.plugins.base import Plugin
 from quicksql.registry import PLUGINS, plugin
+from quicksql.runner import RunSession
 from quicksql.watcher import plan_rerun
 
 
@@ -60,11 +61,11 @@ def test_dropping_autorun_plugin_defaults_to_rerun_everything(tmp_path) -> None:
     f = tmp_path / "base.sql"
     f.write_text("-- @cell a\n-- @autorun: false\nSELECT 1;")
     project = compile_file(f)
-    assert plan_rerun({}, project) == []  # autorun:false filters it out
+    assert plan_rerun(project, RunSession()) == []  # autorun:false filters it out
     _drop("autorun")
     f.write_text("-- @cell a\nSELECT 1;")
     project = compile_file(f)
-    assert plan_rerun({}, project) == ["a"]  # no plugin -> default: rerun
+    assert plan_rerun(project, RunSession()) == ["a"]  # no plugin -> default: rerun
 
 
 def test_schema_directive_reaches_sink_config(tmp_path) -> None:
