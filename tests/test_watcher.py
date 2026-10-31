@@ -2,6 +2,8 @@ import os
 import queue
 import threading
 
+import pytest
+
 from quicksql.compiler import compile_file
 from quicksql.runner import RunSession
 from quicksql.watcher import hashes_of, plan_rerun, run_changed, touches, watch_events
@@ -49,6 +51,39 @@ def test_new_cell_counts_as_changed(tmp_path) -> None:
     hashes = hashes_of(project)
     f.write_text(V1 + "-- @cell e\nSELECT 5 AS w;\n")
     assert plan_rerun(hashes, compile_file(f)) == ["e"]
+
+
+MANUAL = """\
+-- @cell a
+SELECT 1 AS x;
+-- @cell d
+-- @autorun: false
+SELECT * FROM {{ ref('a') }};
+-- @cell e
+SELECT * FROM {{ ref('d') }};
+-- @cell f
+SELECT * FROM {{ ref('a') }} JOIN {{ ref('d') }} USING (x);
+"""
+
+
+@pytest.mark.parametrize(
+    ("edit", "planned"),
+    [
+        # d won't rerun, so e and f would read its old output: nothing reruns
+        (("FROM {{ ref('a') }};\n-- @cell e", "FROM {{ ref('a') }} WHERE x > 0;\n-- @cell e"), []),
+        # a reruns; e reads it only through d, which doesn't, so only f follows a
+        (("SELECT 1 AS x;", "SELECT 2 AS x;"), ["a", "f"]),
+    ],
+    ids=["edit-manual-cell", "edit-through-manual-cell"],
+)
+def test_reruns_propagate_only_through_cells_that_rerun(tmp_path, edit, planned) -> None:
+    f = tmp_path / "base.sql"
+    f.write_text(MANUAL)
+    hashes = hashes_of(compile_file(f))
+    old, new = edit
+    assert MANUAL.count(old) == 1
+    f.write_text(MANUAL.replace(old, new))
+    assert plan_rerun(hashes, compile_file(f)) == planned
 
 
 def test_touches_filters_directory_events(tmp_path) -> None:
