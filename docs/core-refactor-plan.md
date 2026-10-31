@@ -50,8 +50,12 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   `input_spec` (`9b9f01a`, `e5f7fb0`), per-cell `input.duckdb` rejected (`e5e1f3c`,
   `aff3f60`). Found on the way and fixed first: the Postgres executor's unqualified temp
   `DROP` dropped a real table named like a reffed cell (`aa7ad84`, `a2214c0`).
-- Next — Phase 8. Two quick fixes found in Phase 3 are open (see the findings table). The
-  agent-facing CLI beyond `run --json` is planned in `docs/agent-cli-plan.md`.
+- Done — the two quick fixes found in Phase 3: a runtime error while landing a plain duckdb
+  cell is its terminal statement's, found by running the query alone through
+  `EngineSession.check` (`f90b2b0`, `0900172`), and Postgres context keys show the
+  password as `***` (`d727e8b`, `2bd6f28`).
+- Next — Phase 8. The agent-facing CLI beyond `run --json` is planned in
+  `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -81,8 +85,8 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
 | DuckDB errors print as `FAIL a: ^` | reproduced | 2 (fixed) |
 | DuckDB's `LINE 1:` error context shows the wrapper (`CREATE OR REPLACE TEMP TABLE "a" AS …`), not the cell's SQL (2026-10-30) | reproduced | 3 (fixed) |
-| A plain DuckDB cell's runtime errors (a bad cast) surface while its sink lands the lazy view, so `LINE 1:` quotes the sink's `COPY` and `statement` is null (2026-10-31) | reproduced | 1 |
-| Postgres context keys embed the DSN, password included, and show in `list`, `explain`, the catalog and the reopen note (2026-10-31) | read | 1 |
+| A plain DuckDB cell's runtime errors (a bad cast) surface while its sink lands the lazy view, so `LINE 1:` quotes the sink's `COPY` and `statement` is null (2026-10-31) | reproduced | 1 (fixed) |
+| Postgres context keys embed the DSN, password included, and show in `explain`, the catalog and the reopen note (2026-10-31) | read | 1 (fixed) |
 | A reffed Postgres cell replaced its temp with an unqualified `DROP TABLE IF EXISTS "name"`, which dropped a real table of that name on a session's first run (2026-10-31) | reproduced | 3 (fixed) |
 | Cell protocol duplicated in all 4 executors; `sink_type == "none"` checks | read | 3 (fixed) |
 | Per-cell `input.duckdb` is silently ignored | reproduced: ran in `:memory:` | 3 (fixed) |
