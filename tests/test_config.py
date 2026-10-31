@@ -13,7 +13,7 @@ from quicksql.config import (
     resolve_sink_type,
 )
 from quicksql.errors import ConfigError
-from quicksql.models import Merge, Scope
+from quicksql.models import Scope
 from quicksql.plugins.base import Plugin, qfield
 from quicksql.registry import PLUGINS, plugin
 

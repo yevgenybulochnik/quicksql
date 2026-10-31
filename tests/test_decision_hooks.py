@@ -6,7 +6,7 @@ from quicksql.compiler import compile_file, compile_text
 from quicksql.errors import ConfigError
 from quicksql.plugins.base import Plugin
 from quicksql.registry import PLUGINS, plugin
-from quicksql.watcher import hashes_of, plan_rerun
+from quicksql.watcher import plan_rerun
 
 
 def _drop(name: str) -> None:

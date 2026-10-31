@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from quicksql.errors import ConfigError
 from quicksql.models import Scope
 from quicksql.plugins.base import Plugin, qfield
-from quicksql.registry import PLUGINS, PluginRegistry, Registry, plugin
+from quicksql.registry import PLUGINS, Registry, plugin
 
 
 def test_registry_get_unknown_raises() -> None:
