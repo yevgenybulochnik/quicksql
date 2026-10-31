@@ -473,6 +473,11 @@ def test_postgres_executor_string_shorthand_and_env_dsn(monkeypatch) -> None:
     assert key == "postgres:postgresql://quicksql@localhost/quicksql"
 
 
+def test_bigquery_string_shorthand_names_the_project() -> None:
+    cfg = resolve_cell({}, {"input": {"bigquery": "my-proj"}})
+    assert EXECUTORS.get("bigquery").context_key(cfg) == "bigquery:my-proj"
+
+
 def test_postgres_executor_missing_dsn_raises(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT 1", {"engine": "postgres"})
     with pytest.raises(ExecutorError, match="^postgres engine needs input.postgres.dsn$"):
