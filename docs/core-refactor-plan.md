@@ -42,8 +42,16 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   rerun (`9a25755`, `ef5edfe`); the TUI preview falls back to the cell's own sink
   (`0b8b7ef`, `791e4b5`); and, found on the way, a Postgres append-mode sink creates its
   table on the first run (`abdaa08`, `2a27359`). Phase 1 is complete.
-- Next — Phase 3. The agent-facing CLI beyond `run --json` is planned in
-  `docs/agent-cli-plan.md`.
+- Done — Phase 3 (2026-10-31, branch `refactor/phase3-cell-protocol`): the runner owns
+  the cell protocol and executors open one `EngineSession` per context
+  (`ae62d25`, `ce14ad0`); failures name their statement and quote the cell's SQL
+  (`6b6e65b`, `10871ba`); dead sessions reopen, stale temps drop, an expired BigQuery
+  session retries once (`612588f`, `e2fc519`); `lands_output` (`1a44568`, `486d754`),
+  `input_spec` (`9b9f01a`, `e5f7fb0`), per-cell `input.duckdb` rejected (`e5e1f3c`,
+  `aff3f60`). Found on the way and fixed first: the Postgres executor's unqualified temp
+  `DROP` dropped a real table named like a reffed cell (`aa7ad84`, `a2214c0`).
+- Next — Phase 8. Two quick fixes found in Phase 3 are open (see the findings table). The
+  agent-facing CLI beyond `run --json` is planned in `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -72,11 +80,14 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
 | Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
 | DuckDB errors print as `FAIL a: ^` | reproduced | 2 (fixed) |
-| DuckDB's `LINE 1:` error context shows the wrapper (`CREATE OR REPLACE TEMP TABLE "a" AS …`), not the cell's SQL (2026-10-30) | reproduced | 3 |
-| Cell protocol duplicated in all 4 executors; `sink_type == "none"` checks | read | 3 |
-| Per-cell `input.duckdb` is silently ignored | reproduced: ran in `:memory:` | 3 |
-| Dropped Postgres connections and expired BigQuery sessions go undetected | read | 3 |
-| `config.input` is hand-parsed in 12 places | grep | 3, 5 |
+| DuckDB's `LINE 1:` error context shows the wrapper (`CREATE OR REPLACE TEMP TABLE "a" AS …`), not the cell's SQL (2026-10-30) | reproduced | 3 (fixed) |
+| A plain DuckDB cell's runtime errors (a bad cast) surface while its sink lands the lazy view, so `LINE 1:` quotes the sink's `COPY` and `statement` is null (2026-10-31) | reproduced | 1 |
+| Postgres context keys embed the DSN, password included, and show in `list`, `explain`, the catalog and the reopen note (2026-10-31) | read | 1 |
+| A reffed Postgres cell replaced its temp with an unqualified `DROP TABLE IF EXISTS "name"`, which dropped a real table of that name on a session's first run (2026-10-31) | reproduced | 3 (fixed) |
+| Cell protocol duplicated in all 4 executors; `sink_type == "none"` checks | read | 3 (fixed) |
+| Per-cell `input.duckdb` is silently ignored | reproduced: ran in `:memory:` | 3 (fixed) |
+| Dropped Postgres connections and expired BigQuery sessions go undetected | read | 3 (fixed) |
+| `config.input` is hand-parsed in 12 places | grep | 3 (fixed), 5 |
 | Process-global registries: rc plugins leak across notebooks; TUI `o` skips the new rc | read | 4 |
 | An edited rc never reloads in a long-lived TUI/LSP: the loader skips names already in `sys.modules` (2026-10-30) | read: `cli._load_plugin_module` | 4 |
 | `executors/`, `sinks/` and `plugins/__init__.py` import every implementation, so importing a contract (`plugins.base`) loads all builtins (2026-10-30) | read | 4, 6 |
@@ -190,7 +201,27 @@ Sizes are relative: S, M, L.
   usage error). `RunEvent.to_dict()` waits for JSON watch events
   (`docs/agent-cli-plan.md`).
 
-**Phase 3 — the runner owns the cell protocol (L).**
+**Phase 3 — the runner owns the cell protocol (L; done).** As built, where it differs
+from the plan below:
+- Done: `Executor.open_session(config, ctx) -> EngineSession`, kept by the `RunSession`
+  per context key. The session API is `execute(sql)`, `fetch(sql)` (rows as a Polars
+  frame or pyarrow Table), `extract(sql, view, ctx)` (default: fetch and register on the
+  conduit; `ConduitSession` makes a lazy temp view instead), `materialize(name, sql)`
+  (returns the query that reads the temp back), `drop`, `alive`, `close`. `scoped=False`
+  marks a cell that touches no temps, so BigQuery runs it as a plain job. The protocol is
+  `runner.execute_cell`.
+- Done: `RunResult.statement` and `statement 2 of 3:` in the message; `run --json`
+  carries it. The `LINE 1:` quote cuts quicksql's wrapper (DuckDB and Postgres), not
+  planned here but listed in the findings for this phase.
+- Done: liveness as planned. BigQuery's expiry is recognized by its message ("Session
+  ... has expired and is no longer available") and raised as `SessionLost`.
+- Debt: `duckdb_exec` imports the `conduit` module, not `ConduitSession`, to dodge the
+  eager `executors/__init__` cycle; Phase 4's lazy `__init__`s remove the need.
+- Tests: the existing executor tests keep their assertions; they call
+  `runner.execute_cell` instead of `Executor.execute`, and patch `BigQuerySession`'s
+  `_job_config` instead of the executor's.
+
+As planned:
 - Executors open one session per context with `execute(sql)`, `materialize(name, sql)`,
   `extract(sql_or_name) -> view`, `drop(name)`, `alive()` and `close()`. The runner
   implements effect-only / referenced-in-context / plain once — the

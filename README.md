@@ -197,8 +197,10 @@ on one for ordering with `@depends_on`.
 INSERT INTO warehouse.fact SELECT * FROM {{ ref('enriched') }};
 ```
 
-Notes: on Postgres/SQLite the statements share the cell's (autocommit) session, so a failure
-partway leaves earlier statements' effects in place. On DuckDB, `CREATE TEMP TABLE` in a setup
+Notes: a failure names its statement when the cell has several (`statement 2 of 3: ...`).
+On Postgres/SQLite the statements share the cell's (autocommit) session, so a failure
+partway leaves earlier statements' effects in place. A Postgres connection that drops is
+reopened on the next run, and its temps re-created. On DuckDB, `CREATE TEMP TABLE` in a setup
 statement lives on the shared conduit — prefer `CREATE OR REPLACE TEMP TABLE` to avoid clashes
 across cells. BigQuery runs the whole body as one native script (its terminal statement's rows
 land); a BigQuery cell that is `ref()`'d in-context must be a single statement.
@@ -260,10 +262,10 @@ executes the notebook's SQL, CLI commands still import a `quicksqlrc.py` next to
 
 | Engine | Notes |
 |---|---|
-| `duckdb` | Default. The cross-context conduit; the only engine that can serve cross-context `ref()`/`source()`/`@extensions`. |
+| `duckdb` | Default. The cross-context conduit; the only engine that can serve cross-context `ref()`/`source()`/`@extensions`. Its database is the header's `input: { duckdb: path.db }` (in memory without one); a cell naming a different one is a compile error, since every duckdb cell runs on the conduit. |
 | `sqlite` | `input: { sqlite: path.db }`. Same-file cells share one connection so in-engine `ref()` works. |
 | `postgres` | `input: { postgres: { dsn: "$PG_DSN" } }`. Needs the `postgres` extra; same-DSN cells share a session. |
-| `bigquery` | `input: { bigquery: { project: ..., endpoint: ... } }`. Needs the `bigquery` extra; `endpoint` targets an emulator. |
+| `bigquery` | `input: { bigquery: { project: ..., endpoint: ... } }` (or just `{ bigquery: project }`). Needs the `bigquery` extra; `endpoint` targets an emulator. Same-project cells share one client; an expired session is reopened and the cell retried once. |
 
 **Sinks** (where a cell lands, and how it's read back):
 
@@ -429,8 +431,9 @@ without Docker.
 | `render.py` | Jinja on SQL bodies; `ref`/`source`/`var`/`env`; records edges + extensions |
 | `graph.py` | topo sort, cycle detection, downstream sets |
 | `compiler.py` | parse → config → render → graph ⇒ a `Project` |
-| `runner.py` | topo run; per-cell executor + sink; the plugin run-chain; the shared conduit session |
-| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines, sinks, and file readers |
+| `runner.py` | topo run; the cell protocol (`execute_cell`) over each context's engine session; the plugin run-chain; the run session |
+| `conduit.py` | the DuckDB conduit: its target, and the duckdb engine's session on it |
+| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
 | `cli.py`, `watcher.py`, `tui.py`, `sheet.py`, `scaffold.py` | CLI, watch loop, TUI |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |
