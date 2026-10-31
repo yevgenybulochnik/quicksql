@@ -392,6 +392,67 @@ def test_preview_frame_reads_head_only(tmp_path) -> None:
     assert frame.height <= app.PREVIEW_ROWS
 
 
+def _cold_app(tmp_path, text: str) -> QsqlApp:
+    """A TUI on ``text`` that has run nothing this session."""
+    f = tmp_path / "base.qsql"
+    f.write_text(text)
+    app = QsqlApp(path=f, watch=False, auto_run=False)
+    app.project = compile_file(f)
+    return app
+
+
+def test_preview_frame_falls_back_to_the_cells_own_sink(tmp_path) -> None:
+    # a previous session's output, read where the cell's sink lands it — not a
+    # data/<cell>.parquet left over from before output.dir changed
+    app = _cold_app(
+        tmp_path, "-- @output: { type: parquet, dir: out/ }\n-- @cell users\nSELECT 1 AS n;\n"
+    )
+    for folder, n in (("data", 0), ("out", 7)):
+        (tmp_path / folder).mkdir()
+        pl.DataFrame({"n": [n]}).write_parquet(tmp_path / folder / "users.parquet")
+    assert app._preview_frame("users")["n"].to_list() == [7]
+
+
+def test_preview_frame_reads_a_database_sink_the_live_conduit_attached(tmp_path) -> None:
+    import duckdb
+
+    from quicksql.runner import run_project
+
+    con = duckdb.connect(str(tmp_path / "wh.db"))  # b landed in a previous session
+    con.execute("CREATE TABLE b AS SELECT 7 AS n")
+    con.close()
+    app = _cold_app(
+        tmp_path,
+        "-- @output: { type: duckdb, path: wh.db }\n"
+        "-- @cell a\nSELECT 1 AS n;\n-- @cell b\n-- @autorun: false\nSELECT 2 AS n;\n",
+    )
+    run_project(app.project, select=["a"], session=app.session)  # attaches wh.db
+    try:
+        assert app._preview_frame("b")["n"].to_list() == [7]
+    finally:
+        app.session.close()
+
+
+def test_preview_frame_never_attaches_a_database_on_its_own(tmp_path) -> None:
+    # previews follow the cursor: ATTACH would create the missing database file,
+    # and a Postgres sink would connect to its server on every cursor move
+    app = _cold_app(
+        tmp_path, "-- @cell users\n-- @output: { type: duckdb, path: wh.db }\nSELECT 1 AS n;\n"
+    )
+    frame = app._preview_frame("users")
+    assert frame["info"].to_list() == ["no output for 'users' yet — press r to run"]
+    assert not (tmp_path / "wh.db").exists()
+
+
+def test_preview_frame_says_an_effect_only_cell_lands_nothing(tmp_path) -> None:
+    app = _cold_app(
+        tmp_path, "-- @cell setup\n-- @output: { type: none }\nCREATE TABLE t AS SELECT 1;\n"
+    )
+    assert app._preview_frame("setup")["info"].to_list() == [
+        "'setup' is effect-only (output: none): it lands nothing to preview"
+    ]
+
+
 async def test_data_table_not_rebuilt_on_cursor_moves(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
