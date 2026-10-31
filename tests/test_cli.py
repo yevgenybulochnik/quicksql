@@ -183,6 +183,15 @@ def test_compile_unknown_select_exits_3(tmp_path) -> None:
     assert "unknown cell(s) in --select: ghost" in result.output
 
 
+def test_explain_never_prints_a_postgres_password(tmp_path) -> None:
+    f = tmp_path / "base.qsql"
+    f.write_text("-- @cell a\n-- @input: { postgres: 'postgresql://u:s3cret@h/db' }\nSELECT 1;\n")
+    result = runner.invoke(app, ["explain", str(f)])
+    assert result.exit_code == 0, result.output
+    assert "ctx: postgres:postgresql://u:***@h/db" in result.output
+    assert "s3cret" not in result.output
+
+
 def test_explain_shows_chain_hooks_and_cells(tmp_path) -> None:
     f = _init(tmp_path)
     result = runner.invoke(app, ["explain", str(f)])
