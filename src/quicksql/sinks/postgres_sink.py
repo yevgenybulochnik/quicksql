@@ -47,6 +47,9 @@ class PostgresSink(Sink):
     def write(self, cell: RenderedCell, view: str, conn: Any) -> tuple[int, str]:
         target = self._target(cell.name)
         if self.cfg.get("mode", "replace") == "append":
+            conn.execute(
+                f'CREATE TABLE IF NOT EXISTS {target} AS SELECT * FROM "{view}" WHERE 1=0'
+            )
             insert = f'INSERT INTO {target} SELECT * FROM "{view}"'
             (rows,) = conn.execute(insert).fetchone()  # this run's rows, not the table's
         else:
