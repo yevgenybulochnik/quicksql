@@ -36,8 +36,13 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — Phase 1: composed config models are cached on their plugin `Config` classes;
   kitchen-sink compiles in ~6 ms, down from ~27 ms (`197fc26`, `93cbb99`), measured by
   `stress/bench_compile.py` (`129a2e1`).
-- Next — the remaining Phase 1 fixes (append-mode row counts, the TUI preview fallback,
-  `plan_rerun`, errors raised by render hooks), then Phase 3. The agent-facing CLI beyond
+- Done — the rest of Phase 1: a raising `render_context`/`after_render` hook is a template
+  error naming its plugin, not a crash (`cb3ba12`, `f8de668`); append-mode sinks report
+  the rows they inserted (`056ea6c`, `63fcacd`); reruns propagate only through cells that
+  rerun (`9a25755`, `ef5edfe`); the TUI preview falls back to the cell's own sink
+  (`0b8b7ef`, `791e4b5`). Phase 1's planned fixes are complete.
+- Next — Phase 3. One quick fix found on the way is open: a Postgres append-mode sink
+  fails on its first run (see the findings table). The agent-facing CLI beyond
   `run --json` is planned in `docs/agent-cli-plan.md`.
 
 ## Context
@@ -56,12 +61,13 @@ below lands in place, one phase at a time, with the existing test suite as the s
 
 | Finding (2026-10-15 unless dated) | Evidence | Phase |
 |---|---|---|
-| Append-mode sinks report the table's total rows | `count(*)` after `INSERT` | 1 |
-| TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 |
-| A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 |
+| Append-mode sinks report the table's total rows | `count(*)` after `INSERT` | 1 (fixed) |
+| A Postgres append-mode sink fails on its first run: it never creates the table, unlike the DuckDB sink (2026-10-31) | reproduced: `Table with name … does not exist` | 1 |
+| TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 (fixed) |
+| A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 (fixed) |
 | Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable; a template ran a shell command at compile time | 1 (fixed) |
 | A non-template exception while rendering (`{{ 1/0 }}`, the sandbox's `range()` cap) crashes `compile` with a traceback and exit 1, not a template error and exit 3 (2026-10-30) | reproduced | 1 (fixed) |
-| A plugin's `render_context` or `after_render` hook that raises crashes `compile` (traceback, exit 1) and the LSP's diagnostics (2026-10-31) | reproduced with a scratch plugin | 1 |
+| A plugin's `render_context` or `after_render` hook that raises crashes `compile` (traceback, exit 1) and the LSP's diagnostics (2026-10-31) | reproduced with a scratch plugin | 1 (fixed) |
 | Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 (fixed) |
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
 | Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
@@ -125,11 +131,20 @@ Sizes are relative: S, M, L.
 - Baseline: `demo/kitchen-sink/kitchen-sink.qsql` compiled in ~23 ms (2026-10-30), 79% of
   it in `build_models`, called 8 times per compile.
 
-**Phase 1 — quick fixes (S; independent red/green pairs).**
-- Append-mode DuckDB and Postgres sinks report the `INSERT`'s own row count.
-- The TUI's `_preview_frame` falls back to the cell's own sink (`make_sink(...).ref_expr`),
-  not `data/<cell>.parquet`.
-- `plan_rerun` propagates only from changed cells that will rerun.
+**Phase 1 — quick fixes (S; independent red/green pairs; the planned fixes are done).**
+- Done: append-mode DuckDB and Postgres sinks report the `INSERT`'s own row count. Every
+  write takes its count from its own statement's result, so the `count(*)` after it, a
+  round trip for Postgres, is gone.
+- Done: the TUI's `_preview_frame` falls back to the cell's own sink: its `ref_expr`, read
+  through the conduit's cursor, not `data/<cell>.parquet`. Never through the sink's
+  `prepare()`: a preview follows the cursor, and an `ATTACH` creates a missing database
+  file or connects to a server. So a database sink previews once a run this session has
+  attached it, and an effect-only cell says it lands nothing.
+- Done: `plan_rerun` propagates only through cells that will rerun, which also stops it at
+  an `autorun: false` cell mid-graph (`graph.downstream(..., through=)`). Phase 8's landed
+  fingerprints keep this rule.
+- Open, found on the way: a Postgres append-mode sink creates its table if missing, as the
+  DuckDB sink does.
 - Done: templates render in a `SandboxedEnvironment` subclass (`render._SqlSandbox`) where
   a pydantic model instance exposes only its fields. A plugin that contributes a model
   *class* still exposes its classmethods; the plugin-authoring guide says to contribute
@@ -137,8 +152,9 @@ Sizes are relative: S, M, L.
 - Done: rendering reports any exception as a template error (exit 3), not only Jinja's
   own; a `QsqlError` raised inside a template passes through unchanged. Render and the
   runner share `errors.describe` for the message.
-- Errors raised by a plugin's `render_context` or `after_render` hook get the same
-  treatment: today they crash `compile` and the LSP's diagnostics.
+- Done: an exception from a plugin's `render_context` or `after_render` hook is the cell's
+  template error, `plugin 'name' hook: Type: message`, exit 3, and an LSP diagnostic; a
+  `QsqlError` passes through unchanged.
 - Done: the composed models are cached on the tuple of plugin `Config` classes being
   composed (`config._compose_bases`). Keyed on the classes themselves, it stays correct
   when registries change and survives Phase 4 without a generation counter. Kitchen-sink
@@ -149,9 +165,8 @@ Sizes are relative: S, M, L.
   compile (~11%).
 - Done: remove dead code: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
   `RunContext.overrides`, unused imports (`tempfile` in `runner.py`; `Ref`/`Source` in
-  `lsp/analysis.py`), unused `project` parameters (`_resolve_scope`, `relation_names`).
-  Left for later: unused imports in three test files (`Merge`, `hashes_of`,
-  `PluginRegistry`).
+  `lsp/analysis.py`, and `Merge`, `hashes_of`, `PluginRegistry` in three test files),
+  unused `project` parameters (`_resolve_scope`, `relation_names`).
 
 **Phase 2 — honest run outcomes (M; done).**
 - Done: `RunResult.status`: `ok` | `failed` | `skipped`.
