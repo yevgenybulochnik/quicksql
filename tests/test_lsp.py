@@ -186,6 +186,23 @@ def test_diagnostics_flag_a_template_escaping_the_sandbox_without_running_it(
     assert not marker.exists()
 
 
+def test_diagnostics_flag_a_render_hook_that_raises_instead_of_crashing(tmp_path) -> None:
+    from quicksql.lsp.analysis import Analyzer
+    from quicksql.plugins.base import Plugin
+    from quicksql.registry import plugin
+
+    @plugin
+    class Boom(Plugin):
+        def after_render(self, rctx, sql):
+            raise KeyError("x")
+
+    text = "-- @engine: duckdb\n-- @cell a\nSELECT 1 AS x;\n"
+    diags = Analyzer().diagnostics(text, tmp_path)
+    assert [(d.line, d.message) for d in diags] == [
+        (1, "template error: plugin 'boom' after_render: KeyError: 'x'")
+    ]
+
+
 def test_diagnostics_surface_sqlglot_syntax_errors(tmp_path) -> None:
     from quicksql.lsp.analysis import Analyzer
 

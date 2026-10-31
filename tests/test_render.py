@@ -233,3 +233,37 @@ def test_a_quicksql_error_from_a_contributed_global_passes_through(tmp_path, err
     with pytest.raises(type(error)) as excinfo:
         _render(tmp_path, "SELECT {{ lookup() }};")
     assert excinfo.value is error  # the very exception, not a wrapper around it
+
+
+# ---------- a render hook that raises is a compile error, not a crash ----------
+
+
+def _raising_hook(hook: str, error: Exception) -> None:
+    """Register a scratch plugin whose ``hook`` raises ``error``."""
+
+    def boom(self, *args):
+        raise error
+
+    plugin(type("Boom", (Plugin,), {hook: boom}))
+
+
+@pytest.mark.parametrize("hook", ["render_context", "after_render"])
+def test_a_render_hook_that_raises_is_a_template_error_naming_its_plugin(
+    tmp_path, hook
+) -> None:
+    _raising_hook(hook, KeyError("x"))
+    with pytest.raises(ConfigError) as excinfo:
+        compile_text("-- @cell a\nSELECT 1;", root=tmp_path)
+    assert str(excinfo.value).endswith(
+        f"cell 'a' (line 1): template error: plugin 'boom' {hook}: KeyError: 'x'"
+    )
+
+
+@pytest.mark.parametrize("hook", ["render_context", "after_render"])
+def test_a_quicksql_error_from_a_render_hook_passes_through(tmp_path, hook) -> None:
+    config = compile_text("-- @cell a\nSELECT 1;", root=tmp_path).cells["a"].config
+    error = ConfigError("cell 'a': no lookup table")
+    _raising_hook(hook, error)  # after compiling, which would run the hook too
+    with pytest.raises(ConfigError) as excinfo:
+        render_sql("a", "SELECT 1;", config, producers={}, root=tmp_path)
+    assert excinfo.value is error
