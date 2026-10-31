@@ -40,10 +40,14 @@ def should_rerun(cell: Any) -> bool:
 
 
 def plan_rerun(old_hashes: dict[str, str], project: Project) -> list[str]:
-    """Changed cells (new ones count) plus downstream, rerun-filter applied."""
+    """Changed cells (new ones count) plus downstream, propagating only through
+    cells that rerun: one that won't (autorun: false) keeps its old output, so
+    a cell reading only it has nothing new to read."""
     changed = {n for n, c in project.cells.items() if old_hashes.get(n) != c.hash}
-    targets = downstream(list(project.cells), project.edges, changed)
-    return [n for n in targets if should_rerun(project.cells[n])]
+    return downstream(
+        list(project.cells), project.edges, changed,
+        through=lambda n: should_rerun(project.cells[n]),
+    )
 
 
 def config_only_changes(old: Project, new: Project) -> list[str]:

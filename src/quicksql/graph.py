@@ -6,6 +6,8 @@ order break by the cells' position in ``nodes`` (file order).
 
 from __future__ import annotations
 
+from typing import Callable
+
 from .errors import CycleError
 
 
@@ -52,8 +54,14 @@ def _find_cycle(nodes: list[str], edges: dict[str, list[str]], done: set[str]) -
     return " -> ".join(n for n in nodes if n not in done)
 
 
-def downstream(nodes: list[str], edges: dict[str, list[str]], changed: set[str]) -> list[str]:
-    """The changed cells plus everything reachable from them, in topo order."""
+def downstream(
+    nodes: list[str],
+    edges: dict[str, list[str]],
+    changed: set[str],
+    through: Callable[[str], bool] = lambda n: True,
+) -> list[str]:
+    """The changed cells plus everything reachable from them, in topo order.
+    Only nodes passing ``through`` are reached, and only they reach further."""
     rev: dict[str, list[str]] = {n: [] for n in nodes}
     for n in nodes:
         for u in edges.get(n, ()):
@@ -62,7 +70,7 @@ def downstream(nodes: list[str], edges: dict[str, list[str]], changed: set[str])
     stack = [n for n in nodes if n in changed]
     while stack:
         n = stack.pop()
-        if n not in hit:
+        if n not in hit and through(n):
             hit.add(n)
             stack.extend(rev.get(n, ()))
     return [n for n in topo_sort(nodes, edges) if n in hit]
