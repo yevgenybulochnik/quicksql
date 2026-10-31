@@ -6,7 +6,7 @@ import pytest
 
 from quicksql.compiler import compile_file
 from quicksql.runner import RunSession
-from quicksql.watcher import hashes_of, plan_rerun, run_changed, touches, watch_events
+from quicksql.watcher import plan_rerun, run_changed, touches, watch_events
 
 V1 = """\
 -- @cell a
@@ -23,34 +23,45 @@ SELECT * FROM {{ ref('a') }};
 V2 = V1.replace("SELECT 1 AS x;", "SELECT 2 AS x;")
 
 
-def test_only_changed_and_downstream_rerun_autorun_respected(tmp_path) -> None:
+@pytest.fixture
+def session():
+    s = RunSession()
+    yield s
+    s.close()
+
+
+def _seen(path, session) -> None:
+    """The baseline a watch starts from: every cell as the file stands now."""
+    session.see(compile_file(path))
+
+
+def test_only_changed_and_downstream_rerun_autorun_respected(tmp_path, session) -> None:
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    hashes = hashes_of(compile_file(f))
+    _seen(f, session)
 
     f.write_text(V2)
-    project, results = run_changed(f, hashes)
+    project, results = run_changed(f, session)
     assert [r.cell for r in results] == ["a", "b"]  # c unchanged, d autorun:false
     assert all(r.ok for r in results), [r.error for r in results]
     assert (tmp_path / "data" / "b.parquet").exists()
     assert not (tmp_path / "data" / "c.parquet").exists()
 
 
-def test_no_change_means_no_rerun(tmp_path) -> None:
+def test_no_change_means_no_rerun(tmp_path, session) -> None:
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    hashes = hashes_of(compile_file(f))
-    _, results = run_changed(f, hashes)
+    _seen(f, session)
+    _, results = run_changed(f, session)
     assert results == []
 
 
-def test_new_cell_counts_as_changed(tmp_path) -> None:
+def test_new_cell_counts_as_changed(tmp_path, session) -> None:
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    project = compile_file(f)
-    hashes = hashes_of(project)
+    _seen(f, session)
     f.write_text(V1 + "-- @cell e\nSELECT 5 AS w;\n")
-    assert plan_rerun(hashes, compile_file(f)) == ["e"]
+    assert plan_rerun(compile_file(f), session) == ["e"]
 
 
 MANUAL = """\
@@ -76,14 +87,14 @@ SELECT * FROM {{ ref('a') }} JOIN {{ ref('d') }} USING (x);
     ],
     ids=["edit-manual-cell", "edit-through-manual-cell"],
 )
-def test_reruns_propagate_only_through_cells_that_rerun(tmp_path, edit, planned) -> None:
+def test_reruns_propagate_only_through_cells_that_rerun(tmp_path, session, edit, planned) -> None:
     f = tmp_path / "base.sql"
     f.write_text(MANUAL)
-    hashes = hashes_of(compile_file(f))
+    _seen(f, session)
     old, new = edit
     assert MANUAL.count(old) == 1
     f.write_text(MANUAL.replace(old, new))
-    assert plan_rerun(hashes, compile_file(f)) == planned
+    assert plan_rerun(compile_file(f), session) == planned
 
 
 def test_touches_filters_directory_events(tmp_path) -> None:
@@ -124,23 +135,48 @@ def test_watch_survives_atomic_replace_saves(tmp_path) -> None:
         worker.join(timeout=10)
 
 
-def test_config_only_edits_do_not_trigger(tmp_path) -> None:
-    # change detection hashes SQL bodies only — a known limitation
+# ---------- config edits rerun; fields that don't affect results don't ----------
+
+
+def test_editing_a_cells_output_reruns_it(tmp_path, session) -> None:
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    hashes = hashes_of(compile_file(f))
-    f.write_text(V1.replace("-- @autorun: false", "-- @autorun: true"))
-    project, results = run_changed(f, hashes)
+    _seen(f, session)
+    f.write_text(V1.replace("-- @cell c\n", "-- @cell c\n-- @output: { type: duckdb }\n"))
+    _, results = run_changed(f, session)
+    assert [r.cell for r in results] == ["c"]
+
+
+def test_editing_vars_reruns_every_cell_they_reach(tmp_path, session) -> None:
+    f = tmp_path / "base.sql"
+    f.write_text("-- @vars: { n: 1 }\n" + V1)
+    _seen(f, session)
+    f.write_text("-- @vars: { n: 2 }\n" + V1)
+    _, results = run_changed(f, session)
+    assert [r.cell for r in results] == ["a", "b", "c"]  # d is autorun: false
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [("-- @autorun: false", "-- @autorun: true"), ("-- @cell c\n", "-- @cell c\n-- @tags: [daily]\n")],
+    ids=["autorun", "tags"],
+)
+def test_toggling_autorun_or_tags_reruns_nothing(tmp_path, session, old, new) -> None:
+    f = tmp_path / "base.sql"
+    f.write_text(V1)
+    _seen(f, session)
+    f.write_text(V1.replace(old, new))
+    _, results = run_changed(f, session)
     assert results == []
 
 
-def test_run_changed_streams_run_events(tmp_path) -> None:
+def test_run_changed_streams_run_events(tmp_path, session) -> None:
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    hashes = hashes_of(compile_file(f))
+    _seen(f, session)
     f.write_text(V2)
     events = []
-    _, results = run_changed(f, hashes, on_event=events.append)
+    _, results = run_changed(f, session, on_event=events.append)
     assert [r.cell for r in results] == ["a", "b"]
     assert [e.cell for e in events if e.kind == "cell_started"] == ["a", "b"]
 
@@ -157,25 +193,33 @@ def test_editing_only_the_downstream_reruns_its_failed_upstream_first(tmp_path) 
     session = RunSession()
     try:
         f.write_text(good)
-        project, results = run_changed(f, {}, session=session)  # every cell is new
+        project, results = run_changed(f, session)  # a fresh session: every cell is new
         assert all(r.ok for r in results), [r.error for r in results]
         f.write_text(bad)
-        project, results = run_changed(f, hashes_of(project), session=session)
+        project, results = run_changed(f, session)
         assert [(r.cell, r.status) for r in results] == [("a", "failed"), ("b", "skipped")]
         f.write_text(bad.replace("SELECT * FROM {{", "SELECT *, 1 AS y FROM {{"))
-        _, results = run_changed(f, hashes_of(project), session=session)
+        _, results = run_changed(f, session)
         assert [(r.cell, r.status) for r in results] == [("a", "failed"), ("b", "skipped")]
     finally:
         session.close()
 
 
-def test_config_only_edit_is_detected_but_not_rerun(tmp_path) -> None:
-    from quicksql.watcher import config_only_changes
+def test_watch_compiles_once_at_startup(tmp_path, monkeypatch) -> None:
+    """The CLI compiles to fail fast and load plugins; the watch reuses that project."""
+    import threading
+
+    from quicksql import watcher
 
     f = tmp_path / "base.sql"
     f.write_text(V1)
-    old = compile_file(f)
-    f.write_text(V1.replace("-- @cell c\n", "-- @cell c\n-- @output: { type: duckdb }\n"))
-    new = compile_file(f)
-    assert config_only_changes(old, new) == ["c"]
-    assert plan_rerun(hashes_of(old), new) == []  # body hash is blind to config edits
+    project = compile_file(f)
+    compiles = []
+    monkeypatch.setattr(watcher, "compile_file", lambda *a, **k: compiles.append(a) or compile_file(*a, **k))
+    stop = threading.Event()
+    stop.set()
+    events = watch_events(f, project=project, stop_event=stop)
+    first_project, results = next(events)
+    events.close()
+    assert first_project is project and compiles == []
+    assert [r.cell for r in results] == ["a", "b", "c"]

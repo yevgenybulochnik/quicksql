@@ -52,7 +52,7 @@ from .errors import QsqlError
 from .models import RunEvent, RunResult
 from .runner import RunSession, run_project
 from .sheet import Sheet
-from .watcher import config_only_changes, hashes_of, plan_rerun
+from .watcher import plan_rerun
 
 
 class NotebookPicker(ModalScreen):
@@ -318,7 +318,6 @@ class QsqlApp(App):
         self.catalog_stack: list[Sheet] = []  # the Catalog tab's own dive
         self._catalog_dive_pending = False  # S pressed while the root loads
         self._catalog_root_loading = False  # a root load is in flight
-        self.hashes: dict[str, str] = {}
         self._row_names: list[str] = []
         self._pending_g = False
         self._last_search = ""
@@ -462,7 +461,7 @@ class QsqlApp(App):
         except QsqlError as exc:
             self.log_line(f"compile error: {exc}")
             return
-        self.hashes = hashes_of(self.project)
+        self.session.see(self.project)  # the baseline a save is compared against
         self._refresh_cells()
         self._refresh_detail()
         if self.query_one(TabbedContent).active == "tab_catalog":
@@ -1319,15 +1318,18 @@ class QsqlApp(App):
         else:
             self._push_catalog_sheet(sheet)
 
-    def _run_worker(self, select: Optional[list[str]], closure: bool = True) -> None:
+    def _run_worker(
+        self, select: Optional[list[str]], closure: bool = True, project: Project | None = None
+    ) -> None:
         """Bump the run generation (on the UI thread) and hand off to the
         thread worker. `exclusive` only *flags* the old worker cancelled — a
         blocking run_project keeps draining events, so the generation tag is
-        what keeps a replaced run from repainting the table."""
+        what keeps a replaced run from repainting the table. A save passes the
+        project it just compiled, so the run doesn't compile it again."""
         self._run_gen += 1
         # bound now: a notebook switch before the thread starts must not
         # redirect this run to the new notebook or its session
-        self._run_thread(select, closure, self._run_gen, self.path, self.session)
+        self._run_thread(select, closure, self._run_gen, self.path, self.session, project)
 
     @work(thread=True, exclusive=True, group="run")
     def _run_thread(
@@ -1337,13 +1339,15 @@ class QsqlApp(App):
         gen: int,
         path: Path,
         session: RunSession,
+        project: Project | None = None,
     ) -> None:
         with self._session_in_use(session):
-            try:
-                project = compile_file(path, self.overrides)
-            except QsqlError as exc:
-                self.call_from_thread(self.log_line, f"compile error: {exc}")
-                return
+            if project is None:
+                try:
+                    project = compile_file(path, self.overrides)
+                except QsqlError as exc:
+                    self.call_from_thread(self.log_line, f"compile error: {exc}")
+                    return
             self.call_from_thread(self._adopt_project, gen, project)
             results: list[RunResult] = []
             try:
@@ -1365,7 +1369,6 @@ class QsqlApp(App):
         if gen != self._run_gen:
             return  # a replaced run's compile may be older, or another notebook's
         self.project = project
-        self.hashes = hashes_of(project)
         self._refresh_cells()
 
     def _on_run_event(self, gen: int, event: RunEvent) -> None:
@@ -1420,25 +1423,24 @@ class QsqlApp(App):
 
     def _on_recompiled(self, project: Project) -> list[str]:
         self.log_line(f"recompiled {self.path.name}: {len(project.cells)} cell(s)")
-        planned = plan_rerun(self.hashes, project)
-        cfg_only = config_only_changes(self.project, project) if self.project else []
-        if cfg_only:
-            self.log_line(f"config changed (no rerun): {', '.join(cfg_only)}")
+        planned = plan_rerun(project, self.session)
         # adopt the new project before consulting autorun overlays: a freshly
         # added cell only exists in the new one (KeyError otherwise)
         self.project = project
-        self.hashes = hashes_of(project)
         self._catalog_cache.invalidate()  # cells/contexts may have changed
         self._refresh_cells()
         self._refresh_detail()
         if not self.armed:
-            if planned:
-                self.log_line(
-                    f"changed: {', '.join(planned)} (paused — R runs all, or p to arm)"
-                )
+            # one closing line per save, whatever happened
+            self.log_line(
+                f"changed: {', '.join(planned)} (paused — R runs all, or p to arm)"
+                if planned else "nothing to rerun"
+            )
             return []
         to_run = [n for n in planned if self.cell_autorun(n)]
         if to_run:
             self.log_line(f"changed -> rerunning: {', '.join(to_run)}")
-            self._run_worker(to_run, closure=False)
+            self._run_worker(to_run, closure=False, project=project)
+        else:
+            self.log_line("nothing to rerun")
         return to_run

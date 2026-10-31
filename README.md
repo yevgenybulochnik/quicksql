@@ -45,6 +45,7 @@ $ uv run quicksql show report  # rendered SQL for one cell
 $ uv run quicksql compile      # rendered SQL for every cell
 $ uv run quicksql explain      # the effective plugin chain + per-cell engine/sink/context
 $ uv run quicksql watch        # re-run changed cells + their dependents on every save
+$ uv run quicksql status       # each cell: ok, failed, skipped, stale (and why), or new
 $ uv run quicksql tui          # interactive VisiData-style terminal UI
 ```
 
@@ -347,8 +348,24 @@ existing `.qsql` files plus starter templates.
 ghostty…); under tmux's defaults it arrives as Backspace and does nothing, while `1`–`5`
 work everywhere.
 
-`watch` and the TUI hash **SQL bodies** to decide what changed, so config-only edits don't
-trigger reruns (they're logged as `config changed (no rerun)`).
+### What reruns, and what's stale
+
+Every cell has a **fingerprint**: a hash of its rendered SQL, engine and context, the
+directives that affect its result, and the fingerprints of the upstream outputs it read.
+`watch` and the TUI rerun a cell when its fingerprint differs from the one it last ran with
+in that session, plus its downstream. So editing a cell's `output` or `vars` reruns it,
+while toggling `autorun` or `tags` reruns nothing. An `autorun: false` cell never reruns on
+its own, and its downstream keeps reading its old output until it does. Each save ends with
+one closing line: the rerun's counts, `nothing to rerun`, or the compile error.
+
+Each run records, in `.quicksql/state.json` next to the notebook, every cell's last status
+and the fingerprint its landed output was built from. The directory ignores itself in git.
+`quicksql status [--json]` reads it: a cell is `ok`, `failed` or `skipped` from its last
+run, `stale` when its landed output was built from something else than the cell would be
+built from now (it says why: its SQL or config changed, or an upstream landed a new output),
+or `new` if it never ran. Stale is relative to the notebook: source files and remote tables
+aren't fingerprinted. The state file never skips a run: startup still runs every autorun
+cell.
 
 ## Editor integration
 
@@ -430,6 +447,7 @@ without Docker.
 | `config.py` | compose plugin Configs into models; scope checks; layer merging; engine/sink resolution |
 | `render.py` | Jinja on SQL bodies; `ref`/`source`/`var`/`env`; records edges + extensions |
 | `graph.py` | topo sort, cycle detection, downstream sets |
+| `state.py` | fingerprints, the `.quicksql/state.json` state file, `status` |
 | `compiler.py` | parse → config → render → graph ⇒ a `Project` |
 | `runner.py` | topo run; the cell protocol (`execute_cell`) over each context's engine session; the plugin run-chain; the run session |
 | `conduit.py` | the DuckDB conduit: its target, and the duckdb engine's session on it |

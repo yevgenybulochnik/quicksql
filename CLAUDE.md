@@ -67,10 +67,14 @@ first `@cell`) inherited by every cell.
   can't run arbitrary Python; a blocked access is a `SecurityError` → `template error`,
   exit 3. Not covered: `run` executes the notebook's SQL, CLI commands import
   `quicksqlrc.py` (directory trust is Phase 7), `env()` reads environment variables by design.
-- **Watch/TUI are reflect-only.** The file is edited elsewhere; change detection hashes
-  SQL bodies only, so config-only edits don't trigger reruns (known limitation; the
-  watch/TUI log flags them as `config changed (no rerun)` via
-  `watcher.config_only_changes`).
+- **Watch/TUI are reflect-only.** The file is edited elsewhere. Change detection is by
+  fingerprint (`state.py`): rendered SQL, engine, context, the config fields with
+  `qfield(affects_results=True)` (the default; `autorun`/`tags`/`catalog`/`render_dir`
+  are False), and the *landed* fingerprints of the cell's upstreams. `plan_rerun` reruns
+  cells whose fingerprint differs from `RunSession.seen` (the fingerprint the session last
+  ran it with, or first saw it at via `see`), plus downstream through autorun cells.
+  Each run writes `.quicksql/state.json` (status + what each landed output was built from;
+  `RunSession.landed` is seeded from it) for `quicksql status`; it never skips a run.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
 
 ## Commands
@@ -110,6 +114,7 @@ first `@cell`) inherited by every cell.
 - `render.py` — Jinja on SQL bodies; ref/source/var/env; records edges + extensions
 - `sources.py` — file reader registry (csv/parquet/json/excel)
 - `graph.py` — topo sort, cycle detection, downstream sets
+- `state.py` — fingerprints, the `.quicksql/state.json` state file, `statuses` for `status`
 - `compiler.py` — parse → config → render → graph ⇒ `Project`
 - `runner.py` — topo run; the cell protocol (`execute_cell`); plugin run-chain;
   RunSession holds the conduit connection, engine sessions, and extension cache across

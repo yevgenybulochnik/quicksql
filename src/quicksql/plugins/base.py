@@ -23,10 +23,19 @@ class EmptyConfig(BaseModel):
     """Default Config for behavior-only plugins: contributes no directives."""
 
 
-def qfield(default: Any = None, *, merge: Merge = Merge.OVERRIDE, **kwargs: Any) -> Any:
-    """A pydantic Field carrying quicksql's per-field merge strategy."""
+def qfield(
+    default: Any = None,
+    *,
+    merge: Merge = Merge.OVERRIDE,
+    affects_results: bool = True,
+    **kwargs: Any,
+) -> Any:
+    """A pydantic Field carrying quicksql's per-field merge strategy, and
+    whether a change to it changes the cell's result: a field that doesn't
+    (autorun, tags) stays out of the fingerprint, so editing it reruns nothing."""
     extra = dict(kwargs.pop("json_schema_extra", None) or {})
     extra["qsql_merge"] = merge.value
+    extra["qsql_affects_results"] = affects_results
     return Field(default, json_schema_extra=extra, **kwargs)
 
 

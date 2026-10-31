@@ -1747,22 +1747,47 @@ async def test_run_streams_events_into_log_tab(notebook) -> None:
         assert text.count("users: ok") == 1  # event line replaces the old summary line
 
 
-async def test_config_only_edit_is_logged_without_rerun(notebook) -> None:
+async def test_a_config_edit_reruns_the_cell(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("p")  # armed
+        notebook.write_text(
+            notebook.read_text().replace(
+                "-- @cell users\n", "-- @cell users\n-- @output: { type: duckdb }\n"
+            )
+        )
+        assert "users" in app._on_recompiled(compile_file(notebook))
+        await app.workers.wait_for_complete()
+
+
+async def test_a_save_with_nothing_to_rerun_says_so(notebook) -> None:
     from textual.widgets import RichLog
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         app.query_one(TabbedContent).active = "tab_log"
         await pilot.pause()
-        notebook.write_text(
-            notebook.read_text().replace(
-                "-- @cell users\n", "-- @cell users\n-- @output: { type: duckdb }\n"
-            )
-        )
         assert app._on_recompiled(compile_file(notebook)) == []
         await pilot.pause()
         lines = [s.text for s in app.query_one("#log", RichLog).lines]
-        assert any("config changed" in l and "users" in l for l in lines)
+        assert lines[-1] == "nothing to rerun"
+
+
+async def test_a_save_compiles_the_notebook_once(notebook, monkeypatch) -> None:
+    from quicksql import tui
+
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("p")  # armed
+        real = tui.compile_file
+        compiles: list = []
+        monkeypatch.setattr(tui, "compile_file", lambda *a, **k: compiles.append(a) or real(*a, **k))
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(5)"))
+        assert app._on_recompiled(real(notebook))  # the watch worker's one compile
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert compiles == []  # the run reuses the project the save compiled
+        assert app.results["events"].ok
 
 
 # ---------- per-cell run progress: events drive the cell table ----------

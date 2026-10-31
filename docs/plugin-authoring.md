@@ -41,6 +41,10 @@ class RowLimit(Plugin):
   shadow one of them.
 - `qfield(default, merge=...)` sets how layers combine: `Merge.OVERRIDE` (default),
   `Merge.DEEP` (dict merge), `Merge.EXTEND` (list concat).
+- `qfield(..., affects_results=False)` keeps a field out of the cell's fingerprint, for a
+  field that changes how quicksql treats a cell but not what it computes (like `autorun`
+  or `tags`): editing it then reruns nothing under watch and leaves the cell's status
+  alone. Fields default to `affects_results=True`, and so does a plain pydantic field.
 - Read your value from `cell.config.<field>` (cell scope) or `ctx.config.<field>`
   (global scope) — validators have already run.
 

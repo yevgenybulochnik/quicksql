@@ -15,6 +15,7 @@ import time
 import traceback
 from collections import Counter
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
@@ -26,6 +27,16 @@ from .executors.base import EngineSession, SessionLost, result_view
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import EXECUTORS, PLUGINS, SINKS
 from .sinks import make_sink
+from .state import (
+    CellState,
+    Landed,
+    cell_inputs,
+    current_fingerprints,
+    fingerprint,
+    read_state,
+    state_file,
+    write_state,
+)
 
 if TYPE_CHECKING:
     from .compiler import Project
@@ -59,7 +70,9 @@ def _load_ext_cached(ctx: RunContext, ext: str, cell: str | None = None) -> None
 
 class RunSession:
     """Reusable conduit state across runs: connection, temp dir, extension cache,
-    and each cell's last status here (exact reruns rerun an upstream that wasn't ok).
+    each cell's last status here (exact reruns rerun an upstream that wasn't ok),
+    what each landed output was built from, and the fingerprints watch
+    compares saves against.
 
     watch/TUI pass one session so reruns skip reconnect/re-LOAD; the conduit
     reconnects automatically when the project's target database changes.
@@ -73,7 +86,11 @@ class RunSession:
         self.engine_sessions: dict[str, Any] = {}  # context key -> engine session
         self.materialized: set[str] = set()  # cells with a live temp table
         self.last_status: dict[str, Status] = {}  # cell -> its latest result's status
+        self.landed: dict[str, Landed] = {}  # cell -> what its landed output was built from
+        # cell -> the fingerprint this session last ran it with, or first saw it at
+        self.seen: dict[str, str] = {}
         self._target: str | None = None
+        self._state_for: Path | None = None  # the notebook whose state file seeded landed
 
     def conduit(self, project: Project) -> Any:
         target = conduit_target(project.config, project.root)
@@ -90,6 +107,23 @@ class RunSession:
             }
         return self.conn
 
+    def load_state(self, project: Project) -> None:
+        """Seed ``landed`` from the notebook's state file, once: outputs an
+        earlier session landed are what this one's cells read."""
+        if project.path is None or self._state_for == project.path:
+            return
+        self._state_for = project.path
+        for name, cell in read_state(project).items():
+            if cell.landed is not None:
+                self.landed.setdefault(name, cell.landed)
+
+    def see(self, project: Project) -> None:
+        """Take each cell's current fingerprint as the baseline watch compares
+        saves against, where this session hasn't run or seen the cell yet."""
+        self.load_state(project)
+        for name, fp in current_fingerprints(project, self.landed).items():
+            self.seen.setdefault(name, fp)
+
     def close(self) -> None:
         if self.conn is not None:
             self.conn.close()
@@ -102,6 +136,9 @@ class RunSession:
         self.engine_sessions = {}
         self.materialized = set()
         self.last_status = {}
+        self.landed = {}
+        self.seen = {}
+        self._state_for = None
         if self.tmpdir:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
             self.tmpdir = None
@@ -386,6 +423,7 @@ def run_project(
         on_event=on_event,
     )
     chain = build_chain(project)
+    session.load_state(project)
     reopened = _drop_dead_sessions(project, session)
     names = _selection(project, select, closure)
     if select is not None and not closure:
@@ -413,10 +451,16 @@ def run_project(
                 result = _skipped(name, roots)
             else:
                 ctx.emit("cell_started", name, f"{cell.engine} → {cell.sink_type}")
+                # what it's built from: the upstream outputs as they've landed now
+                own, upstreams = cell_inputs(cell, project.config, session.landed)
+                built_from = fingerprint(own, upstreams)
                 try:
                     result = chain(cell, ctx)
                 except Exception as exc:  # a buggy plugin must not kill the run
                     result = _failed(name, exc)
+                session.seen[name] = built_from
+                if result.ok:
+                    session.landed[name] = Landed(built_from, own, upstreams)
             if not result.ok:
                 failed_roots[name] = roots or [name]
                 # any temp table it left is stale; forgetting it makes a later
@@ -428,6 +472,7 @@ def run_project(
             results.append(result)
             ctx.emit("cell_finished", name, result=result)
         _notify(ctx, "after_run", lambda p: p.after_run(project, results))
+        _save_state(project, session, ctx)
         # snapshot: a failing on_event appends to ctx.log, so iterating the
         # live list would grow it forever
         for line in list(ctx.log):  # plugin lifecycle failures were invisible before
@@ -443,6 +488,24 @@ def run_project(
         if owns_session:
             session.close()
     return results
+
+
+def _save_state(project: Project, session: RunSession, ctx: RunContext) -> None:
+    """Record each cell's last status and what its landed output was built
+    from; a cell this session hasn't run keeps what the file had."""
+    if project.path is None:
+        return
+    before = read_state(project)
+    cells = {}
+    for name in project.order:
+        status = session.last_status.get(name) or (before[name].status if name in before else None)
+        landed = session.landed.get(name)
+        if status is not None or landed is not None:
+            cells[name] = CellState(status, landed)
+    try:
+        write_state(project, cells)
+    except OSError as exc:
+        ctx.log.append(f"couldn't write {state_file(project.root)}: {exc}")
 
 
 def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:

@@ -54,7 +54,11 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   cell is its terminal statement's, found by running the query alone through
   `EngineSession.check` (`f90b2b0`, `0900172`), and Postgres context keys show the
   password as `***` (`d727e8b`, `2bd6f28`).
-- Next — Phase 8. The agent-facing CLI beyond `run --json` is planned in
+- Done — Phase 8 (2026-10-31, branch `feat/phase8-fingerprints`): fingerprints decide
+  watch/TUI reruns, config edits included; `.quicksql/state.json` and `quicksql status`;
+  one closing line per watch cycle; one compile per TUI save and at `watch` startup
+  (`6b51e2e`, `37b8b98`).
+- Next — Phase 4. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
 ## Context
@@ -100,7 +104,7 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Engine names hard-coded in `catalog.py` (12), `lsp/schema.py` (7), the LSP dialect map | grep | 6 |
 | Plugins, catalog, LSP and TUI import runner privates; 32 function-level imports | grep | 6 |
 | CLI commands auto-import `quicksqlrc.py`; the LSP never loads it | read | 7 |
-| Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 |
+| Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 (fixed) |
 | A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
 | `tui.py` is 1,304 lines, one class with 82 methods | `wc` | 9 |
 | `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 |
@@ -340,7 +344,26 @@ needs Phase 4's composition root and lazy package `__init__`s.
   side effect); trust survives restarts and an edit revokes it.
 - Behavior change: existing rc users run `quicksql trust` once.
 
-**Phase 8 — fingerprints and cell state (M).** Needs Phase 2.
+**Phase 8 — fingerprints and cell state (M; done).** As built, where it differs from the
+plan below:
+- Done: the watch baseline is the fingerprint the session last *ran* a cell with, or first
+  saw it at (`RunSession.seen`, set by `see` at watch start and TUI load), not only the
+  one its landed output was built from. Three cases differ, all on purpose:
+  - a failed cell isn't retried on every save, only when its inputs change;
+  - arming the TUI without running (`p`) reruns only what's edited afterwards;
+  - an edited `autorun: false` cell reruns once its autorun is turned on.
+- Done: the state file also seeds `RunSession.landed`. A cell whose upstream landed in an
+  earlier session must record that upstream's real fingerprint, or `status` would call it
+  stale. This still never skips a run.
+- Done: a global-only field (not on cells) that affects results counts in every cell's
+  fingerprint. Today none exist: `render_dir` and `catalog` don't affect results.
+- Done: `status` adds `new` (never run) to ok / failed / skipped / stale; `status --json`
+  reports compile errors as JSON, like `run --json`. The closing line for a save that
+  reruns nothing is `nothing to rerun`, since an edited `autorun: false` cell is a change.
+- Left: `RenderedCell.hash` (the body hash) no longer drives anything; tests build cells
+  with it, so it stays until a cleanup.
+
+As planned:
 - Fields declare `affects_results` on `qfield`, the way they declare `qsql_merge` today:
   default true; `autorun`, `tags`, `catalog` and `render_dir` false. No Phase 5 needed.
 - Each cell's fingerprint hashes its rendered SQL, engine and context, the config fields

@@ -392,3 +392,77 @@ def test_run_rows_needs_json(tmp_path) -> None:
     result = runner.invoke(app, ["run", str(f), "--rows", "2"])
     assert result.exit_code == 2  # a usage error
     assert "--json" in result.output
+
+
+# ---------- status: what each cell's landed output is worth now ----------
+
+STATUS_NOTEBOOK = (
+    "-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT * FROM {{ ref('a') }};\n-- @cell c\nSELECT 3 AS z;\n"
+)
+
+
+def _ran_then_edited(tmp_path) -> Path:
+    f = tmp_path / "base.qsql"
+    f.write_text(STATUS_NOTEBOOK)
+    assert runner.invoke(app, ["run", str(f), "--select", "b"]).exit_code == 0
+    f.write_text(STATUS_NOTEBOOK.replace("SELECT 1", "SELECT 2"))
+    return f
+
+
+def test_status_lists_each_cell_with_its_state_and_why(tmp_path) -> None:
+    import re
+
+    result = runner.invoke(app, ["status", str(_ran_then_edited(tmp_path))])
+    assert result.exit_code == 0, result.output
+    lines = [line.rstrip() for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert re.fullmatch(r"\s*stale\s+a\s+its SQL or config changed", lines[0])
+    assert re.fullmatch(r"\s*ok\s+b", lines[1])
+    assert re.fullmatch(r"\s*new\s+c\s+never run", lines[2])
+
+
+def test_status_json(tmp_path) -> None:
+    result = runner.invoke(app, ["status", str(_ran_then_edited(tmp_path)), "--json"])
+    assert result.exit_code == 0, result.output
+    cells = json.loads(result.output)["cells"]
+    assert [(c["cell"], c["status"]) for c in cells] == [("a", "stale"), ("b", "ok"), ("c", "new")]
+    assert set(cells[0]) == {"cell", "status", "reason", "fingerprint", "landed"}
+    assert cells[0]["landed"] != cells[0]["fingerprint"] and cells[2]["landed"] is None
+
+
+def test_status_of_a_notebook_that_doesnt_compile_exits_3(tmp_path) -> None:
+    f = tmp_path / "base.qsql"
+    f.write_text("-- @cell a\nSELECT * FROM {{ ref('ghost') }};\n")
+    assert runner.invoke(app, ["status", str(f)]).exit_code == 3
+
+
+def test_status_help_says_what_isnt_fingerprinted() -> None:
+    result = runner.invoke(app, ["status", "--help"])
+    assert "aren't fingerprinted" in " ".join(result.output.split())
+
+
+def test_each_watch_cycle_ends_with_one_final_status(capsys) -> None:
+    from quicksql.cli import _watch_cycle
+    from quicksql.errors import ConfigError
+    from quicksql.models import RunResult
+
+    _watch_cycle(object(), [])  # a save with nothing to rerun
+    _watch_cycle(None, ConfigError("boom"))
+    _watch_cycle(
+        object(),
+        [RunResult(cell="a", status="ok", rows=1, target="t"),
+         RunResult(cell="b", status="failed", error="nope")],
+    )
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    assert lines[0] == "nothing to rerun"
+    assert lines[1] == "compile error: boom"
+    assert lines[-1] == "1 ok, 1 failed, 0 skipped"
+
+
+def test_status_json_reports_a_compile_error_as_json(tmp_path) -> None:
+    f = tmp_path / "base.qsql"
+    f.write_text("-- @cell a\nSELECT * FROM {{ ref('ghost') }};\n")
+    result = runner.invoke(app, ["status", str(f), "--json"])
+    assert result.exit_code == 3
+    doc = json.loads(result.output)
+    assert doc["cells"] == [] and doc["errors"][0]["cell"] == "a"
