@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError, create_model
 from .errors import ConfigError
 from .models import Merge, Scope
 from .plugins.base import EmptyConfig
-from .registry import PLUGINS, FieldEntry, PluginRegistry
+from .registry import EXECUTORS, PLUGINS, FieldEntry, PluginRegistry
 
 
 def build_models(plugins: PluginRegistry = PLUGINS) -> tuple[type[BaseModel], type[BaseModel]]:
@@ -176,6 +176,18 @@ def resolve_engine(cfg: BaseModel) -> str:
     """First-result decision: Engine answers for explicit @engine, Input infers
     from its own key; core default is duckdb."""
     return PLUGINS.first_result("resolve_engine", cfg) or "duckdb"
+
+
+def input_spec(config: Any, engine: str) -> dict[str, Any]:
+    """The ``input.<engine>`` directive as a dict, ``{}`` when absent. A bare
+    string is the engine's shorthand for its main key, the executor's
+    ``input_shorthand``: ``input: {sqlite: x.db}`` is ``{path: x.db}``."""
+    spec = (getattr(config, "input", None) or {}).get(engine)
+    if spec is None:
+        return {}
+    if isinstance(spec, dict):
+        return spec
+    return {EXECUTORS.get(engine).input_shorthand: spec}
 
 
 def resolve_sink_type(cfg: BaseModel) -> str:

@@ -7,6 +7,7 @@ from typing import Any
 
 import polars as pl
 
+from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RenderedCell, RunContext
 from ..registry import SINKS, executor
@@ -18,15 +19,12 @@ class SQLiteExecutor(Executor):
     supports_context_refs = True
 
     def context_key(self, config: Any) -> str:
-        spec = (config.input or {}).get("sqlite")
-        path = spec.get("path") if isinstance(spec, dict) else spec
-        return f"sqlite:{path or ':memory:'}"
+        return f"sqlite:{input_spec(config, 'sqlite').get('path') or ':memory:'}"
 
     def _connect(self, cell: RenderedCell, ctx: RunContext) -> tuple[sqlite3.Connection, bool]:
         """The context session's shared connection (temp tables live there;
         :memory: contexts only exist there), or an ephemeral one without a session."""
-        spec = (cell.config.input or {}).get("sqlite")
-        path = spec.get("path") if isinstance(spec, dict) else spec
+        path = input_spec(cell.config, "sqlite").get("path")
         db = str(ctx.root / path) if path and path != ":memory:" else (path or ":memory:")
         if ctx.session is None:
             return sqlite3.connect(db), True

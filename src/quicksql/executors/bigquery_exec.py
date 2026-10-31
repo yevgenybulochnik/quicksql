@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RenderedCell, RunContext
 from ..registry import SINKS, executor
@@ -20,13 +21,13 @@ class BigQueryExecutor(Executor):
     # client-side would run the pieces as separate jobs and lose session state,
     # and a script can't be the body of CREATE TEMP TABLE AS.
     supports_multistatement_materialization = False
+    input_shorthand = "project"
 
     def split_statements(self, sql: str) -> list[str]:
         return [strip_trailing_semicolon(sql)]
 
     def context_key(self, config: Any) -> str:
-        spec = (config.input or {}).get("bigquery") or {}
-        return f"bigquery:{spec.get('project')}"
+        return f"bigquery:{input_spec(config, 'bigquery').get('project')}"
 
     def make_client(self, spec: dict[str, Any]) -> Any:
         """Split out so tests can substitute a fake client."""
@@ -105,7 +106,7 @@ class BigQueryExecutor(Executor):
         return job
 
     def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
-        spec = (cell.config.input or {}).get("bigquery") or {}
+        spec = input_spec(cell.config, "bigquery")
         sql = strip_trailing_semicolon(cell.sql)  # bigquery runs the whole script in one job
         if not SINKS.get(cell.sink_type).lands_output:
             # effect-only: run the (possibly multi-statement) script, land nothing

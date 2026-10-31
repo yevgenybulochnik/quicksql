@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 import duckdb
 import polars as pl
 
+from .config import input_spec
+
 if TYPE_CHECKING:
     from .compiler import Project
 
@@ -370,12 +372,10 @@ def _postgres_from_config(config: Any) -> CatalogNode | None:
 
 
 _CONTEXT_BUILDERS: dict[str, Callable[[Any, Path], CatalogNode | None]] = {
-    "bigquery": lambda config, root: bigquery_context_node(
-        (config.input or {}).get("bigquery") or {}
-    ),
+    "bigquery": lambda config, root: bigquery_context_node(input_spec(config, "bigquery")),
     "postgres": lambda config, root: _postgres_from_config(config),
-    "sqlite": lambda config, root: sqlite_context_node((config.input or {}).get("sqlite"), root),
-    "duckdb": lambda config, root: duckdb_context_node((config.input or {}).get("duckdb"), root),
+    "sqlite": lambda config, root: sqlite_context_node(input_spec(config, "sqlite"), root),
+    "duckdb": lambda config, root: duckdb_context_node(input_spec(config, "duckdb"), root),
 }
 
 

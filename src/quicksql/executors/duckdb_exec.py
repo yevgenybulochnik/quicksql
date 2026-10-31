@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..config import input_spec
 from ..models import RenderedCell, RunContext
 from ..registry import SINKS, executor
 from .base import Executor, result_view
@@ -14,9 +15,7 @@ class DuckDBExecutor(Executor):
     supports_context_refs = True
 
     def context_key(self, config: Any) -> str:
-        spec = (config.input or {}).get("duckdb")
-        path = spec.get("path") if isinstance(spec, dict) else spec
-        return f"duckdb:{path or ':memory:'}"
+        return f"duckdb:{input_spec(config, 'duckdb').get('path') or ':memory:'}"
 
     def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
         *setup, final = self.split_statements(cell.sql)

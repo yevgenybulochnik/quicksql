@@ -120,6 +120,8 @@ class Executor(ABC):
     # TABLE AS). False for engines with native scripting that can't be split
     # client-side, so their whole body can't be wrapped (bigquery).
     supports_multistatement_materialization: ClassVar[bool] = True
+    # the key a bare string in the cell's input means: {sqlite: x.db} is {path: x.db}
+    input_shorthand: ClassVar[str] = "path"
 
     def context_key(self, config: Any) -> str:
         """Cells with equal keys share an execution context (engine + target)."""

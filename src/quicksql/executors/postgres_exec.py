@@ -10,6 +10,7 @@ from typing import Any
 
 import polars as pl
 
+from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RenderedCell, RunContext
 from ..registry import SINKS, executor
@@ -17,14 +18,14 @@ from .base import Executor, register_frame, result_view
 
 
 def _dsn(config: Any) -> str | None:
-    spec = (config.input or {}).get("postgres")
-    dsn = spec.get("dsn") if isinstance(spec, dict) else spec
+    dsn = input_spec(config, "postgres").get("dsn")
     return os.path.expandvars(dsn) if dsn else None
 
 
 @executor("postgres")
 class PostgresExecutor(Executor):
     supports_context_refs = True
+    input_shorthand = "dsn"
 
     def context_key(self, config: Any) -> str:
         return f"postgres:{_dsn(config) or ''}"
