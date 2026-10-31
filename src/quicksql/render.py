@@ -91,12 +91,26 @@ class RenderContext:
         return path if os.path.isabs(path) else str(self.root / path)
 
 
+def _call_hook(plug: Any, hook: str, rctx: RenderContext, *args: Any) -> Any:
+    """A plugin bug in a render hook is the cell's template error, not a crash
+    of compile, or of the LSP, which compiles on every edit."""
+    try:
+        return getattr(plug, hook)(rctx, *args)
+    except QsqlError:
+        raise  # already says what's wrong
+    except Exception as exc:
+        raise ConfigError(
+            f"cell {rctx.name!r}: template error: plugin {plug.name!r} {hook}: "
+            f"{describe(exc, ())}"
+        ) from exc
+
+
 def build_context(rctx: RenderContext) -> dict[str, Any]:
     """Merge plugin-contributed globals under the collision guard."""
     context: dict[str, Any] = {"config": rctx.config}
     owners = {key: "core" for key in context}
     for plug in PLUGINS.overriding("render_context"):
-        for key, value in (plug.render_context(rctx) or {}).items():
+        for key, value in (_call_hook(plug, "render_context", rctx) or {}).items():
             if key in owners:
                 raise ConfigError(
                     f"cell {rctx.name!r}: render context key {key!r} from plugin "
@@ -154,7 +168,7 @@ def render_sql(
         raise ConfigError(f"cell {name!r}: template error: {detail}") from exc
 
     for plug in PLUGINS.overriding("after_render"):
-        out = plug.after_render(rctx, sql)
+        out = _call_hook(plug, "after_render", rctx, sql)
         if out is not None:
             sql = out
     return sql, rctx

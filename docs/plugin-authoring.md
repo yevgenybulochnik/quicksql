@@ -95,6 +95,11 @@ delegating — `quicksql run --set render_dir=build/sql`.
   plugin uses this hook; the scratch `Header`/`Footer` plugins in
   `tests/test_hooks.py` show two transformers composing.
 
+An exception either render hook raises fails that cell's compile as a template error
+naming the plugin and hook (`template error: plugin 'boom' after_render: KeyError: 'x'`),
+exit 3, and the LSP shows it as a diagnostic. Raise a `ConfigError` to word the message
+yourself; it passes through unchanged.
+
 ## Decision & aggregation hooks
 
 Every builtin directive owns its behavior through one of these:
