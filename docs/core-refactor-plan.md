@@ -3,7 +3,7 @@
 **Status:** in progress. Proposed 2026-10-15; revised 2026-10-30 after a review of the
 plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optional).
 
-**Progress (2026-10-30):**
+**Progress (2026-10-31):**
 - Done — within a run, downstream of a failed cell is skipped, not run on stale data;
   `RunResult.status` is `ok` | `failed` | `skipped`, shown as `⊘` in the TUI and `skip` in
   the CLI (`b80d936`, `08eb63b`, `7185bba`). The core of Phase 2.
@@ -28,8 +28,17 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
 - Done — TUI catalog navigation (user-reported): leaving the Catalog tab keeps the dive,
   `1`–`5` jump to a tab from any mode, `Esc` leaves a sheet without popping, and a notebook
   switch on the Catalog tab shows the new catalog (`91cfea3..33dd7ac`).
-- Next — the remaining Phase 1 fixes, and the Phase 0 safety net before Phase 3. The agent-facing CLI beyond `run --json` is planned in
-  `docs/agent-cli-plan.md`.
+- Done — Phase 0: every demo compiles offline and the sources demo runs in a clean temp
+  copy (`0f95b4d`, `844042b`); import-linter contracts in `pyproject.toml`, with today's 12
+  violations as the ignore list, gate every `uv run pytest` (`5219a6b..bdea6c4`).
+- Done — Phase 1: any exception while rendering a template is a template error, exit 3,
+  and the LSP publishes it as a diagnostic instead of crashing (`610adb8`, `1fbb936`).
+- Done — Phase 1: composed config models are cached on their plugin `Config` classes;
+  kitchen-sink compiles in ~6 ms, down from ~27 ms (`197fc26`, `93cbb99`), measured by
+  `stress/bench_compile.py` (`129a2e1`).
+- Next — the remaining Phase 1 fixes (append-mode row counts, the TUI preview fallback,
+  `plan_rerun`, errors raised by render hooks), then Phase 3. The agent-facing CLI beyond
+  `run --json` is planned in `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -51,8 +60,9 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 |
 | A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 |
 | Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable; a template ran a shell command at compile time | 1 (fixed) |
-| A non-template exception while rendering (`{{ 1/0 }}`, the sandbox's `range()` cap) crashes `compile` with a traceback and exit 1, not a template error and exit 3 (2026-10-30) | reproduced | 1 |
-| Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 |
+| A non-template exception while rendering (`{{ 1/0 }}`, the sandbox's `range()` cap) crashes `compile` with a traceback and exit 1, not a template error and exit 3 (2026-10-30) | reproduced | 1 (fixed) |
+| A plugin's `render_context` or `after_render` hook that raises crashes `compile` (traceback, exit 1) and the LSP's diagnostics (2026-10-31) | reproduced with a scratch plugin | 1 |
+| Composed config models rebuilt per cell | ~80% of compile time; 25 → 5 ms memoized | 1 (fixed) |
 | Downstream of a failed cell runs on stale data and reports ok | reproduced, cross-context and in-session | 2 (fixed within a run) |
 | Across watch reruns, a cross-context upstream that failed earlier is still read stale (2026-10-30) | reproduced with a reused `RunSession` | 2 (fixed) |
 | DuckDB errors print as `FAIL a: ^` | reproduced | 2 (fixed) |
@@ -92,21 +102,28 @@ below lands in place, one phase at a time, with the existing test suite as the s
 
 Sizes are relative: S, M, L.
 
-**Phase 0 — safety net (S).**
-- `tests/test_demos.py`: compile every `demo/**/*.qsql`, and run `demo/sources/sources.qsql`
-  offline in a temp copy asserting every cell is ok. Ported from `tests/test_examples.py`
-  on `feat/qsql-notebook-engine`; nothing guards the demos today.
-- Add import-linter (dev dependency) with the target contracts — core modules import no
-  extension or front-end; extensions don't import the runner, compiler, watcher or CLI —
-  and list today's violations under `ignore_imports`. That list is the debt register:
-  each phase deletes its entries, and Phase 6 ends with it empty. The eager package
-  `__init__`s (`executors/`, `sinks/`, `plugins/`) belong on it: through them, `config.py`
-  importing `plugins.base` loads every builtin plugin, and `compiler.py` imports
-  `bootstrap`.
-- There is no CI, so a pytest test runs `lint-imports`: the contracts gate every
+**Phase 0 — safety net (S; done).**
+- Done: `tests/test_demos.py` compiles every `demo/**/*.qsql` with network and database
+  connections refused, and runs `demo/sources/sources.qsql` in a temp copy without a hand
+  run's outputs, asserting every cell is ok and its output landed.
+- Done: import-linter (dev dependency) with two contracts in `pyproject.toml` — core
+  modules import no extension or front-end; extensions import neither the runner, the
+  compiler nor any front-end — and today's 12 violations under `ignore_imports`, each
+  commented with the phase that removes it. That list is the debt register: each phase
+  deletes its entries, and Phase 6 ends with it empty. An entry matching no import is an
+  error, and a module missing from every layer fails `tests/test_layering.py`.
+  - The package `__init__`s and `base` modules are core; `sources.py` is an extension.
+  - Grimp doesn't model the implicit parent-package import, so the eager package
+    `__init__`s are recorded at their source: each `__init__`'s import of its
+    implementations (10 entries, Phase 4), plus `compiler → bootstrap` (Phase 4) and
+    `plugins.builtin → runner` (Phase 6).
+  - import-linter sees modules, not names: front-ends importing runner privates is
+    front-end → core, which the contracts allow, so it isn't on the list. Phase 6 checks
+    it separately.
+- Done: `tests/test_layering.py` runs `lint-imports`, so the contracts gate every
   `uv run pytest`.
-- Record the baseline: `demo/kitchen-sink/kitchen-sink.qsql` compiles in ~23 ms
-  (2026-10-30), 79% of it in `build_models`, called 8 times per compile.
+- Baseline: `demo/kitchen-sink/kitchen-sink.qsql` compiled in ~23 ms (2026-10-30), 79% of
+  it in `build_models`, called 8 times per compile.
 
 **Phase 1 — quick fixes (S; independent red/green pairs).**
 - Append-mode DuckDB and Postgres sinks report the `INSERT`'s own row count.
@@ -117,10 +134,19 @@ Sizes are relative: S, M, L.
   a pydantic model instance exposes only its fields. A plugin that contributes a model
   *class* still exposes its classmethods; the plugin-authoring guide says to contribute
   instances.
-- Rendering reports any exception as a template error (exit 3), not only Jinja's own.
-- Cache the composed models on the tuple of plugin `Config` classes being composed:
-  ~23 → ~5 ms. Keyed on the classes themselves, it stays correct when registries change
-  and survives Phase 4 without a generation counter. Test call counts, not wall time.
+- Done: rendering reports any exception as a template error (exit 3), not only Jinja's
+  own; a `QsqlError` raised inside a template passes through unchanged. Render and the
+  runner share `errors.describe` for the message.
+- Errors raised by a plugin's `render_context` or `after_render` hook get the same
+  treatment: today they crash `compile` and the LSP's diagnostics.
+- Done: the composed models are cached on the tuple of plugin `Config` classes being
+  composed (`config._compose_bases`). Keyed on the classes themselves, it stays correct
+  when registries change and survives Phase 4 without a generation counter. Kitchen-sink
+  compiles in ~6 ms, down from ~27 ms measured the same day (2026-10-31, quiet box).
+  Optional, if compile time matters again, by profile: `render_sql` builds a sandbox per
+  cell (~49% of what's left), `parse_text` loads YAML with the pure-Python loader though
+  libyaml is installed (~31%), and `PluginRegistry.field_map()` is rebuilt 31 times per
+  compile (~11%).
 - Done: remove dead code: `models.Cell`, `RunResult.pl`, `RenderedCell.uses_sources`,
   `RunContext.overrides`, unused imports (`tempfile` in `runner.py`; `Ref`/`Source` in
   `lsp/analysis.py`), unused `project` parameters (`_resolve_scope`, `relation_names`).
@@ -238,7 +264,9 @@ needs Phase 4's composition root and lazy package `__init__`s.
   catalog, the LSP and the TUI import.
 - `statement_spans`/`split_statements` and `make_sink` move into core modules, so the
   compiler imports no executor or sink module.
-- import-linter's ignore list is empty; the Phase 0 pytest gate enforces it.
+- import-linter's ignore list is empty; the Phase 0 pytest gate enforces it. import-linter
+  can't see which names a module imports, so a separate check confirms no front-end
+  imports a runner private.
 - Tests first: a scratch executor with `dialect = "tsql"` splits statements, gets LSP
   syntax checks and appears in the catalog with no core edits.
 - Check: no engine or sink name is hard-coded outside its own module.
@@ -369,7 +397,7 @@ one focused change at a time, each on its own worktree branch.
 - `demo/kitchen-sink/kitchen-sink.qsql` compile time: ~23 ms baseline, at most 6 ms after
   Phase 1. Measured by a benchmark script, not asserted in pytest.
 - Mechanical checks: no `sink_type == "none"` after Phase 3; no `(config.input or {})`
-  outside `input_spec` after Phase 3; import-linter passes with an empty ignore list after
-  Phase 6.
+  outside `input_spec` after Phase 3; import-linter passes with an empty ignore list, and
+  no module outside the runner imports a runner private, after Phase 6.
 - `/verify` (the TUI in tmux) after Phases 2, 8 and 9; the kitchen-sink notebook against
   the demo stack (ports 5433/9051) after Phases 3 and 9.
