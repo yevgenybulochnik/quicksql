@@ -1,13 +1,15 @@
 """Config model composition and layer merging.
 
 ``build_models`` composes every registered plugin's ``Config`` into one
-GlobalConfig / CellConfig via multi-inheritance ``create_model``. Raw directive
-dicts merge highest-priority last (global -> cell -> run overrides), honoring
-each field's merge strategy, then validate against the composed model.
+GlobalConfig / CellConfig via multi-inheritance ``create_model``, cached on the
+tuple of Config classes composed. Raw directive dicts merge highest-priority
+last (global -> cell -> run overrides), honoring each field's merge strategy,
+then validate against the composed model.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from pydantic import BaseModel, ValidationError, create_model
@@ -29,6 +31,17 @@ def _compose(name: str, plugins: PluginRegistry, scopes: tuple[Scope, ...]) -> t
     bases = tuple(
         type(p).Config for p in plugins.by_scope(*scopes) if type(p).Config is not EmptyConfig
     )
+    return _compose_bases(name, bases)
+
+
+# Keyed on the Config classes themselves, so any registry change that matters
+# (a new plugin, a name re-registered with a new Config) misses without explicit
+# invalidation; lru_cache never stores a raise, so a validator collision fails
+# every compile. A registry state needs two entries (GlobalConfig, CellConfig):
+# 32 holds 16 states, far more than one process uses, while bounding the dead
+# entries tests leave behind by registering a throwaway plugin class each.
+@lru_cache(maxsize=32)
+def _compose_bases(name: str, bases: tuple[type[BaseModel], ...]) -> type[BaseModel]:
     _check_validator_names(bases)
     return create_model(name, __base__=bases or (EmptyConfig,))
 
