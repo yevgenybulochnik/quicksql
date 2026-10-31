@@ -51,7 +51,7 @@ markers = [
 ]
 
 # Layering contracts: the Target in docs/core-refactor-plan.md, on the current module layout.
-# Every module is classified core, extension or front-end.
+# Every module is classified core, extension or front-end (tests/test_layering.py checks it).
 # The ignore_imports lists are the refactor's debt register: each phase deletes its entries
 # and Phase 6 ends with both lists empty. An entry that matches no import is an error.
 [tool.importlinter]
