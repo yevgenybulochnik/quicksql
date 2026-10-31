@@ -20,7 +20,7 @@ import duckdb
 import polars as pl
 
 from .conduit import conduit_target
-from .errors import QsqlError, describe
+from .errors import ExecutorError, QsqlError, describe
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .executors.base import EngineSession, result_view
 from .registry import EXECUTORS, PLUGINS, SINKS
@@ -141,6 +141,16 @@ def _expand_stale_upstreams(project: Project, names: list[str], session: RunSess
     return [n for n in project.order if n in wanted]
 
 
+class StatementError(ExecutorError):
+    """One of a cell's statements failed: ``index`` of ``count``, from 1. The
+    message numbers it only when there's more than one to tell apart."""
+
+    def __init__(self, index: int, count: int, cause: Exception) -> None:
+        self.index = index
+        detail = _message(cause)
+        super().__init__(f"statement {index} of {count}: {detail}" if count > 1 else detail)
+
+
 def _context_session(cell: RenderedCell, ctx: RunContext) -> tuple[EngineSession, bool]:
     """The cell's context session, opened on the context's first cell and kept
     by the run session; without one, a private session the caller closes."""
@@ -165,18 +175,27 @@ def execute_cell(cell: RenderedCell, ctx: RunContext) -> str:
     session, private = _context_session(cell, ctx)
     lands_output = SINKS.get(cell.sink_type).lands_output
     scoped = cell.reffed_in_context or bool(cell.context_refs)
-    *setup, final = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    statements = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    *setup, final = statements
+
+    def numbered(index: int, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return call(*args, **kwargs)
+        except Exception as exc:
+            raise StatementError(index, len(statements), exc) from exc
+
     try:
-        for stmt in setup if lands_output else [*setup, final]:
-            session.execute(stmt, scoped=scoped)
+        for index, stmt in enumerate(setup if lands_output else statements, start=1):
+            numbered(index, session.execute, stmt, scoped=scoped)
         if not lands_output:
             return ""
+        last = len(statements)
         if cell.reffed_in_context:
-            final = session.materialize(cell.name, final)
+            final = numbered(last, session.materialize, cell.name, final)
             if ctx.session is not None:
                 ctx.session.materialized.add(cell.name)
             ctx.emit("cell_step", cell.name, "materialized temp for downstream refs")
-        return session.extract(final, result_view(cell.name), ctx, scoped=scoped)
+        return numbered(last, session.extract, final, result_view(cell.name), ctx, scoped=scoped)
     finally:
         if private:
             session.close()
@@ -318,6 +337,7 @@ def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:
         elapsed=elapsed,
         error=_message(exc),
         traceback=traceback.format_exc(),
+        statement=exc.index if isinstance(exc, StatementError) else None,
     )
 
 

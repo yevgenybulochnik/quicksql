@@ -67,6 +67,26 @@ def split_statements(sql: str, dialect: str) -> list[str]:
     return [s for s in stmts if s] or [strip_trailing_semicolon(sql)]
 
 
+def unwrap_error_context(message: str, prefix: str) -> str:
+    """Postgres and DuckDB quote a statement's first line under its error
+    (``LINE 1: <sql>``, a caret beneath). For a cell's SQL that quicksql
+    wrapped (``CREATE TEMP TABLE x AS <sql>``), cut ``prefix`` from that line and
+    move the caret with it, so the quote is the cell's own SQL. A line the
+    engine already trimmed (``LINE 1: ...``) has lost the prefix; it's kept."""
+    lead = "LINE 1: "
+    lines = message.split("\n")
+    for i, (line, caret) in enumerate(zip(lines, lines[1:])):
+        if (
+            line.startswith(lead + prefix)
+            and caret.strip() == "^"
+            and caret.index("^") >= len(lead) + len(prefix)
+        ):
+            lines[i] = lead + line[len(lead) + len(prefix) :]
+            lines[i + 1] = caret[len(prefix) :]
+            return "\n".join(lines)
+    return message
+
+
 def result_view(cell_name: str) -> str:
     return f"__qsql_{cell_name}"
 
@@ -215,7 +235,7 @@ class DbApiSession(EngineSession):
 
     def materialize(self, name: str, sql: str) -> str:
         self.drop(name)
-        self._run(f'CREATE TEMP TABLE "{name}" AS {sql}')
+        self._run(sql, wrapper=f'CREATE TEMP TABLE "{name}" AS ')
         return f'SELECT * FROM "{name}"'  # temps shadow real tables on reads
 
     def drop(self, name: str) -> None:
@@ -227,8 +247,9 @@ class DbApiSession(EngineSession):
     def column_name(self, column: Any) -> str:
         return column[0]
 
-    def _run(self, sql: str) -> Any:
+    def _run(self, sql: str, wrapper: str = "") -> Any:
         try:
-            return self.con.execute(sql)
+            return self.con.execute(wrapper + sql)
         except Exception as exc:  # the driver's own errors, whatever their type
-            raise ExecutorError(f"{self.engine}: {exc}") from exc
+            message = unwrap_error_context(str(exc), wrapper) if wrapper else str(exc)
+            raise ExecutorError(f"{self.engine}: {message}") from exc

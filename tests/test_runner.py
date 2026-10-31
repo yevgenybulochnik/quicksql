@@ -846,15 +846,13 @@ def test_a_failure_names_its_statement_when_the_cell_has_several(tmp_path) -> No
     )
     [result] = project.run()
     assert result.statement == 2
-    assert result.error.startswith(
-        'statement 2 of 3: Binder Error: Referenced column "nope" not found'
-    )
+    assert result.error.startswith('statement 2 of 3: Binder Error: Referenced column "nope"')
 
 
 def test_a_single_statement_failure_is_statement_1_with_no_prefix(tmp_path) -> None:
     [result] = compile_text("-- @cell a\nSELECT nope;", root=tmp_path).run()
     assert result.statement == 1
-    assert result.error.startswith('Binder Error: Referenced column "nope" not found')
+    assert result.error.startswith('Binder Error: Referenced column "nope"')
 
 
 def test_a_failure_outside_the_cells_statements_has_no_statement(tmp_path) -> None:

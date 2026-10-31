@@ -179,7 +179,7 @@ def test_sqlite_terminal_without_result_set_raises(ctx) -> None:
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1)",  # terminal INSERT: no result set
         {"input": {"sqlite": ":memory:"}},
     )
-    with pytest.raises(ExecutorError, match="^sqlite query returned no result set$"):
+    with pytest.raises(ExecutorError, match="^statement 2 of 2: sqlite query returned no result set$"):
         execute_cell(cell, ctx)
 
 

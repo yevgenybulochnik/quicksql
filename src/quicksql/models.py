@@ -76,8 +76,9 @@ class RunResult:
 
     ``status`` is the outcome; ``ok`` is read-only, derived from it.
     ``error`` is the human message: why it failed, or for a skipped cell
-    (which never ran) the upstream that did. ``traceback`` is the failure's
-    full trace, for debugging.
+    (which never ran) the upstream that did. ``statement`` numbers, from 1, the
+    cell's statement that failed, None when the failure was outside them.
+    ``traceback`` is the failure's full trace, for debugging.
     """
 
     cell: str
@@ -87,6 +88,7 @@ class RunResult:
     elapsed: float = 0.0
     error: str | None = None
     traceback: str | None = None
+    statement: int | None = None
     preview: Any | None = None
 
     @property
@@ -105,6 +107,7 @@ class RunResult:
             "target": self.target,
             "elapsed": round(self.elapsed, 4),  # seconds, to 0.1 ms
             "error": self.error,
+            "statement": self.statement,
             "traceback": self.traceback,
         }
         if rows > 0:

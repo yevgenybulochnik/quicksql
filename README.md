@@ -105,20 +105,24 @@ usage error). The failing run above, as JSON (messages cut short):
   "cells": [
     {"cell": "users", "status": "failed", "rows": null, "target": null, "elapsed": 0.0219,
      "error": "Catalog Error: Table with name user_seed does not exist!\nDid you mean ...",
-     "traceback": "Traceback (most recent call last):\n ...", "preview": null},
+     "statement": 1, "traceback": "Traceback (most recent call last):\n ...",
+     "preview": null},
     {"cell": "events", "status": "ok", "rows": 10, "target": "data/events.parquet",
-     "elapsed": 0.0045, "error": null, "traceback": null,
+     "elapsed": 0.0045, "error": null, "statement": null, "traceback": null,
      "preview": {"columns": ["user_id", "event"], "rows": [[1, "event_0"]]}},
     {"cell": "active_user_events", "status": "skipped", "rows": null, "target": null,
-     "elapsed": 0.0, "error": "upstream 'users' failed", "traceback": null, "preview": null}
+     "elapsed": 0.0, "error": "upstream 'users' failed", "statement": null,
+     "traceback": null, "preview": null}
   ]
 }
 ```
 
 `status` is `ok`, `failed`, `compile_error`, or `error` when something else stopped the run
 before any cell ran, such as a `--plugins` module that won't import (exit 1). A cell's
-`error` is the message the summary prints and `traceback` the full trace; `elapsed` is in
-seconds. `preview` appears only with
+`error` is the message the summary prints and `traceback` the full trace; `statement`
+numbers, from 1, the cell's statement that failed (`null` when the failure was outside
+them, such as connecting), and the message starts `statement 2 of 3:` when the cell has
+more than one. `elapsed` is in seconds. `preview` appears only with
 `--rows`. Its values are JSON-safe: dates and times as ISO text, decimals as exact text,
 NaN as `"nan"`. On `compile_error` or `error`, `cells` is empty and `errors` lists each
 problem as `{"cell", "line", "message"}`; `cell` and `line` are `null` when the problem

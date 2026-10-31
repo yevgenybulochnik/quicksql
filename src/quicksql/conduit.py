@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import input_spec
-from .executors.base import EngineSession
+import duckdb
+
+from .executors.base import EngineSession, unwrap_error_context
 from .models import RunContext
 
 
@@ -35,13 +37,20 @@ class ConduitSession(EngineSession):
         self.conn.execute(sql)
 
     def extract(self, sql: str, view: str, ctx: RunContext, *, scoped: bool = True) -> str:
-        self.conn.execute(f'CREATE OR REPLACE TEMP VIEW "{view}" AS {sql}')
+        self._wrapped(f'CREATE OR REPLACE TEMP VIEW "{view}" AS ', sql)
         return view
 
     def materialize(self, name: str, sql: str) -> str:
         # a table, not a view: each consumer would recompute a view
-        self.conn.execute(f'CREATE OR REPLACE TEMP TABLE "{name}" AS {sql}')
+        self._wrapped(f'CREATE OR REPLACE TEMP TABLE "{name}" AS ', sql)
         return f'SELECT * FROM "{name}"'
 
     def drop(self, name: str) -> None:
         self.conn.execute(f'DROP TABLE IF EXISTS temp."{name}"')
+
+    def _wrapped(self, wrapper: str, sql: str) -> None:
+        try:
+            self.conn.execute(wrapper + sql)
+        except duckdb.Error as exc:  # same type, so it still reads as duckdb's own
+            exc.args = (unwrap_error_context(str(exc), wrapper),)
+            raise
