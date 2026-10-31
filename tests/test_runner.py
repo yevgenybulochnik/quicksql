@@ -909,3 +909,45 @@ def test_a_conduit_that_moves_away_and_back_runs_on_the_live_connection(tmp_path
             assert result.ok, (db, result.error)
     finally:
         session.close()
+
+
+# ---------- a runtime error while landing a lazy duckdb result is the query's ----------
+
+BAD_CAST = "CREATE TEMP TABLE s AS SELECT * FROM (VALUES ('1'), ('x')) v(c);\n"
+
+
+def test_a_runtime_error_landing_a_duckdb_cell_names_and_quotes_its_statement(tmp_path) -> None:
+    # a plain duckdb cell lands from a lazy view, so its bad cast fails inside
+    # the sink's COPY: the error is still the cell's terminal statement's
+    [result] = compile_text(
+        "-- @cell a\n" + BAD_CAST + "SELECT c::INT AS n FROM s;", root=tmp_path
+    ).run()
+    assert result.statement == 2
+    assert result.error.startswith(
+        "statement 2 of 2: Conversion Error: Could not convert string 'x' to INT32"
+    )
+    assert "COPY" not in result.error
+    assert result.error.endswith(
+        "\nLINE 1: SELECT c::INT AS n FROM s\n" + " " * len("LINE 1: SELECT c") + "^"
+    )
+
+
+def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path) -> None:
+    import duckdb
+
+    from quicksql.registry import sink
+    from quicksql.sinks.base import Sink
+
+    @sink("broken")
+    class Broken(Sink):
+        def write(self, cell, view, conn):
+            raise duckdb.IOException("IO Error: the disk is full")
+
+        def ref_expr(self, cell_name):
+            return "nowhere"
+
+    [result] = compile_text(
+        "-- @cell a\n-- @output: { type: broken }\nSELECT 1 AS n;", root=tmp_path
+    ).run()
+    assert result.error == "IO Error: the disk is full"
+    assert result.statement is None
