@@ -9,7 +9,7 @@ from typing import Any
 
 from ..errors import ExecutorError
 from ..models import RenderedCell, RunContext
-from ..registry import executor
+from ..registry import SINKS, executor
 from .base import Executor, register_frame, result_view, strip_trailing_semicolon
 
 
@@ -107,7 +107,7 @@ class BigQueryExecutor(Executor):
     def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
         spec = (cell.config.input or {}).get("bigquery") or {}
         sql = strip_trailing_semicolon(cell.sql)  # bigquery runs the whole script in one job
-        if cell.sink_type == "none":
+        if not SINKS.get(cell.sink_type).lands_output:
             # effect-only: run the (possibly multi-statement) script, land nothing
             if cell.context_refs:
                 self._query(self._session_state(cell, ctx, spec), sql)

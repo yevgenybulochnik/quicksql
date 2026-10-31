@@ -9,7 +9,7 @@ import polars as pl
 
 from ..errors import ExecutorError
 from ..models import RenderedCell, RunContext
-from ..registry import executor
+from ..registry import SINKS, executor
 from .base import Executor, register_frame, result_view
 
 
@@ -40,7 +40,7 @@ class SQLiteExecutor(Executor):
         con, ephemeral = self._connect(cell, ctx)
         *setup, final = self.split_statements(cell.sql)
         try:
-            if cell.sink_type == "none":
+            if not SINKS.get(cell.sink_type).lands_output:
                 # effect-only: run every statement for its side effects, land nothing
                 for stmt in [*setup, final]:
                     con.execute(stmt)

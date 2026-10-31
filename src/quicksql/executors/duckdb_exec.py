@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..models import RenderedCell, RunContext
-from ..registry import executor
+from ..registry import SINKS, executor
 from .base import Executor, result_view
 
 
@@ -20,7 +20,7 @@ class DuckDBExecutor(Executor):
 
     def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
         *setup, final = self.split_statements(cell.sql)
-        if cell.sink_type == "none":
+        if not SINKS.get(cell.sink_type).lands_output:
             # effect-only: run every statement for its side effects, land nothing
             for stmt in [*setup, final]:
                 ctx.conn.execute(stmt)
