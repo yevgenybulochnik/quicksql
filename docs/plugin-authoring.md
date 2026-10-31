@@ -130,14 +130,21 @@ the runtime order is registry state, and this makes it readable.
 
 ## Other extension points
 
-- `@executor("name")` — run a cell's SQL on a new backend; land the result as a view
-  on the conduit (`executors/base.py`, use `register_frame` for extracted results).
-  Override `context_key(config)` (engine + connection target) and set
-  `supports_context_refs = True` to let same-context cells reference each other as
-  session-scoped temp tables in your engine's dialect (see the sqlite/postgres/bigquery
-  executors); reffed cells arrive with `reffed_in_context`/`context_refs` set.
-  Keep connection/client construction behind a small seam (`make_connection` /
-  `make_client`) so tests can fake the backend offline.
+- `@executor("name")` — run cells on a new backend (`executors/base.py`). An executor
+  names its context with `context_key(config)` (engine + connection target) and
+  connects with `open_session(config, ctx) -> EngineSession`. The runner keeps one
+  session per context, shared by its cells, and drives it through the cell protocol
+  (`runner.execute_cell`), so an executor never sees a cell: setup statements go to
+  `execute(sql)`, and the terminal statement to `fetch(sql)` (rows as a Polars frame or
+  pyarrow Table, landed on the conduit for you), or every statement to `execute` when
+  the cell's sink lands nothing. With `supports_context_refs = True`, same-context
+  cells reference each other as session temps: `materialize(name, sql)` creates one
+  and returns the query that reads it back, and `drop(name)` removes it. `alive()` is a
+  cheap local liveness check, `close()` releases the connection, and `scoped=False`
+  marks a statement that touches no temps (BigQuery runs those outside its session). A
+  DB-API driver gets all of this from `DbApiSession` (see the sqlite/postgres
+  executors). Keep connection/client construction behind a small seam
+  (`make_connection` / `make_client`) so tests can fake the backend offline.
 - `@sink("name")` — a new destination: `prepare` (ATTACH/mkdir), `write`, and
   `ref_expr` (how downstream DuckDB cells read it back).
 - `@source_reader("name")` — map a file extension to a DuckDB reader expression;

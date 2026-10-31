@@ -1,4 +1,11 @@
-"""Executor: run a cell's SQL on a backend, land the result as a view DuckDB can read."""
+"""Executors and their sessions: where a cell's SQL runs.
+
+An ``Executor`` names an engine and opens an ``EngineSession`` per execution
+context (engine + connection target). The runner drives the session through the
+cell protocol (``runner.execute_cell``): setup statements run for effect, then
+the terminal statement is materialized as a temp for same-context consumers
+and/or extracted onto the DuckDB conduit, where every sink lands from.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,8 @@ from typing import Any, ClassVar
 import sqlglot
 from sqlglot.tokens import TokenType
 
-from ..models import RenderedCell, RunContext
+from ..errors import ExecutorError
+from ..models import RunContext
 
 
 def strip_trailing_semicolon(sql: str) -> str:
@@ -133,5 +141,94 @@ class Executor(ABC):
         return split_statements(sql, self.name)
 
     @abstractmethod
-    def execute(self, cell: RenderedCell, ctx: RunContext) -> str:
-        """Materialize the cell's result on ctx.conn; return the view name."""
+    def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
+        """Connect to the context ``config`` names. The runner keeps the session
+        for every cell sharing its ``context_key`` and closes it with the run
+        session (or right after the cell, when there is no run session)."""
+
+
+class EngineSession(ABC):
+    """A live connection to one execution context, opened for the context's
+    first cell and shared by the rest: their temp tables live here.
+
+    ``scoped`` says the cell creates or reads this context's temps. A session
+    whose scope costs something may run unscoped statements outside it:
+    BigQuery runs them as plain jobs, so a cell's script temps don't leak into
+    the shared session. Engines without that cost ignore it.
+    """
+
+    @abstractmethod
+    def execute(self, sql: str, *, scoped: bool = True) -> None:
+        """Run one statement for its effect."""
+
+    def fetch(self, sql: str, *, scoped: bool = True) -> Any:
+        """Run a query; return its rows as a Polars DataFrame or pyarrow Table."""
+        raise NotImplementedError(f"{type(self).__name__} implements neither fetch nor extract")
+
+    def extract(self, sql: str, view: str, ctx: RunContext, *, scoped: bool = True) -> str:
+        """Make the rows of ``sql`` readable on the conduit (``ctx.conn``) as
+        ``view``; return the name to read them from."""
+        return register_frame(ctx, view, self.fetch(sql, scoped=scoped))
+
+    def materialize(self, name: str, sql: str) -> str:
+        """Replace the session temp table ``name`` with the rows of ``sql``;
+        return the query that reads it back. Only engines with
+        ``supports_context_refs`` are asked."""
+        raise NotImplementedError(f"{type(self).__name__} has no temp tables")
+
+    def drop(self, name: str) -> None:
+        """Drop the session temp ``name`` if it exists."""
+
+    def alive(self) -> bool:
+        """False once the connection is known dead, so the runner reopens it.
+        A cheap local check, never a round trip."""
+        return True
+
+    def close(self) -> None:
+        """Release the connection."""
+
+
+class DbApiSession(EngineSession):
+    """An engine session over a DB-API connection. SQLite and Postgres differ
+    only in how they connect, which schema holds temps, and how a cursor names
+    a column."""
+
+    engine: ClassVar[str] = ""  # prefixes driver errors: "sqlite: no such table: t"
+    # qualifies a DROP so it can only reach a temp: unqualified, the name
+    # resolves through the search path to a real table when no temp exists yet
+    temp_schema: ClassVar[str] = "temp"
+
+    def __init__(self, con: Any) -> None:
+        self.con = con
+
+    def execute(self, sql: str, *, scoped: bool = True) -> None:
+        self._run(sql)
+
+    def fetch(self, sql: str, *, scoped: bool = True) -> Any:
+        import polars as pl
+
+        cur = self._run(sql)
+        if cur.description is None:
+            raise ExecutorError(f"{self.engine} query returned no result set")
+        cols = [self.column_name(d) for d in cur.description]
+        return pl.DataFrame(cur.fetchall(), schema=cols, orient="row")
+
+    def materialize(self, name: str, sql: str) -> str:
+        self.drop(name)
+        self._run(f'CREATE TEMP TABLE "{name}" AS {sql}')
+        return f'SELECT * FROM "{name}"'  # temps shadow real tables on reads
+
+    def drop(self, name: str) -> None:
+        self._run(f'DROP TABLE IF EXISTS {self.temp_schema}."{name}"')
+
+    def close(self) -> None:
+        self.con.close()
+
+    def column_name(self, column: Any) -> str:
+        return column[0]
+
+    def _run(self, sql: str) -> Any:
+        try:
+            return self.con.execute(sql)
+        except Exception as exc:  # the driver's own errors, whatever their type
+            raise ExecutorError(f"{self.engine}: {exc}") from exc

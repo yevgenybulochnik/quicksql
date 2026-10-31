@@ -22,7 +22,8 @@ import polars as pl
 from .conduit import conduit_target
 from .errors import QsqlError, describe
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
-from .registry import EXECUTORS, PLUGINS
+from .executors.base import EngineSession, result_view
+from .registry import EXECUTORS, PLUGINS, SINKS
 from .sinks import make_sink
 
 if TYPE_CHECKING:
@@ -140,6 +141,47 @@ def _expand_stale_upstreams(project: Project, names: list[str], session: RunSess
     return [n for n in project.order if n in wanted]
 
 
+def _context_session(cell: RenderedCell, ctx: RunContext) -> tuple[EngineSession, bool]:
+    """The cell's context session, opened on the context's first cell and kept
+    by the run session; without one, a private session the caller closes."""
+    executor = EXECUTORS.get(cell.engine)
+    if ctx.session is None:
+        return executor.open_session(cell.config, ctx), True
+    key = executor.context_key(cell.config)
+    if key not in ctx.session.engine_sessions:
+        ctx.session.engine_sessions[key] = executor.open_session(cell.config, ctx)
+    return ctx.session.engine_sessions[key], False
+
+
+def execute_cell(cell: RenderedCell, ctx: RunContext) -> str:
+    """The cell protocol, once for every engine; returns the conduit view the
+    sink lands from, or '' when the cell lands nothing.
+
+    Setup statements run for effect; the terminal statement is the result. A
+    cell some same-context cell refs materializes it as a session temp, once,
+    and lands by reading the temp back; any other cell extracts it directly.
+    A cell whose sink lands nothing runs every statement for effect.
+    """
+    session, private = _context_session(cell, ctx)
+    lands_output = SINKS.get(cell.sink_type).lands_output
+    scoped = cell.reffed_in_context or bool(cell.context_refs)
+    *setup, final = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    try:
+        for stmt in setup if lands_output else [*setup, final]:
+            session.execute(stmt, scoped=scoped)
+        if not lands_output:
+            return ""
+        if cell.reffed_in_context:
+            final = session.materialize(cell.name, final)
+            if ctx.session is not None:
+                ctx.session.materialized.add(cell.name)
+            ctx.emit("cell_step", cell.name, "materialized temp for downstream refs")
+        return session.extract(final, result_view(cell.name), ctx, scoped=scoped)
+    finally:
+        if private:
+            session.close()
+
+
 def base_runner(project: Project) -> Inner:
     """The innermost cell-runner; `project` rides in via closure so the chain
     signature stays (cell, ctx)."""
@@ -160,10 +202,7 @@ def base_runner(project: Project) -> Inner:
                 up_sink.prepare(ctx.conn)
             sink.prepare(ctx.conn)
             ctx.emit("cell_step", cell.name, f"executing on {cell.engine}")
-            view = EXECUTORS.get(cell.engine).execute(cell, ctx)
-            if cell.reffed_in_context and ctx.session is not None:
-                ctx.session.materialized.add(cell.name)
-                ctx.emit("cell_step", cell.name, "materialized temp for downstream refs")
+            view = execute_cell(cell, ctx)
             ctx.emit("cell_step", cell.name, f"landing via {cell.sink_type}")
             rows, target = sink.write(cell, view, ctx.conn)
             # effect-only sinks (none) land nothing, so there's nothing to read back

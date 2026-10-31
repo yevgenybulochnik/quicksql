@@ -10,7 +10,7 @@ import pytest
 from quicksql.compiler import compile_text
 from quicksql.errors import ExecutorError
 from quicksql.models import RunContext
-from quicksql.registry import EXECUTORS
+from quicksql.runner import execute_cell
 
 pytestmark = pytest.mark.postgres
 
@@ -43,7 +43,7 @@ def test_executor_runs_real_sql(seeded, tmp_path) -> None:
     )
     conn = duckdb.connect()
     try:
-        view = EXECUTORS.get("postgres").execute(cell, RunContext(conn=conn, root=tmp_path))
+        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path))
         assert conn.sql(f'SELECT * FROM "{view}"').fetchall() == [
             (1, 1), (2, 4), (3, 9), (4, 16), (5, 25)
         ]
@@ -64,7 +64,7 @@ def test_real_driver_errors_wrap_as_executor_error(seeded, tmp_path) -> None:
     conn = duckdb.connect()
     try:
         with pytest.raises(ExecutorError, match="postgres.*no_such_table"):
-            EXECUTORS.get("postgres").execute(cell, RunContext(conn=conn, root=tmp_path))
+            execute_cell(cell, RunContext(conn=conn, root=tmp_path))
     finally:
         conn.close()
 

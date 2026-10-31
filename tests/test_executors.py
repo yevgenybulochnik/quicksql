@@ -5,19 +5,20 @@ import duckdb
 import polars as pl
 import pytest
 
-from quicksql.config import resolve_cell, resolve_sink_type
+from quicksql.config import resolve_cell, resolve_engine, resolve_sink_type
 from quicksql.errors import ExecutorError
-from quicksql.executors.bigquery_exec import BigQueryExecutor
+from quicksql.executors.bigquery_exec import BigQueryExecutor, BigQuerySession
 from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.models import RenderedCell, RunContext
 from quicksql.registry import EXECUTORS
+from quicksql.runner import execute_cell
 
 
 def _cell(name: str, sql: str, cell_raw: dict | None = None) -> RenderedCell:
     cfg = resolve_cell({}, cell_raw or {})
     return RenderedCell(
         name=name, config=cfg, sql_raw=sql, sql=sql, hash="",
-        engine="duckdb", sink_type=resolve_sink_type(cfg),
+        engine=resolve_engine(cfg), sink_type=resolve_sink_type(cfg),
     )
 
 
@@ -118,7 +119,7 @@ def test_multistatement_materialization_capability() -> None:
 
 
 def test_duckdb_executor_creates_view(ctx) -> None:
-    view = EXECUTORS.get("duckdb").execute(_cell("a", "SELECT 42 AS x;"), ctx)
+    view = execute_cell(_cell("a", "SELECT 42 AS x;"), ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(42,)]
 
 
@@ -131,14 +132,14 @@ def test_sqlite_executor_registers_result(ctx, tmp_path) -> None:
     con.close()
 
     cell = _cell("sq", "SELECT n FROM nums ORDER BY n", {"input": {"sqlite": "nums.sqlite"}})
-    view = EXECUTORS.get("sqlite").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,), (2,), (3,)]
 
 
 def test_sqlite_executor_bad_sql_raises(ctx) -> None:
     cell = _cell("sq", "SELECT * FROM missing", {"input": {"sqlite": ":memory:"}})
     with pytest.raises(ExecutorError, match="sqlite"):
-        EXECUTORS.get("sqlite").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_sqlite_failure_message_does_not_repeat_the_cell_name(tmp_path) -> None:
@@ -158,7 +159,7 @@ def test_duckdb_setup_then_terminal_lands_terminal(ctx) -> None:
         "enriched",
         "CREATE TEMP TABLE staging AS SELECT 1 AS n;\nSELECT n * 2 AS m FROM staging",
     )
-    view = EXECUTORS.get("duckdb").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(2,)]
 
 
@@ -168,7 +169,7 @@ def test_sqlite_setup_then_terminal_lands_terminal(ctx) -> None:
         "CREATE TEMP TABLE staging AS SELECT 5 AS n;\nSELECT n + 1 AS m FROM staging",
         {"input": {"sqlite": ":memory:"}},
     )
-    view = EXECUTORS.get("sqlite").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(6,)]
 
 
@@ -179,7 +180,7 @@ def test_sqlite_terminal_without_result_set_raises(ctx) -> None:
         {"input": {"sqlite": ":memory:"}},
     )
     with pytest.raises(ExecutorError, match="^sqlite query returned no result set$"):
-        EXECUTORS.get("sqlite").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_duckdb_effect_only_runs_all_statements_lands_nothing(ctx) -> None:
@@ -188,7 +189,7 @@ def test_duckdb_effect_only_runs_all_statements_lands_nothing(ctx) -> None:
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1), (2)",
         {"output": {"type": "none"}},
     )
-    view = EXECUTORS.get("duckdb").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert view == ""  # effect-only: nothing to land
     assert ctx.conn.sql("SELECT count(*) FROM t").fetchone() == (2,)
 
@@ -220,9 +221,7 @@ def test_bigquery_same_context_cells_share_a_session(tmp_path, monkeypatch) -> N
             return FakeJob(sql, first=len(calls) == 1)
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(
-        BigQueryExecutor, "_job_config", lambda self, state: {"session": state["session_id"]}
-    )
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: {"session": self.session_id})
     project = compile_text(
         "/*@ input: { bigquery: { project: p } } */\n"
         "-- @cell parent\nSELECT * FROM src;\n"
@@ -274,7 +273,7 @@ def test_bigquery_reffed_cte_parent_materializes_unwrapped(tmp_path, monkeypatch
             return FakeJob()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(BigQueryExecutor, "_job_config", lambda self, state: None)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: None)
     body = "WITH totals AS (\n  SELECT n FROM src\n)\nSELECT n FROM totals  -- trailing note"
     project = compile_text(
         "/*@ input: { bigquery: { project: p } } */\n"
@@ -305,7 +304,7 @@ def test_bigquery_executor_with_fake_client(ctx, monkeypatch) -> None:
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
     cell = _cell("bq", "SELECT * FROM events", {"input": {"bigquery": {"project": "p"}}})
-    view = EXECUTORS.get("bigquery").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT count(*) FROM "{view}"').fetchone() == (2,)
 
 
@@ -335,7 +334,7 @@ def test_bigquery_emulator_endpoint_disables_retries(tmp_path, monkeypatch) -> N
             return FakeJob()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
-    monkeypatch.setattr(BigQueryExecutor, "_job_config", lambda self, state: None)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: None)
     project = compile_text(
         "/*@ input: { bigquery: { project: p, endpoint: http://localhost:9050 } } */\n"
         "-- @cell parent\nSELECT 1 AS x;\n"
@@ -445,7 +444,7 @@ def fake_pg(monkeypatch):
 
 def test_postgres_executor_registers_result(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT n FROM nums;", {"input": {"postgres": {"dsn": "postgresql://x"}}})
-    view = EXECUTORS.get("postgres").execute(cell, ctx)
+    view = execute_cell(cell, ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,), (2,), (3,)]
     # trailing semicolon stripped; no session -> the ephemeral connection is closed
     assert fake_pg[0].sqls == ["SELECT n FROM nums"]
@@ -458,7 +457,7 @@ def test_postgres_setup_then_terminal_runs_in_order(ctx, fake_pg) -> None:
         "CREATE TEMP TABLE staging AS SELECT n FROM src;\nSELECT n FROM staging",
         {"input": {"postgres": {"dsn": "postgresql://x"}}},
     )
-    EXECUTORS.get("postgres").execute(cell, ctx)
+    execute_cell(cell, ctx)
     # setup statement runs for effect, then the terminal statement is the result
     assert fake_pg[0].sqls == [
         "CREATE TEMP TABLE staging AS SELECT n FROM src",
@@ -481,13 +480,13 @@ def test_bigquery_string_shorthand_names_the_project() -> None:
 def test_postgres_executor_missing_dsn_raises(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT 1", {"engine": "postgres"})
     with pytest.raises(ExecutorError, match="^postgres engine needs input.postgres.dsn$"):
-        EXECUTORS.get("postgres").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_postgres_executor_wraps_driver_errors(ctx, fake_pg) -> None:
     cell = _cell("pg", "SELECT boom", {"input": {"postgres": {"dsn": "postgresql://x"}}})
     with pytest.raises(ExecutorError, match="^postgres: relation missing$"):
-        EXECUTORS.get("postgres").execute(cell, ctx)
+        execute_cell(cell, ctx)
 
 
 def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> None:
