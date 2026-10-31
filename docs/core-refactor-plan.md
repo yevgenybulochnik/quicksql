@@ -40,10 +40,10 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   error naming its plugin, not a crash (`cb3ba12`, `f8de668`); append-mode sinks report
   the rows they inserted (`056ea6c`, `63fcacd`); reruns propagate only through cells that
   rerun (`9a25755`, `ef5edfe`); the TUI preview falls back to the cell's own sink
-  (`0b8b7ef`, `791e4b5`). Phase 1's planned fixes are complete.
-- Next — Phase 3. One quick fix found on the way is open: a Postgres append-mode sink
-  fails on its first run (see the findings table). The agent-facing CLI beyond
-  `run --json` is planned in `docs/agent-cli-plan.md`.
+  (`0b8b7ef`, `791e4b5`); and, found on the way, a Postgres append-mode sink creates its
+  table on the first run (`abdaa08`, `2a27359`). Phase 1 is complete.
+- Next — Phase 3. The agent-facing CLI beyond `run --json` is planned in
+  `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -62,7 +62,7 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Finding (2026-10-15 unless dated) | Evidence | Phase |
 |---|---|---|
 | Append-mode sinks report the table's total rows | `count(*)` after `INSERT` | 1 (fixed) |
-| A Postgres append-mode sink fails on its first run: it never creates the table, unlike the DuckDB sink (2026-10-31) | reproduced: `Table with name … does not exist` | 1 |
+| A Postgres append-mode sink fails on its first run: it never creates the table, unlike the DuckDB sink (2026-10-31) | reproduced: `Table with name … does not exist` | 1 (fixed) |
 | TUI preview fallback assumes `data/<cell>.parquet` | ignores `output.dir` and other sinks | 1 (fixed) |
 | A changed `autorun: false` cell still reruns its unchanged downstream | reproduced via `plan_rerun` | 1 (fixed) |
 | Templates render unsandboxed; the LSP renders on file open | `''.__class__.__mro__` reachable; a template ran a shell command at compile time | 1 (fixed) |
@@ -131,7 +131,7 @@ Sizes are relative: S, M, L.
 - Baseline: `demo/kitchen-sink/kitchen-sink.qsql` compiled in ~23 ms (2026-10-30), 79% of
   it in `build_models`, called 8 times per compile.
 
-**Phase 1 — quick fixes (S; independent red/green pairs; the planned fixes are done).**
+**Phase 1 — quick fixes (S; independent red/green pairs; done).**
 - Done: append-mode DuckDB and Postgres sinks report the `INSERT`'s own row count. Every
   write takes its count from its own statement's result, so the `count(*)` after it, a
   round trip for Postgres, is gone.
@@ -143,7 +143,7 @@ Sizes are relative: S, M, L.
 - Done: `plan_rerun` propagates only through cells that will rerun, which also stops it at
   an `autorun: false` cell mid-graph (`graph.downstream(..., through=)`). Phase 8's landed
   fingerprints keep this rule.
-- Open, found on the way: a Postgres append-mode sink creates its table if missing, as the
+- Done, found on the way: a Postgres append-mode sink creates its table if missing, as the
   DuckDB sink does.
 - Done: templates render in a `SandboxedEnvironment` subclass (`render._SqlSandbox`) where
   a pydantic model instance exposes only its fields. A plugin that contributes a model
