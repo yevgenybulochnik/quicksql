@@ -35,7 +35,8 @@ first `@cell`) inherited by every cell.
   via its sink from that temp — one execution, two consumers. Sessions live in the
   `RunSession` by context key; a session whose `alive()` is False is dropped at run
   start (its temps re-materialize), a failed cell's temp is dropped, and `SessionLost`
-  (an expired BigQuery session) reopens, re-materializes, and retries the cell once.
+  (an expired BigQuery session) reopens, re-materializes, and retries the cell once;
+  before each cell the runner re-creates any same-context temp it reads that's gone.
   Read an engine's input with `config.input_spec(config, engine)`, never by hand.
 - **DuckDB is the cross-context conduit.** Cells using *cross-context*
   `ref()`/`source()`/`@extensions` must run on duckdb (compile-time guardrail); other

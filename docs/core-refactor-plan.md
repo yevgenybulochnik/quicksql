@@ -214,7 +214,10 @@ from the plan below:
   carries it. The `LINE 1:` quote cuts quicksql's wrapper (DuckDB and Postgres), not
   planned here but listed in the findings for this phase.
 - Done: liveness as planned. BigQuery's expiry is recognized by its message ("Session
-  ... has expired and is no longer available") and raised as `SessionLost`.
+  ... has expired and is no longer available") and raised as `SessionLost`. A lost
+  session takes every temp in its context, so before each cell the runner re-creates
+  any same-context temp the cell reads that the run session no longer holds
+  (`_restore_temps`; a no-op in a normal run).
 - Debt: `duckdb_exec` imports the `conduit` module, not `ConduitSession`, to dodge the
   eager `executors/__init__` cycle; Phase 4's lazy `__init__`s remove the need.
 - Tests: the existing executor tests keep their assertions; they call
