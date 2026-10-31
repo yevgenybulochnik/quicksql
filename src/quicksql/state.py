@@ -64,8 +64,17 @@ class CellStatus:
     landed: str | None  # what its landed output was built from
 
 
+def _canonical(value: Any) -> Any:
+    """JSON for what json can't encode. A set iterates in an order Python
+    seeds per process, so it's sorted: status compares fingerprints across
+    processes."""
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=repr)
+    return str(value)
+
+
 def _digest(payload: Any) -> str:
-    text = json.dumps(payload, sort_keys=True, default=str)
+    text = json.dumps(payload, sort_keys=True, default=_canonical)
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
