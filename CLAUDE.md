@@ -79,6 +79,9 @@ first `@cell`) inherited by every cell.
   — an explicit `-m` overrides the default deselection. The standalone demo stack
   `demo/kitchen-sink/docker-compose.yml` runs on offset ports (5433/9051) and can
   stay up alongside this one.
+- `uv run lint-imports` — the layering gate, which `tests/test_layering.py` runs in every
+  `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; their
+  `ignore_imports` are the debt register that `docs/core-refactor-plan.md` tracks.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
   `compile` — default file `base.qsql`; `--set key.path=value` repeatable. `quicksql tui`
   with a missing file opens a notebook picker: existing .qsql/.qsql.sql files plus
