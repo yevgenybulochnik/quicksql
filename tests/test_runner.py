@@ -833,3 +833,47 @@ def test_without_a_run_session_a_cell_gets_a_private_session(tmp_path, recording
     finally:
         conn.close()
     assert recording_engine == [("open",), ("fetch", "SELECT 1 AS x", False), ("close",)]
+
+
+# ---------- a failure names its statement and quotes the cell's own SQL ----------
+
+
+def test_a_failure_names_its_statement_when_the_cell_has_several(tmp_path) -> None:
+    project = compile_text(
+        "-- @cell a\nCREATE TEMP TABLE s AS SELECT 1 AS n;\nINSERT INTO s SELECT nope;\n"
+        "SELECT * FROM s;",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.statement == 2
+    assert result.error.startswith(
+        'statement 2 of 3: Binder Error: Referenced column "nope" not found'
+    )
+
+
+def test_a_single_statement_failure_is_statement_1_with_no_prefix(tmp_path) -> None:
+    [result] = compile_text("-- @cell a\nSELECT nope;", root=tmp_path).run()
+    assert result.statement == 1
+    assert result.error.startswith('Binder Error: Referenced column "nope" not found')
+
+
+def test_a_failure_outside_the_cells_statements_has_no_statement(tmp_path) -> None:
+    [result] = compile_text("-- @cell a\n-- @engine: postgres\nSELECT 1;", root=tmp_path).run()
+    assert result.error == "postgres engine needs input.postgres.dsn"
+    assert result.statement is None
+
+
+@pytest.mark.parametrize(
+    "notebook",
+    [
+        "-- @cell a\nSELECT nope FROM range(1);",  # extracted: wrapped in a temp view
+        "-- @cell a\nSELECT nope FROM range(1);\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
+    ],
+    ids=["extracted", "materialized"],
+)
+def test_duckdb_error_context_quotes_the_cells_sql_not_its_wrapper(tmp_path, notebook) -> None:
+    result = compile_text(notebook, root=tmp_path).run()[0]
+    assert "CREATE" not in result.error
+    assert result.error.endswith(
+        "\nLINE 1: SELECT nope FROM range(1)\n" + " " * len("LINE 1: SELECT ") + "^"
+    )

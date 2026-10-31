@@ -262,3 +262,16 @@ def test_materializing_a_cell_never_drops_a_real_table_of_its_name(seeded, tmp_p
     finally:
         with psycopg.connect(seeded, autocommit=True) as con:
             con.execute("DROP TABLE IF EXISTS public.parent")
+
+
+def test_a_materialized_cells_error_quotes_its_own_sql(seeded, tmp_path) -> None:
+    project = compile_text(
+        _cell_config(seeded)
+        + "-- @cell a\nSELECT nope FROM nums;\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
+        root=tmp_path,
+    )
+    result = {r.cell: r for r in project.run()}["a"]
+    assert "CREATE" not in result.error
+    assert result.error.endswith(
+        "\nLINE 1: SELECT nope FROM nums\n" + " " * len("LINE 1: SELECT ") + "^"
+    )
