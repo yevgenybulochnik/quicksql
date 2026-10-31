@@ -238,3 +238,27 @@ def test_postgres_sink_append_mode_creates_its_table_on_the_first_run(seeded, tm
         assert result.rows == 2
     with psycopg.connect(seeded) as con:
         assert con.execute("SELECT count(*) FROM public.events_log").fetchone() == (4,)
+
+
+def test_materializing_a_cell_never_drops_a_real_table_of_its_name(seeded, tmp_path) -> None:
+    """A reffed cell's temp shares its name with whatever the search_path holds:
+    replacing the temp with an unqualified DROP dropped a real table of that name."""
+    import psycopg
+
+    with psycopg.connect(seeded, autocommit=True) as con:
+        con.execute("DROP TABLE IF EXISTS public.parent")
+        con.execute("CREATE TABLE public.parent AS SELECT 42 AS keep")
+    try:
+        project = compile_text(
+            _cell_config(seeded)
+            + "-- @cell parent\nSELECT n FROM nums;\n"
+            + "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};",
+            root=tmp_path,
+        )
+        results = {r.cell: r for r in project.run()}
+        assert all(r.ok for r in results.values()), [r.error for r in results.values()]
+        with psycopg.connect(seeded) as con:
+            assert con.execute("SELECT keep FROM public.parent").fetchall() == [(42,)]
+    finally:
+        with psycopg.connect(seeded, autocommit=True) as con:
+            con.execute("DROP TABLE IF EXISTS public.parent")
