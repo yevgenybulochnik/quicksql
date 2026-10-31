@@ -167,6 +167,12 @@ class Executor(ABC):
         session (or right after the cell, when there is no run session)."""
 
 
+class SessionLost(ExecutorError):
+    """The engine rejected a statement because the session it ran in is gone
+    (a BigQuery session expires). Nothing ran, so the runner reopens the
+    session, re-creates the temps the cell reads, and retries it once."""
+
+
 class EngineSession(ABC):
     """A live connection to one execution context, opened for the context's
     first cell and shared by the rest: their temp tables live here.

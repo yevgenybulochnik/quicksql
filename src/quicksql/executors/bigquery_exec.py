@@ -11,7 +11,16 @@ from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RunContext
 from ..registry import executor
-from .base import EngineSession, Executor, strip_trailing_semicolon
+from .base import EngineSession, Executor, SessionLost, strip_trailing_semicolon
+
+
+def _expired(exc: Exception) -> bool:
+    """BigQuery's words for a session past its limits (24 hours idle, 7 days
+    old): "Session <id> has expired and is no longer available"."""
+    message = str(exc)
+    return "Session" in message and (
+        "has expired" in message or "is no longer available" in message
+    )
 
 
 class BigQuerySession(EngineSession):
@@ -56,10 +65,15 @@ class BigQuerySession(EngineSession):
         )
 
     def _query(self, sql: str) -> Any:
-        job = self.client.query(sql, job_config=self._job_config(), **self.query_opts)
-        # query() only *submits*; sessions allow one active job at a time, so
-        # wait for completion before the next statement goes in
-        job.result()
+        try:
+            job = self.client.query(sql, job_config=self._job_config(), **self.query_opts)
+            # query() only *submits*; sessions allow one active job at a time, so
+            # wait for completion before the next statement goes in
+            job.result()
+        except Exception as exc:
+            if self.session_id is not None and _expired(exc):
+                raise SessionLost(str(exc)) from exc
+            raise
         if self.session_id is None:
             info = getattr(job, "session_info", None)
             self.session_id = getattr(info, "session_id", None)
