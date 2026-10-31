@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import shutil
 import time
-from contextlib import suppress
 import traceback
 from collections import Counter
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
@@ -22,8 +22,8 @@ import polars as pl
 
 from .conduit import ConduitSession, conduit_target
 from .errors import ExecutorError, QsqlError, describe
-from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .executors.base import EngineSession, SessionLost, result_view
+from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import EXECUTORS, PLUGINS, SINKS
 from .sinks import make_sink
 
@@ -240,17 +240,27 @@ def _context_upstreams(project: Project, cell: RenderedCell) -> list[str]:
     return [n for n in project.order if n in needed]
 
 
+def _restore_temps(project: Project, cell: RenderedCell, ctx: RunContext) -> None:
+    """Re-create the same-context temps ``cell`` reads that the run session no
+    longer holds: a lost session took every temp in it, also those of cells
+    that ran before the loss. A no-op otherwise, since upstreams run first."""
+    if ctx.session is None:
+        return
+    missing = [n for n in _context_upstreams(project, cell) if n not in ctx.session.materialized]
+    if missing:
+        ctx.emit("cell_step", cell.name, f"re-materializing {', '.join(map(repr, missing))}")
+    for name in missing:
+        execute_cell(project.cells[name], ctx, land=False)
+
+
 def _retry_in_a_new_session(project: Project, cell: RenderedCell, ctx: RunContext) -> str:
     """The engine rejected a statement because the context's session is gone.
     Nothing ran, so reopen the session, re-create the temps the cell reads,
     and run it once more; losing the new session too fails the cell."""
     key = _context_key(cell)
     _forget_context(project, ctx.session, key)
-    upstreams = _context_upstreams(project, cell)
-    again = f"; re-materializing {', '.join(map(repr, upstreams))}" if upstreams else ""
-    ctx.emit("cell_step", cell.name, f"{key} session lost: reopening{again}")
-    for name in upstreams:
-        execute_cell(project.cells[name], ctx, land=False)
+    ctx.emit("cell_step", cell.name, f"{key} session lost: reopening")
+    _restore_temps(project, cell, ctx)
     return execute_cell(cell, ctx)
 
 
@@ -295,6 +305,7 @@ def base_runner(project: Project) -> Inner:
             sink.prepare(ctx.conn)
             ctx.emit("cell_step", cell.name, f"executing on {cell.engine}")
             try:
+                _restore_temps(project, cell, ctx)
                 view = execute_cell(cell, ctx)
             except SessionLost:
                 if ctx.session is None:
