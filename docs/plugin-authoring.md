@@ -139,7 +139,9 @@ the runtime order is registry state, and this makes it readable.
   pyarrow Table, landed on the conduit for you), or every statement to `execute` when
   the cell's sink lands nothing. With `supports_context_refs = True`, same-context
   cells reference each other as session temps: `materialize(name, sql)` creates one
-  and returns the query that reads it back, and `drop(name)` removes it. `alive()` is a
+  and returns the query that reads it back, and `drop(name)` removes it. A session whose
+  `extract` is lazy (the conduit's view) implements `check(sql)`: when landing fails, the
+  runner runs the query alone to tell its error from the sink's. `alive()` is a
   cheap local liveness check, `close()` releases the connection, and `scoped=False`
   marks a statement that touches no temps (BigQuery runs those outside its session). A
   DB-API driver gets all of this from `DbApiSession` (see the sqlite/postgres

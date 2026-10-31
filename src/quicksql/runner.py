@@ -264,6 +264,25 @@ def _retry_in_a_new_session(project: Project, cell: RenderedCell, ctx: RunContex
     return execute_cell(cell, ctx)
 
 
+def _blame_the_query(cell: RenderedCell, ctx: RunContext) -> None:
+    """Landing failed. A lazily extracted result (the conduit's view) runs the
+    cell's terminal query inside the sink's statement, so a runtime error in it
+    (a bad cast) reads as the sink's and quotes the sink's SQL. Run the query
+    alone: an error of its own is the cell's, numbered and quoting its SQL;
+    none, and the sink's error stands."""
+    if cell.reffed_in_context or not SINKS.get(cell.sink_type).lands_output:
+        return  # landed from a temp that already ran it, or nothing to land
+    session, private = _context_session(cell, ctx)
+    statements = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    try:
+        session.check(statements[-1])
+    except Exception as exc:
+        raise StatementError(len(statements), len(statements), exc) from exc
+    finally:
+        if private:
+            session.close()
+
+
 def _drop_stale_temp(cell: RenderedCell, session: RunSession) -> None:
     """A cell that didn't come out ok may have a temp left from an earlier
     run; drop it so nothing reads it stale."""
@@ -312,7 +331,11 @@ def base_runner(project: Project) -> Inner:
                     raise
                 view = _retry_in_a_new_session(project, cell, ctx)
             ctx.emit("cell_step", cell.name, f"landing via {cell.sink_type}")
-            rows, target = sink.write(cell, view, ctx.conn)
+            try:
+                rows, target = sink.write(cell, view, ctx.conn)
+            except duckdb.Error:
+                _blame_the_query(cell, ctx)
+                raise
             # effect-only sinks (none) land nothing, so there's nothing to read back
             preview = _preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else pl.DataFrame()
             ctx.emit("cell_step", cell.name, f"preview cached ({preview.height} rows)")
