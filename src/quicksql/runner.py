@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import duckdb
 import polars as pl
 
-from .config import input_spec
+from .conduit import conduit_target
 from .errors import QsqlError, describe
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import EXECUTORS, PLUGINS
@@ -74,8 +74,7 @@ class RunSession:
         self._target: str | None = None
 
     def conduit(self, project: Project) -> Any:
-        path = input_spec(project.config, "duckdb").get("path")
-        target = str(project.root / path) if path else ":memory:"
+        target = conduit_target(project.config, project.root)
         if self.conn is None or target != self._target:
             if self.conn is not None:
                 self.conn.close()

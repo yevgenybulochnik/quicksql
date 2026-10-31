@@ -8,6 +8,8 @@ from typing import Any
 
 from .bootstrap import load_builtins
 from .config import resolve_cell, resolve_engine, resolve_global, resolve_sink_type
+from .conduit import conduit_target
+from .config import input_spec
 from .errors import CellError, ConfigError, ConfigErrorGroup
 from .executors.base import split_statements
 from .graph import topo_sort
@@ -149,7 +151,18 @@ def compile_text(
 
     # stage 3: cross-cell semantic checks that need every cell's sink/engine known
     semantic: list[CellError] = []
+    conduit = conduit_target(global_cfg, root)
     for cell in cells.values():
+        # duckdb cells all run on the conduit; a database of the cell's own would
+        # be ignored, so name it in the header instead
+        if cell.engine == "duckdb" and conduit_target(cell.config, root) != conduit:
+            own = input_spec(cell.config, "duckdb").get("path") or ":memory:"
+            header = input_spec(global_cfg, "duckdb").get("path") or ":memory:"
+            semantic.append(
+                CellError(cell.name, cell.line, f"input.duckdb {own!r} isn't the conduit's "
+                          f"({header!r}): every duckdb cell runs on the database the "
+                          "header's input.duckdb names")
+            )
         # an effect-only cell (its sink lands nothing, e.g. 'none') can't be read
         # back; only ref()/source() edges read data — a plain @depends_on ordering
         # edge is fine.
