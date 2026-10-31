@@ -894,3 +894,18 @@ def test_a_failed_cells_stale_temp_is_dropped(tmp_path) -> None:
         assert session.conn.sql(temps).fetchone() == (0,)
     finally:
         session.close()
+
+
+def test_a_conduit_that_moves_away_and_back_runs_on_the_live_connection(tmp_path) -> None:
+    """The run session reconnects when the header's input.duckdb changes; a
+    duckdb session cached for the first database mustn't keep its closed one."""
+    session = RunSession()
+    try:
+        for db in ("a.db", "b.db", "a.db"):
+            project = compile_text(
+                f"-- @input: {{ duckdb: {db} }}\n-- @cell x\nSELECT 1 AS n;", root=tmp_path
+            )
+            [result] = run_project(project, session=session)
+            assert result.ok, (db, result.error)
+    finally:
+        session.close()
