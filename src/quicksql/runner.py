@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import duckdb
 import polars as pl
 
-from .conduit import conduit_target
+from .conduit import ConduitSession, conduit_target
 from .errors import ExecutorError, QsqlError, describe
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .executors.base import EngineSession, SessionLost, result_view
@@ -84,6 +84,10 @@ class RunSession:
             self._target = target
             self.loaded_extensions = set()
             self.materialized = set()  # conduit temps died with the connection
+            self.engine_sessions = {  # and the sessions on it
+                key: live for key, live in self.engine_sessions.items()
+                if not isinstance(live, ConduitSession)
+            }
         return self.conn
 
     def close(self) -> None:
