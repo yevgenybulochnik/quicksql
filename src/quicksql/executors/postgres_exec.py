@@ -66,7 +66,9 @@ class PostgresExecutor(Executor):
             for stmt in setup:  # build-up statements run for effect on the connection
                 con.execute(stmt)
             if cell.reffed_in_context:
-                con.execute(f'DROP TABLE IF EXISTS "{cell.name}"')
+                # pg_temp: unqualified, the name resolves through the search_path to
+                # a real table whenever this session has no temp of that name yet
+                con.execute(f'DROP TABLE IF EXISTS pg_temp."{cell.name}"')
                 con.execute(f'CREATE TEMP TABLE "{cell.name}" AS {final}')
                 cur = con.execute(f'SELECT * FROM "{cell.name}"')
             else:
