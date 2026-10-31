@@ -540,14 +540,19 @@ def test_a_dead_postgres_session_is_reopened_and_its_temps_rematerialized(tmp_pa
 
 def _expiring_bigquery(monkeypatch, expired: set):
     """A fake client whose sessions are numbered sess-1, sess-2, ...: a job in a
-    session listed in ``expired`` fails the way BigQuery reports an expired one.
+    session listed in ``expired`` fails the way BigQuery reports an expired one,
+    and a query reading a temp its session never created fails as not found.
     Returns (jobs as (sql, session), clients made)."""
+    import re
+
     jobs: list[tuple[str, object]] = []
     clients: list[object] = []
     sessions = iter(f"sess-{n}" for n in range(1, 100))
+    temps: dict[str, set] = {}  # session -> its temp tables
 
     class FakeJob:
         def __init__(self, sql, session):
+            self.sql = sql
             self.session = session
             self.session_info = SimpleNamespace(session_id=next(sessions)) if session is None else None
 
@@ -556,6 +561,14 @@ def _expiring_bigquery(monkeypatch, expired: set):
                 raise RuntimeError(
                     f"400 Session {self.session} has expired and is no longer available."
                 )
+            session = self.session or self.session_info.session_id
+            created = re.match(r"CREATE OR REPLACE TEMP TABLE (\w+)", self.sql)
+            if created:
+                temps.setdefault(session, set()).add(created[1])
+            else:
+                for table in re.findall(r"FROM (\w+)", self.sql):
+                    if table.startswith("parent") and table not in temps.get(session, ()):
+                        raise RuntimeError(f"404 Not found: Table {table}")
             return self
 
         def to_arrow(self):
@@ -636,3 +649,28 @@ def test_a_bigquery_retry_that_finds_its_session_gone_again_fails(tmp_path, monk
         session.close()
     assert result.status == "failed"
     assert "has expired and is no longer available" in result.error
+
+
+def test_after_a_lost_session_every_later_cell_gets_the_temps_it_reads(tmp_path, monkeypatch) -> None:
+    """Losing the session loses every temp in it, not just the ones the retried
+    cell reads: a later cell re-creates its own before it runs."""
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired: set = set()
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(
+        "/*@ input: { bigquery: { project: p } } */\n"
+        "-- @cell parent1\nSELECT 1 AS n;\n-- @cell parent2\nSELECT 2 AS n;\n"
+        "-- @cell child1\nSELECT * FROM {{ ref('parent1') }};\n"
+        "-- @cell child2\nSELECT * FROM {{ ref('parent2') }};",
+        root=tmp_path,
+    )
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        expired.add("sess-1")
+        results = run_project(project, select=["child1", "child2"], closure=False, session=session)
+    finally:
+        session.close()
+    assert all(r.ok for r in results), [r.error for r in results]
