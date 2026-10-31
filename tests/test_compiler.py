@@ -76,6 +76,16 @@ def test_ref_to_none_sink_cell_rejected(tmp_path) -> None:
         )
 
 
+def test_ref_to_any_sink_that_lands_nothing_rejected(tmp_path, discard_sink) -> None:
+    # lands_output, not the sink's name, says whether there is anything to read back
+    with pytest.raises(ConfigError, match="cannot ref\\('effect'\\): it uses sink 'discard' and lands nothing"):
+        compile_text(
+            "-- @cell effect\n-- @output: { type: discard }\nCREATE TABLE t AS SELECT 1 AS n;\n"
+            "-- @cell reader\nSELECT * FROM {{ ref('effect') }};",
+            root=tmp_path,
+        )
+
+
 def test_depends_on_to_none_sink_cell_allowed(tmp_path) -> None:
     # ordering-only dependency reads no data, so it's fine to depend on an effect-only cell
     project = compile_text(

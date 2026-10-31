@@ -25,6 +25,22 @@ def test_run_lands_parquet_and_previews(tmp_path) -> None:
     assert results[1].elapsed > 0
 
 
+def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_sink) -> None:
+    # effect-only is the sink's lands_output, not its name: the terminal INSERT
+    # runs for effect instead of being wrapped as the result to land
+    project = compile_text(
+        "-- @cell load\n-- @output: { type: discard }\n"
+        "CREATE TABLE staged (n INT);\nINSERT INTO staged VALUES (1), (2), (3);\n"
+        "-- @cell counted\n-- @depends_on: [load]\n"
+        "SELECT count(*) AS c FROM staged;\n",
+        root=tmp_path,
+    )
+    results = {r.cell: r for r in project.run()}
+    assert results["load"].ok, results["load"].error
+    assert (results["load"].rows, results["load"].target) == (0, "discarded")
+    assert results["counted"].preview["c"].to_list() == [3]
+
+
 def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> None:
     project = compile_text(
         "-- @cell load\n-- @output: { type: none }\n"

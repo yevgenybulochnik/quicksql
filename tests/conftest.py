@@ -61,3 +61,22 @@ def project_dir(tmp_path):
         "user_id,name,active\n1,ada,true\n2,bob,false\n3,cyd,true\n"
     )
     return tmp_path
+
+
+@pytest.fixture
+def discard_sink():
+    """A third-party effect-only sink: lands_output = False, but not named 'none'."""
+    from quicksql.registry import sink
+    from quicksql.sinks.base import Sink
+
+    @sink("discard")
+    class Discard(Sink):
+        lands_output = False
+
+        def write(self, cell, view, conn):
+            return 0, "discarded"
+
+        def ref_expr(self, cell_name):
+            return "nowhere"
+
+    return Discard
