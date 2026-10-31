@@ -875,3 +875,22 @@ def test_duckdb_error_context_quotes_the_cells_sql_not_its_wrapper(tmp_path, not
     assert result.error.endswith(
         "\nLINE 1: SELECT nope FROM range(1)\n" + " " * len("LINE 1: SELECT ") + "^"
     )
+
+
+# ---------- sessions that die, and temps that go stale ----------
+
+
+def test_a_failed_cells_stale_temp_is_dropped(tmp_path) -> None:
+    """A rerun that fails leaves no earlier temp behind for anything to read stale."""
+    session = RunSession()
+    try:
+        body = "-- @cell b\nSELECT * FROM {{ ref('a') }};"
+        good = compile_text("-- @cell a\nSELECT 1 AS x;\n" + body, root=tmp_path)
+        assert all(r.ok for r in run_project(good, session=session))
+        broken = compile_text("-- @cell a\nSELECT nope;\n" + body, root=tmp_path)
+        [result] = run_project(broken, select=["a"], closure=False, session=session)
+        assert not result.ok
+        temps = "SELECT count(*) FROM duckdb_tables() WHERE temporary AND table_name = 'a'"
+        assert session.conn.sql(temps).fetchone() == (0,)
+    finally:
+        session.close()

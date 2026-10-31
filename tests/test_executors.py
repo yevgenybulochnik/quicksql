@@ -513,3 +513,126 @@ def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> No
     # landing-by-default: both cells still inspectable as parquet
     assert (tmp_path / "data" / "parent.parquet").exists()
     assert (tmp_path / "data" / "child.parquet").exists()
+
+
+def test_a_dead_postgres_session_is_reopened_and_its_temps_rematerialized(tmp_path, fake_pg) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    project = compile_text(
+        "/*@ input: { postgres: { dsn: 'postgresql://x' } } */\n"
+        "-- @cell parent\nSELECT n FROM src;\n"
+        "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};",
+        root=tmp_path,
+    )
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        fake_pg[0].broken = True  # psycopg's mark once an operation finds the connection dead
+        results = run_project(project, select=["child"], closure=False, session=session)
+        assert [r.cell for r in results] == ["parent", "child"]  # parent's temp died too
+        assert all(r.ok for r in results), [r.error for r in results]
+    finally:
+        session.close()
+    assert len(fake_pg) == 2 and fake_pg[0].closed
+    assert 'CREATE TEMP TABLE "parent" AS SELECT n FROM src' in fake_pg[1].sqls
+
+
+def _expiring_bigquery(monkeypatch, expired: set):
+    """A fake client whose sessions are numbered sess-1, sess-2, ...: a job in a
+    session listed in ``expired`` fails the way BigQuery reports an expired one.
+    Returns (jobs as (sql, session), clients made)."""
+    jobs: list[tuple[str, object]] = []
+    clients: list[object] = []
+    sessions = iter(f"sess-{n}" for n in range(1, 100))
+
+    class FakeJob:
+        def __init__(self, sql, session):
+            self.session = session
+            self.session_info = SimpleNamespace(session_id=next(sessions)) if session is None else None
+
+        def result(self):
+            if self.session in expired:
+                raise RuntimeError(
+                    f"400 Session {self.session} has expired and is no longer available."
+                )
+            return self
+
+        def to_arrow(self):
+            return pl.DataFrame({"n": [1]})
+
+    class FakeClient:
+        def query(self, sql, job_config=None, **kwargs):
+            jobs.append((sql, job_config))
+            return FakeJob(sql, job_config)
+
+    def make(self, spec):
+        clients.append(FakeClient())
+        return clients[-1]
+
+    monkeypatch.setattr(BigQueryExecutor, "make_client", make)
+    monkeypatch.setattr(BigQuerySession, "_job_config", lambda self: self.session_id)
+    return jobs, clients
+
+
+BQ_PARENT_CHILD = (
+    "/*@ input: { bigquery: { project: p } } */\n"
+    "-- @cell parent\nSELECT * FROM src;\n"
+    "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};"
+)
+
+
+def test_bigquery_reuses_one_client_per_context(tmp_path, monkeypatch) -> None:
+    from quicksql.compiler import compile_text
+
+    jobs, clients = _expiring_bigquery(monkeypatch, expired=set())
+    project = compile_text(
+        "/*@ input: { bigquery: { project: p } } */\n"
+        "-- @cell a\nSELECT 1 AS n;\n-- @cell b\nSELECT 2 AS n;\n-- @cell c\nSELECT 3 AS n;",
+        root=tmp_path,
+    )
+    assert all(r.ok for r in project.run())
+    assert len(clients) == 1 and len(jobs) == 3
+
+
+def test_an_expired_bigquery_session_is_reopened_rematerialized_and_retried(
+    tmp_path, monkeypatch
+) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired: set = set()
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(BQ_PARENT_CHILD, root=tmp_path)
+    session = RunSession()
+    try:
+        assert all(r.ok for r in run_project(project, session=session))
+        expired.add("sess-1")  # the session expires between runs
+        jobs.clear()
+        [result] = run_project(project, select=["child"], closure=False, session=session)
+        assert result.ok, result.error
+    finally:
+        session.close()
+    assert [(sql.split(" AS ")[0], s) for sql, s in jobs] == [
+        ("SELECT count(*)", "sess-1"),  # rejected: the session expired
+        ("CREATE OR REPLACE TEMP TABLE parent", None),  # a new session, parent's temp again
+        ("SELECT count(*)", "sess-2"),  # the retry
+    ]
+
+
+def test_a_bigquery_retry_that_finds_its_session_gone_again_fails(tmp_path, monkeypatch) -> None:
+    from quicksql.compiler import compile_text
+    from quicksql.runner import RunSession, run_project
+
+    expired = {f"sess-{n}" for n in range(2, 100)}  # every session after the first
+    jobs, _ = _expiring_bigquery(monkeypatch, expired)
+    project = compile_text(BQ_PARENT_CHILD, root=tmp_path)
+    session = RunSession()
+    try:
+        run_project(project, select=["parent"], session=session)  # sess-1, still fine
+        expired.add("sess-1")
+        [result] = run_project(project, select=["child"], closure=False, session=session)
+    finally:
+        session.close()
+    assert result.status == "failed"
+    assert "has expired and is no longer available" in result.error
