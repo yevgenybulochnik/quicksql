@@ -715,3 +715,121 @@ def test_run_event_line_renders_a_skipped_result() -> None:
     assert RunEvent("cell_finished", "b", result=skipped).line() == (
         "b: skipped — upstream 'a' failed"
     )
+
+
+# ---------- the cell protocol: the runner drives every engine's session ----------
+
+
+def _recording_session(calls: list):
+    from quicksql.executors.base import EngineSession
+
+    class Recording(EngineSession):
+        """Records what the runner asks; a materialized temp reads back as 'READ <name>'."""
+
+        def execute(self, sql, *, scoped=True):
+            calls.append(("execute", sql, scoped))
+
+        def materialize(self, name, sql):
+            calls.append(("materialize", name, sql))
+            return f"READ {name}"
+
+        def fetch(self, sql, *, scoped=True):
+            calls.append(("fetch", sql, scoped))
+            return pl.DataFrame({"x": [1]})
+
+        def close(self):
+            calls.append(("close",))
+
+    return Recording()
+
+
+@pytest.fixture
+def recording_engine():
+    """Engine `rec`, whose sessions record the runner's calls; yields the calls."""
+    from quicksql.executors.base import Executor, split_statements
+    from quicksql.registry import executor
+
+    calls: list = []
+
+    @executor("rec")
+    class Rec(Executor):
+        supports_context_refs = True
+
+        def split_statements(self, sql):
+            return split_statements(sql, "duckdb")
+
+        def open_session(self, config, ctx):
+            calls.append(("open",))
+            return _recording_session(calls)
+
+    return calls
+
+
+def test_a_plain_cell_runs_its_setup_then_extracts_its_terminal_statement(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\nCREATE TEMP TABLE s AS SELECT 1;\nSELECT * FROM s;",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.ok, result.error
+    assert recording_engine == [
+        ("open",),
+        ("execute", "CREATE TEMP TABLE s AS SELECT 1", False),
+        ("fetch", "SELECT * FROM s", False),
+        ("close",),  # with the run's private run session
+    ]
+    assert pl.read_parquet(tmp_path / "data" / "a.parquet")["x"].to_list() == [1]
+
+
+def test_an_effect_only_cell_runs_every_statement_and_extracts_nothing(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\n-- @output: { type: none }\n"
+        "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1);",
+        root=tmp_path,
+    )
+    [result] = project.run()
+    assert result.ok, result.error
+    assert recording_engine == [
+        ("open",),
+        ("execute", "CREATE TABLE t (n INT)", False),
+        ("execute", "INSERT INTO t VALUES (1)", False),
+        ("close",),
+    ]
+
+
+def test_a_cell_reffed_in_context_materializes_once_and_lands_from_its_temp(
+    tmp_path, recording_engine
+) -> None:
+    project = compile_text(
+        "-- @engine: rec\n-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
+        root=tmp_path,
+    )
+    results = project.run()
+    assert all(r.ok for r in results), [r.error for r in results]
+    assert recording_engine == [
+        ("open",),  # one session for the context
+        ("materialize", "a", "SELECT 1 AS x"),
+        ("fetch", "READ a", True),  # a lands from its temp instead of running again
+        ("fetch", "SELECT * FROM a", True),  # b reads the temp in-engine
+        ("close",),
+    ]
+
+
+def test_without_a_run_session_a_cell_gets_a_private_session(tmp_path, recording_engine) -> None:
+    import duckdb
+
+    from quicksql.models import RunContext
+    from quicksql.runner import execute_cell
+
+    cell = compile_text("-- @engine: rec\n-- @cell a\nSELECT 1 AS x;", root=tmp_path).cells["a"]
+    conn = duckdb.connect()
+    try:
+        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path))
+        assert conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,)]
+    finally:
+        conn.close()
+    assert recording_engine == [("open",), ("fetch", "SELECT 1 AS x", False), ("close",)]
