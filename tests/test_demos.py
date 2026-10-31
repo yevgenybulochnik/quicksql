@@ -21,6 +21,9 @@ from quicksql.runner import run_project
 
 DEMO = Path(__file__).parent.parent / "demo"
 NOTEBOOKS = sorted(DEMO.glob("**/*.qsql"))
+# what sources.qsql lands (warehouse.db* takes a crashed run's .wal too);
+# .gitignore lists them, so a hand run of the demo leaves them unseen
+SOURCES_OUTPUTS = ("data", "warehouse.db*")
 
 
 @pytest.fixture
@@ -68,7 +71,11 @@ def test_demo_compiles_offline(notebook: Path, connections: list[str]) -> None:
 
 def test_sources_demo_runs_offline(tmp_path: Path, monkeypatch) -> None:
     copy = tmp_path / "sources"
-    shutil.copytree(DEMO / "sources", copy)
+    # without a hand run's outputs, which the landed-output checks below would
+    # otherwise find even if this run landed nothing
+    shutil.copytree(DEMO / "sources", copy, ignore=shutil.ignore_patterns(*SOURCES_OUTPUTS))
+    stale = sorted(str(p.relative_to(copy)) for pat in SOURCES_OUTPUTS for p in copy.rglob(pat))
+    assert not stale, f"the copy holds outputs from an earlier run: {stale}"
     # an output resolved against the cwd instead of the notebook lands here
     cwd = tmp_path / "cwd"
     cwd.mkdir()
