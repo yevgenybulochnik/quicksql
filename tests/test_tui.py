@@ -115,6 +115,35 @@ async def test_o_switches_between_notebooks_and_resets_state(tmp_path) -> None:
         assert app.armed is False     # arming is per-notebook
 
 
+async def test_the_tui_loads_the_notebooks_rc_at_startup_and_on_o(tmp_path) -> None:
+    from quicksql.tui import NotebookPicker
+
+    (tmp_path / "quicksqlrc.py").write_text(
+        "from pydantic import BaseModel\n"
+        "from quicksql.plugins import Plugin, qfield\n"
+        "from quicksql.registry import plugin\n\n\n"
+        "@plugin\n"
+        "class Sparkle(Plugin):\n"
+        "    class Config(BaseModel):\n"
+        "        sparkle: int = qfield(0)\n"
+    )
+    alpha = tmp_path / "alpha.qsql"
+    alpha.write_text("-- @sparkle: 1\n-- @cell a\nSELECT 1 AS x;\n")
+    beta = tmp_path / "beta.qsql"
+    beta.write_text("-- @sparkle: 2\n-- @cell b\nSELECT 2 AS y;\n")
+    app = QsqlApp(path=alpha, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.project is not None and list(app.project.cells) == ["a"]
+        await pilot.press("o")
+        await pilot.pause()
+        assert isinstance(app.screen, NotebookPicker)
+        await pilot.press("down", "enter")  # alpha, [beta]
+        await pilot.pause()
+        assert app.path == beta
+        assert app.project is not None and list(app.project.cells) == ["b"]
+
+
 async def test_template_create_prompts_for_name_and_creates_named_file(tmp_path) -> None:
     from textual.widgets import Input
 
