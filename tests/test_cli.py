@@ -481,3 +481,46 @@ def test_tui_without_textual_names_the_extra(tmp_path) -> None:
     assert done.returncode == 1
     assert "the TUI needs the 'tui' extra: pip install 'quicksql[tui]'" in done.stdout
     assert "Traceback" not in done.stderr
+
+
+# ---------- the agent skill ----------
+
+
+def test_skill_prints_the_packaged_skill() -> None:
+    result = runner.invoke(app, ["skill"])
+    assert result.exit_code == 0
+    assert result.output.startswith("---\nname: quicksql\n")
+
+
+def test_skill_names_every_live_command() -> None:
+    from quicksql.cli import live_app
+
+    text = runner.invoke(app, ["skill"]).output
+    for command in live_app.registered_commands:
+        assert f"quicksql live {command.name}" in text, command.name
+
+
+def test_the_skills_example_notebook_compiles_and_runs(tmp_path) -> None:
+    import re
+
+    text = runner.invoke(app, ["skill"]).output
+    example = re.search(r"## The file\n\n```sql\n(.*?)```", text, re.S).group(1)
+    nb = tmp_path / "example.qsql"
+    nb.write_text(example)
+    result = runner.invoke(app, ["run", str(nb), "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["summary"]["ok"] == 2
+
+
+def test_skill_install_writes_it_into_the_project_once(tmp_path) -> None:
+    result = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    installed = tmp_path / ".claude" / "skills" / "quicksql" / "SKILL.md"
+    assert installed.read_text().startswith("---\nname: quicksql\n")
+    assert runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)]).exit_code == 0
+    installed.write_text(installed.read_text() + "\nmy own notes\n")
+    refused = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
+    assert refused.exit_code == 1 and "--force" in refused.output
+    assert "my own notes" in installed.read_text()
+    forced = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path), "--force"])
+    assert forced.exit_code == 0 and "my own notes" not in installed.read_text()
