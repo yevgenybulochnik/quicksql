@@ -21,6 +21,7 @@ from ..bootstrap import compile_file
 from ..compiler import Project
 from ..errors import QsqlError, error_dicts
 from ..live.host import LiveHost
+from ..live.server import LiveServer
 from ..live.protocol import REFUSED, LiveError, file_hash
 from ..models import RunResult
 from ..registry import Registries
@@ -85,6 +86,7 @@ class QsqlApp(App):
         auto_run: bool = False,
         plugins: Sequence[str] = (),
         registries: Registries | None = None,
+        live: bool = False,
     ) -> None:
         super().__init__()
         self.path = Path(path)
@@ -95,6 +97,10 @@ class QsqlApp(App):
         # given: every compile uses these instead (an embedding app, a test)
         self.registries = registries
         self.watch = watch
+        # serve the notebook's live session (``quicksql live``): on for
+        # ``quicksql tui``, off by default so embedding apps and tests opt in
+        self.live = live
+        self._server: LiveServer | None = None
         self.auto_run = auto_run
         self.project: Project | None = None
         # the controls (armed, autorun switches), the run mirror and the events
@@ -228,6 +234,7 @@ class QsqlApp(App):
         self.catalog.reset()
         self.mode = "cells"
         self.host.switch(self.path)  # disarms: a notebook opens paused
+        self._serve()
         self._refresh_armed_indicator()
         self.project = None
         try:
@@ -299,7 +306,32 @@ class QsqlApp(App):
         body.set_class(event.size.height < self.COMPACT_HEIGHT, "-compact")
 
     def on_unmount(self) -> None:
+        if self._server is not None:
+            self._server.close()
         self.runs.close()
+
+    def _serve(self) -> None:
+        """Serve this notebook's live session on its socket, replacing the
+        last notebook's (``o``): an agent's ``quicksql live`` talks to it."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        if not self.live:
+            return
+        server = LiveServer(self.host, self.path, screen=True)
+        self._server = server
+        self.run_worker(self._bind(server), group="live")
+
+    async def _bind(self, server: LiveServer) -> None:
+        try:
+            why = await server.start()
+        except Exception as exc:  # no Unix sockets here, a refused directory: never fatal
+            why = f"{type(exc).__name__}: {exc}"
+        if why is not None:
+            server.close()
+            if self._server is server:
+                self._server = None
+            self.log_line(f"agent socket off: {why}")
 
     # ---------- state helpers ----------
 
