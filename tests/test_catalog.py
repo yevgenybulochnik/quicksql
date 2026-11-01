@@ -5,23 +5,15 @@ import duckdb
 import polars as pl
 import pytest
 
-from quicksql.catalog import (
-    CatalogCache,
-    CatalogNode,
-    bigquery_context_node,
-    bq_field_paths,
-    duckdb_context_node,
-    duckdb_field_paths,
-    postgres_context_node,
-    project_root_node,
-    sink_output_node,
-    sqlite_context_node,
-)
+from quicksql.catalog import CatalogCache, CatalogNode, project_root_node, sink_output_node
 from quicksql import config
 from quicksql.bootstrap import builtin_registries, compile_text
-from quicksql.executors.bigquery_exec import BigQueryExecutor
+from quicksql.conduit import duckdb_field_paths
+from quicksql.config import make_sink
+from quicksql.executors.bigquery_exec import BigQueryExecutor, bq_field_paths
+from quicksql.executors.duckdb_exec import DuckDBExecutor
 from quicksql.executors.postgres_exec import PostgresExecutor
-from quicksql.sinks import make_sink
+from quicksql.executors.sqlite_exec import SQLiteExecutor
 
 BUILTINS = builtin_registries()  # read-only here
 
@@ -293,7 +285,7 @@ def test_sqlite_catalog_chain(tmp_path) -> None:
     db.commit()
     db.close()
 
-    node = sqlite_context_node("nums.db", tmp_path)
+    node = SQLiteExecutor().context_node("nums.db", tmp_path)
     tables = node.load()
     assert tables["table"].to_list() == ["nums"]
     leaf = node.child(tables.row(0, named=True))
@@ -307,7 +299,7 @@ def test_sqlite_catalog_chain(tmp_path) -> None:
 
 
 def test_sqlite_memory_context_not_browsable(tmp_path) -> None:
-    node = sqlite_context_node(":memory:", tmp_path)
+    node = SQLiteExecutor().context_node(":memory:", tmp_path)
     assert node.child is None
     assert "memory" in node.load()["info"][0]
 
@@ -317,7 +309,7 @@ def test_duckdb_catalog_chain(tmp_path) -> None:
     con.execute("CREATE TABLE t AS SELECT {'a': 1} AS s")
     con.close()
 
-    node = duckdb_context_node({"path": "wh.db"}, tmp_path)
+    node = DuckDBExecutor().context_node("wh.db", tmp_path)
     tables = node.load()
     assert tables.columns == ["schema", "table"]
     assert tables.rows() == [("main", "t")]
@@ -327,7 +319,7 @@ def test_duckdb_catalog_chain(tmp_path) -> None:
 
 
 def test_duckdb_memory_context_not_browsable(tmp_path) -> None:
-    node = duckdb_context_node(None, tmp_path)
+    node = DuckDBExecutor().context_node(None, tmp_path)
     assert node.child is None
     assert "memory" in node.load()["info"][0]
 
@@ -362,7 +354,7 @@ def test_bigquery_catalog_chain(monkeypatch) -> None:
         return FakeClient()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", make)
-    node = bigquery_context_node({"project": "p"}, BUILTINS)
+    node = BigQueryExecutor().context_node({"project": "p"})
     datasets = node.load()
     assert datasets["dataset"].to_list() == ["analytics", "raw"]
     tables_node = node.child(datasets.row(0, named=True))
@@ -414,7 +406,7 @@ def test_postgres_catalog_chain(monkeypatch) -> None:
         return created[-1]
 
     monkeypatch.setattr(PostgresExecutor, "make_connection", make)
-    node = postgres_context_node("postgresql://x", BUILTINS)
+    node = PostgresExecutor().context_node("postgresql://x")
     schemas = node.load()
     assert schemas["schema"].to_list() == ["public", "analytics"]
     tables_node = node.child(schemas.row(0, named=True))
@@ -452,7 +444,7 @@ def test_postgres_catalog_chain_live(pg_dsn) -> None:
         con.execute("CREATE TABLE catalog_live (id int NOT NULL, email text)")
         con.execute("COMMENT ON COLUMN catalog_live.id IS 'primary key'")
     try:
-        node = postgres_context_node(pg_dsn, BUILTINS)
+        node = PostgresExecutor().context_node(pg_dsn)
         assert "public" in node.load()["schema"].to_list()
         tables_node = node.child({"schema": "public"})
         assert "catalog_live" in tables_node.load()["table"].to_list()
@@ -528,7 +520,7 @@ def test_node_cache_keys_disambiguate_connections(monkeypatch) -> None:
     # titles collide (e.g. leaf "schema.table" on both servers)
     monkeypatch.setattr(PostgresExecutor, "make_connection", lambda self, dsn: FakeCatalogPg())
     def pg_leaf(dsn: str) -> CatalogNode:
-        node = postgres_context_node(dsn, BUILTINS)
+        node = PostgresExecutor().context_node(dsn)
         tables_node = node.child(node.load().row(0, named=True))
         return tables_node.child(tables_node.load().row(0, named=True))
 
@@ -544,7 +536,7 @@ def test_node_cache_keys_disambiguate_connections(monkeypatch) -> None:
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
 
     def bq_leaf(project: str) -> CatalogNode:
-        node = bigquery_context_node({"project": project}, BUILTINS)
+        node = BigQueryExecutor().context_node({"project": project})
         tables_node = node.child(node.load().row(0, named=True))
         return tables_node.child(tables_node.load().row(0, named=True))
 

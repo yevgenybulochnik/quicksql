@@ -10,7 +10,7 @@ first `@cell`) inherited by every cell.
 - **Cell shape = input → engine → output.** Cells form a DAG from `{{ ref('cell') }}` +
   `@depends_on`, topo-sorted with cycle detection (`graph.py`).
 - **A cell body may be multiple statements.** `executors/base.split_statements` (sqlglot
-  tokenizer, engine dialect, comment/string-aware, original text preserved) splits on
+  tokenizer in the executor's declared `dialect`, comment/string-aware, original text preserved) splits on
   top-level `;`; setup statements run for effect and the **terminal** statement is the
   result. The runner owns this cell protocol (`runner.execute_cell`): executors only open
   an `EngineSession` per context (`execute`/`fetch`/`extract`/`materialize`/`drop`/
@@ -43,7 +43,9 @@ first `@cell`) inherited by every cell.
   `ref()`/`source()`/`@extensions` must run on duckdb (compile-time guardrail); other
   engines extract to Polars/Arrow and DuckDB lands it in any sink. Every duckdb cell runs
   on the conduit (`conduit.py`: `conduit_target`, `ConduitSession`), so a cell whose own
-  `input.duckdb` differs from the header's is a compile error.
+  `input.duckdb` differs from the header's is a compile error. Anything that reads through
+  DuckDB uses the conduit's helpers (`load_extension`/`ensure_extension`, `preview`,
+  `duckdb_field_paths`); `conduit.ENGINE` names the conduit's engine.
 - **Everything is a plugin; registries are per notebook.** `@plugin` / `@executor` /
   `@source_reader` / `@sink` only *mark* a class (`registry.py`); nothing registers on
   import. `bootstrap.py` is the composition root: `BUILTIN_MODULES` is the one list of
@@ -69,6 +71,15 @@ first `@cell`) inherited by every cell.
   `before_run`/`after_run` are contained notifications.
   `quicksql explain` prints the effective chain/hook order. `config.build_models`
   composes all plugin Configs into GlobalConfig/CellConfig via `create_model`.
+- **Executors declare capabilities; nothing recognizes an engine by name.**
+  `Executor.dialect` is the sqlglot dialect (statement splitting, the LSP's syntax checks
+  and keywords; None = generic SQL's tokens, no syntax checks). Optional catalog methods
+  return lazy `models.CatalogNode`s whose table leaves load `executors.base.field_path_frame`s:
+  `catalog(config, root)` (a context's tree, for the TUI), `catalog_target(target, root)`
+  (a `@catalog` entry; its row name is the context key a cell there would have, so the two
+  dedupe), `catalog_table(config, root, parts)` (LSP column completion) and
+  `catalog_relations` (dotted FROM/JOIN completion). `catalog.py` and `lsp/` hold no engine
+  branches, and no module imports another module's private names (`tests/test_layering.py`).
 - **Config resolution:** global → cell → run overrides (`--set k.v=x`, `QUICKSQL_K__V=x`),
   per-field merge strategy (OVERRIDE / DEEP / EXTEND). Config values are literal; Jinja
   applies to SQL bodies only.
@@ -108,8 +119,8 @@ first `@cell`) inherited by every cell.
   `demo/kitchen-sink/docker-compose.yml` runs on offset ports (5433/9051) and can
   stay up alongside this one.
 - `uv run lint-imports` — the layering gate, which `tests/test_layering.py` runs in every
-  `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; their
-  `ignore_imports` are the debt register that `docs/core-refactor-plan.md` tracks.
+  `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
+  `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
   `compile` — default file `base.qsql`; `--set key.path=value` repeatable. `quicksql tui`
   with a missing file opens a notebook picker: existing .qsql/.qsql.sql files plus
@@ -126,6 +137,7 @@ first `@cell`) inherited by every cell.
 - `plugins/` — `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary),
   `emit_sql.py` (behavior-plugin demonstrator)
 - `config.py` — model composition, scope checks, layer merging, engine/sink resolution
+  (`make_sink`)
 - `overrides.py` — `--set` / `QUICKSQL_*` parsing
 - `render.py` — Jinja on SQL bodies; ref/source/var/env; records edges + extensions
 - `sources.py` — file reader registry (csv/parquet/json/excel)
@@ -136,12 +148,15 @@ first `@cell`) inherited by every cell.
 - `runner.py` — topo run; the cell protocol (`execute_cell`); plugin run-chain;
   RunSession holds the conduit connection, engine sessions, and extension cache across
   watch/TUI reruns
-- `conduit.py` — the DuckDB conduit's target and the duckdb engine's session on it
+- `conduit.py` — the DuckDB conduit's target, the duckdb engine's session on it, and
+  reading through it (extensions, previews, field paths)
+- `catalog.py` — the TUI's schema catalog: each context's tree from its executor,
+  `@catalog` targets, landed outputs read back through DuckDB
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
-  opening an `EngineSession`; parquet/duckdb/postgres)
+  opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
 - `scaffold.py`, `cli.py`, `watcher.py`, `sheet.py` + `tui.py` — CLI, watch loop, TUI
-- `lsp/` — `analysis.py` (diagnostics/completions on sqlglot + length-preserving
-  Jinja mask), `server.py` (pygls stdio); bigquery cells prefer the googlesql
+- `lsp/` — `analysis.py` (diagnostics/completions on sqlglot in the cell's executor's
+  dialect + length-preserving Jinja mask; tables and relations from its catalog), `server.py` (pygls stdio); bigquery cells prefer the googlesql
   `execute_query` binary when found (PATH or `QSQL_EXECUTE_QUERY` — deliberately
   not `QUICKSQL_*`, which overrides.py sweeps into config), fallback sqlglot with
   unsupported-pipe-operator errors downgraded to warnings

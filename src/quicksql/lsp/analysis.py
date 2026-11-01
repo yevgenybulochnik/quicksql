@@ -26,9 +26,6 @@ from .mask import Opaque, mask_jinja
 from .schema import SchemaCache, columns_for, relation_names
 from ..registry import Registries
 
-# quicksql engine names line up with sqlglot dialect names
-_DIALECT = {"duckdb": "duckdb", "postgres": "postgres", "sqlite": "sqlite", "bigquery": "bigquery"}
-
 # cursor in table-reference position: FROM/JOIN + partial dotted path
 _TABLE_POS = re.compile(r"\b(?:from|join)\s+`?([\w.\-]*)$", re.IGNORECASE)
 
@@ -84,7 +81,7 @@ class Analyzer:
             for line, message in project.warnings
         ]
         for cell in project.cells.values():
-            diags.extend(_syntax_diagnostics(cell, self._gsql_bin))
+            diags.extend(_syntax_diagnostics(cell, _dialect(project, cell), self._gsql_bin))
         return diags
 
     # ---------- completions ----------
@@ -115,11 +112,11 @@ class Analyzer:
             tbl = _TABLE_POS.search(prefix)
             if tbl is not None:
                 segments = tbl.group(1).split(".")[:-1]  # done segments only
-                names = relation_names(cell, segments, project.registries, self.cache)
+                names = relation_names(project, cell, segments, self.cache)
                 if names:
                     return [Completion(n, "table", detail) for n, detail in names]
 
-        dialect = _DIALECT.get(cell.engine) if cell is not None else None
+        dialect = _dialect(project, cell) if cell is not None else None
         items = [Completion(k, "keyword") for k in vocab.keywords(dialect)]
         items += [Completion(f, "function") for f in vocab.functions(dialect)]
         if cell is None:
@@ -133,7 +130,7 @@ class Analyzer:
         source = cell.source
         if alias_m is not None:
             source = _patch_dangling(cell, line, character, alias_m.start(1))
-        scope = _resolve_scope(cell, source, line, character)
+        scope = _resolve_scope(cell, dialect, source, line, character)
         relations = [scope[alias]] if alias and alias in scope else list(scope.values())
 
         seen: set[str] = set()
@@ -180,6 +177,11 @@ class Analyzer:
 # ---------- helpers ----------
 
 
+def _dialect(project: Project, cell: Any) -> str | None:
+    """The sqlglot dialect the cell's engine declares; None: no known one."""
+    return project.registries.executors.get(cell.engine).dialect
+
+
 def _line_in(message: str) -> int:
     m = re.search(r"line (\d+)", message)
     return int(m.group(1)) if m else 1
@@ -193,8 +195,9 @@ def _line_diag(text: str, line1: int, message: str, severity: str = "error") -> 
     return Diagnostic(row, 0, row, width, message, severity)
 
 
-def _syntax_diagnostics(cell: Any, gsql_bin: str | None = None) -> list[Diagnostic]:
-    dialect = _DIALECT.get(cell.engine)
+def _syntax_diagnostics(
+    cell: Any, dialect: str | None, gsql_bin: str | None = None
+) -> list[Diagnostic]:
     if dialect is None or "{%" in cell.source:
         return []  # control-flow Jinja can't be masked into valid SQL (v1 limit)
     masked, _ = mask_jinja(cell.source, _cell_vars(cell))
@@ -293,15 +296,15 @@ def _statement_slice(
 
 def _resolve_scope(
     cell: Any,
+    dialect: str | None,
     source: str | None = None,
     line: int | None = None,
     character: int | None = None,
 ) -> dict[str, Any]:
     """alias/name (lowercased) -> relation: a mask Ref/Source tag for a
     ``{{ ref/source }}`` placeholder, a Projection for a CTE alias, else the
-    (qualified) table-name string. Scoped to the cursor's statement when
-    ``line``/``character`` are given."""
-    dialect = _DIALECT.get(cell.engine)
+    (qualified) table-name string, parsed in the cell's ``dialect``. Scoped to
+    the cursor's statement when ``line``/``character`` are given."""
     src = source if source is not None else cell.source
     masked, spans = mask_jinja(src, _cell_vars(cell))
     by_placeholder = {s.name: s.tag for s in spans if s.name}

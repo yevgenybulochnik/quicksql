@@ -49,6 +49,8 @@ from textual.widgets.option_list import Option
 from .catalog import CatalogCache, CatalogNode, project_root_node
 from .bootstrap import compile_file
 from .compiler import Project
+from .conduit import preview
+from .config import make_sink
 from .registry import Registries
 from .errors import QsqlError
 from .models import RunEvent, RunResult
@@ -796,11 +798,9 @@ class QsqlApp(App):
         the head row groups for a LIMIT."""
         import duckdb
 
-        from .runner import _preview
-
         con = duckdb.connect()
         try:
-            return _preview(con, f"read_parquet('{target}')", self.PREVIEW_ROWS)
+            return preview(con, f"read_parquet('{target}')", self.PREVIEW_ROWS)
         finally:
             con.close()
 
@@ -823,9 +823,6 @@ class QsqlApp(App):
         previews only once a run this session has attached it to the conduit."""
         import duckdb
 
-        from .runner import _preview
-        from .sinks import make_sink
-
         project = self.project
         sink = make_sink(project.cells[name].config, project.root, project.registries)
         if not sink.lands_output:
@@ -834,7 +831,7 @@ class QsqlApp(App):
             )
         con = self._catalog_connect()
         try:
-            return _preview(con, sink.ref_expr(name), self.PREVIEW_ROWS)
+            return preview(con, sink.ref_expr(name), self.PREVIEW_ROWS)
         except (duckdb.Error, QsqlError):
             return None  # never landed, or its database isn't attached this session
         finally:

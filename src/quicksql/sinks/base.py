@@ -2,7 +2,8 @@
 
 Sinks are the cross-cell interchange: ``write`` materializes the result at the
 destination; ``ref_expr`` is the DuckDB-readable expression a downstream cell's
-``ref()`` renders to. Instantiated per cell from the merged output config.
+``ref()`` renders to. Instantiated per cell from the merged output config
+(``config.make_sink``).
 """
 
 from __future__ import annotations
@@ -10,12 +11,9 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from ..models import RenderedCell
-
-if TYPE_CHECKING:
-    from ..registry import Registries
 
 
 class Sink(ABC):
@@ -42,16 +40,3 @@ class Sink(ABC):
 def path_alias(prefix: str, key: str) -> str:
     """Deterministic ATTACH alias so separately-built sink instances agree."""
     return f"{prefix}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
-
-
-def make_sink(config: Any, root: Path, registries: Registries) -> Sink:
-    """Build a cell's sink from the notebook's registries: output config
-    amended by sink_config hooks (e.g. the Schema plugin injecting its directive)."""
-    from ..config import resolve_sink_type
-
-    cfg = dict(config.output or {})
-    for plug in registries.plugins.overriding("sink_config"):
-        amended = plug.sink_config(config, cfg)
-        if amended is not None:
-            cfg = amended
-    return registries.sinks.get(resolve_sink_type(config, registries.plugins))(cfg, root)

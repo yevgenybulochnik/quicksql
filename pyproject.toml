@@ -146,12 +146,7 @@ forbidden_modules = [
     "quicksql.tui",
     "quicksql.watcher",
 ]
-ignore_imports = [
-    # Phase 6: conduit.py takes over extension loading from the runner's privates.
-    # Module-level only: front-ends importing runner privates (catalog, lsp.schema, tui,
-    # cli) is front-end -> core, which both contracts allow; the plan's findings track it.
-    "quicksql.plugins.builtin -> quicksql.runner",
-]
+ignore_imports = []
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]

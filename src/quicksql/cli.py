@@ -16,7 +16,7 @@ from .bootstrap import compile_file
 from .compiler import Project
 from .errors import ConfigErrorGroup, QsqlError
 from .overrides import gather_overrides
-from .runner import _message, run_project
+from .runner import error_message, run_project
 from .scaffold import write_scaffold
 from .state import statuses
 
@@ -150,7 +150,7 @@ def _run_json(
     except QsqlError as exc:  # before any cell ran: compile, or an unknown --select
         status, errors = "compile_error", _error_dicts(exc)
     except Exception as exc:  # before any cell ran: a plugin that won't import, a locked db
-        status, errors = "error", [{"cell": None, "line": None, "message": _message(exc)}]
+        status, errors = "error", [{"cell": None, "line": None, "message": error_message(exc)}]
     counts = Counter(r.status for r in results)
     if status == "ok" and counts["failed"]:
         status = "failed"

@@ -370,12 +370,12 @@ def test_session_reconnects_when_conduit_target_changes(tmp_path) -> None:
 
 
 def test_session_caches_extension_loads(tmp_path, monkeypatch) -> None:
-    import quicksql.runner as runner_mod
+    import quicksql.conduit as conduit
 
     loads: list[str] = []
-    original = runner_mod._load_extension
+    original = conduit.load_extension
     monkeypatch.setattr(
-        runner_mod, "_load_extension",
+        conduit, "load_extension",
         lambda conn, ext: (loads.append(ext), original(conn, ext))[1],
     )
     project = compile_text("-- @cell a\n-- @extensions: [json]\nSELECT 1;", root=tmp_path)
@@ -746,17 +746,15 @@ def _recording_session(calls: list):
 def recording_engine(registries):
     """Engine `rec` in the test's registries, whose sessions record the
     runner's calls; yields the calls."""
-    from quicksql.executors.base import Executor, split_statements
+    from quicksql.executors.base import Executor
     from quicksql.registry import executor
 
     calls: list = []
 
     @executor("rec")
     class Rec(Executor):
+        dialect = "duckdb"
         supports_context_refs = True
-
-        def split_statements(self, sql):
-            return split_statements(sql, "duckdb")
 
         def open_session(self, config, ctx):
             calls.append(("open",))
