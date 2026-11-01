@@ -137,6 +137,8 @@ Every command exits with one of these codes:
 | 1 | A cell failed. A skipped cell never causes it alone, since every skip has a failed upstream in the same run. Also other runtime failures, such as `init` refusing to overwrite. |
 | 2 | Usage error: an unknown option or a bad value. |
 | 3 | The notebook didn't compile (a parse, config or cycle error), or the selection names an unknown cell (`run --select`, `compile --select`, `show`). |
+| 4 | `quicksql live`: no TUI has the notebook open (or it timed out, or speaks another protocol version: restart the TUI). |
+| 5 | Refused: `quicksql live` asked for something the session won't do (a run while one is under way, autorun on for a cell the file switches off), or `run`/`watch` while a TUI has the notebook open. |
 
 *Behavior change:* compile errors used to exit 1, like a failed cell, and `compile --select`
 with an unknown cell printed nothing and exited 0.
@@ -230,7 +232,10 @@ land); a BigQuery cell that is `ref()`'d in-context must be a single statement.
 ## Directive vocabulary
 
 Every directive below is a plugin's config field; adding a plugin adds directives. Scope is
-where it may appear (global header, per-cell, or both).
+where it may appear (global header, per-cell, or both). `quicksql directives [NOTEBOOK]`
+lists exactly what a notebook can write, its `quicksqlrc.py` plugins included: each
+directive's scope, type, default, merge strategy, whether editing it reruns the cell, and
+what it does (`--json`, or `--markdown`).
 
 | Directive | Scope | What it does |
 |---|---|---|
@@ -387,6 +392,51 @@ or `new` if it never ran. Stale is relative to the notebook: source files and re
 aren't fingerprinted. The state file never skips a run: startup still runs every autorun
 cell.
 
+### Working alongside an agent: `quicksql live`
+
+While the TUI has a notebook open, it serves a live session on a Unix socket (yours alone:
+0600, under `~/.quicksql/run/`). A coding agent in another pane edits the same file and
+talks to your TUI through `quicksql live`: it sees what you see, and drives it the way your
+keys do. Everything it does shows in the Log tab as `agent: …`, and the title shows
+`· agent` while one is connected.
+
+```
+quicksql status base.qsql --json        # "live": true, queued/running cells, controls
+quicksql live arm base.qsql             # p: saves rerun what changed
+# ... the agent edits a cell and saves ...
+quicksql live wait base.qsql --json     # the outcome of exactly that save
+quicksql head orders base.qsql --json   # read an output through your session
+quicksql live query "SELECT status, count(*) FROM orders GROUP BY 1" base.qsql
+quicksql live events base.qsql --follow # NDJSON: compiles, cells, runs, control changes
+```
+
+- `live wait` returns once the TUI has compiled the text as it was saved and rerun what
+  changed: `ran` (per-cell results; a failure carries the engine's message, the failing
+  statement and its SQL, and the cell's lines), `compile_failed`, `paused` or
+  `nothing_to_rerun`. If you saved over it first, it returns yours, marked `superseded`.
+- Control: `live arm` / `disarm` (`p`), `live autorun on|off -s CELL` / `--all` (`a` /
+  `A`), `live run -s CELL` / `--all` (`r` / `R`; `--wait --json` prints `run --json`'s
+  document), `live cancel`, `live focus CELL --tab data`, `live notify "…"`. Commands set a
+  state, never toggle, so they can't race your keys. A run while one is under way is
+  refused unless `--cancel`, so an agent never cuts yours short. Session autorun only
+  switches cells off; the file switches them on.
+- Reads go through your session, so they work for every sink, including the DuckDB files
+  the TUI holds (DuckDB locks them against other processes). `head` falls back to a fresh
+  connection when no TUI is open; `live query` takes one read-only SELECT with each landed
+  cell as a view.
+- One runner per notebook: `quicksql run` and `watch` are refused while a TUI has it open.
+
+### An agent skill: `quicksql skill`
+
+quicksql ships a [Claude Code skill](src/quicksql/skill/SKILL.md) that teaches an agent
+notebooks: the cell format, the offline loop, and this live loop. It's a folder: a lean
+`SKILL.md`, references the agent reads when it needs them (notebook format, directives,
+engines and sinks, the live session, JSON shapes) and example notebooks that run.
+`quicksql skill` prints `SKILL.md`, `quicksql skill --path` says where the folder is, and
+`quicksql skill --install` copies it to `.claude/skills/quicksql/` in the current project.
+Rerun it after upgrading quicksql: it updates the files you haven't edited and refuses to
+overwrite ones you have (`--force` replaces them). The skill always matches the CLI.
+
 ## Editor integration
 
 A language server ships behind the `lsp` extra: `quicksql lsp` (stdio) gives per-cell,
@@ -476,5 +526,6 @@ without Docker.
 | `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context and declares its dialect and catalog), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
 | `cli.py`, `watcher.py`, `scaffold.py` | CLI, watch loop, notebook templates |
-| `tui/` (`app.py`, `runs.py`, `panes.py`, `catalog_view.py`, `previews.py`, `screens.py`), `sheet.py` | the TUI: layout and keys, runs, sheet surfaces, the catalog browser; `sheet.py` holds the pure sheet operations |
+| `tui/` (`app.py`, `runs.py`, `panes.py`, `catalog_view.py`, `previews.py`, `screens.py`, `agent.py`), `sheet.py` | the TUI: layout and keys, runs, sheet surfaces, the catalog browser, the live host's driver; `sheet.py` holds the pure sheet operations |
+| `live/` (`host.py`, `server.py`, `client.py`, `protocol.py`) | the live session an agent reaches over the TUI's socket: the controls, run mirror and saves' outcomes; the server on the TUI's loop; the CLI's client |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |

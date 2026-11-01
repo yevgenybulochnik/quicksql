@@ -49,3 +49,12 @@ class ExecutorError(QsqlError):
 
 class SinkError(QsqlError):
     """A cell's output could not be materialized at its destination."""
+
+
+def error_dicts(exc: QsqlError) -> list[dict[str, object]]:
+    """A compile error as JSON rows (cell, line, message): one per cell error
+    of a ConfigErrorGroup, else one without a place. ``run --json``,
+    ``status --json`` and a live session's ``compile_failed`` all use it."""
+    if isinstance(exc, ConfigErrorGroup):
+        return [{"cell": e.cell, "line": e.line, "message": e.message} for e in exc.errors]
+    return [{"cell": None, "line": None, "message": str(exc)}]

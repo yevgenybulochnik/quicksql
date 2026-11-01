@@ -7,7 +7,9 @@ current cell, and the new run's thread waits for it. Each run is tagged with a
 generation, bumped on the UI thread when it starts: events and results from an
 older one come from a replaced run, and are logged but never shown.
 Everything that touches the screen goes through the app's ``run_*`` hooks, on
-the UI thread.
+the UI thread. Each run's life is also reported to the app's live host
+(``live.host.LiveHost``), which an agent reads over the socket: requested,
+adopted, every event (of replaced runs too), ended or dropped.
 """
 
 from __future__ import annotations
@@ -66,20 +68,45 @@ class RunController:
         self._cancel.set()
         self.session.close()
 
+    def cancel(self) -> None:
+        """Stop the run under way after its current cell (an agent's cancel)."""
+        self._cancel.set()
+
+    @contextmanager
+    def reading(self) -> Iterator[Any]:
+        """``connect``, for a read off the UI thread (an agent's head or
+        query): the session counts as in use until the read is done, as for a
+        run, so a notebook switch can't close it under the read."""
+        session = self._acquire(None)
+        try:
+            if session.conn is not None:
+                conn = session.conn.cursor()
+            else:
+                import duckdb
+
+                conn = duckdb.connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
+        finally:
+            self._release(session)
+
     def start(
         self,
         select: Optional[list[str]],
         closure: bool,
         path: Path,
         project: Project | None = None,
-    ) -> None:
+    ) -> int:
         """Bump the run generation (on the UI thread), cancel the run under way
         and hand off to a thread worker, which starts once that run has
         stopped. A save passes the project it just compiled, so the run
-        doesn't compile it again."""
+        doesn't compile it again. Returns the run's generation, its id."""
         self.gen += 1
         self._cancel.set()
         self._cancel = threading.Event()
+        self.app.host.run_requested(self.gen, project.source_hash if project else None)
         # bound now: a notebook switch before the thread starts must not
         # redirect this run to the new notebook or its session
         work = partial(
@@ -88,6 +115,7 @@ class RunController:
         # not `exclusive`: Textual would only flag the old thread cancelled,
         # and the run lock already keeps the runs apart
         self.app.run_worker(work, thread=True, group="run")
+        return self.gen
 
     def _run(
         self,
@@ -102,12 +130,15 @@ class RunController:
         call = self.app.call_from_thread
         with self._session_in_use(session), self._run_lock:
             if cancel.is_set():
-                return  # replaced while it waited: the newer run does the work
+                # replaced while it waited: the newer run does the work
+                call(self.app.host.run_dropped, gen, "replaced before it started")
+                return
             if project is None:
                 try:
                     project = self.app.compile_notebook(path)
                 except QsqlError as exc:
                     call(self.app.log_line, f"compile error: {exc}")
+                    call(self.app.run_compile_failed, gen, path, exc)
                     return
             call(self._adopt, gen, project)
             results: list[RunResult] = []
@@ -126,6 +157,7 @@ class RunController:
                 call(self.apply, gen, results)
 
     def _adopt(self, gen: int, project: Project) -> None:
+        self.app.host.run_adopted(gen, project)
         if gen != self.gen:
             return  # a replaced run's compile may be older, or another notebook's
         self.app.run_adopted(project)
@@ -135,6 +167,7 @@ class RunController:
         seeds the pending set from the *post-expansion* cell list (closure,
         missing-temp and not-ok upstreams included — the select list undercounts those),
         and each cell_finished retires its cell so status flips one at a time."""
+        self.app.host.run_event(gen, event)
         self.app.log_line(event.line())
         result = event.result if event.kind == "cell_finished" else None
         error = (result.error or "").strip() if result is not None else ""
@@ -154,6 +187,7 @@ class RunController:
             self.app.run_progressed(event.cell)
 
     def apply(self, gen: int, results: list[RunResult]) -> None:
+        self.app.host.run_ended(gen, results)
         self.app.run_landed()  # outputs and warehouses just changed
         if gen != self.gen:
             return  # a newer run owns the table; its own events paint it
@@ -171,15 +205,25 @@ class RunController:
 
     @contextmanager
     def _session_in_use(self, session: RunSession) -> Iterator[None]:
-        with self._session_lock:
-            self._session_runs[session] = self._session_runs.get(session, 0) + 1
+        self._acquire(session)
         try:
             yield
         finally:
-            with self._session_lock:
-                left = self._session_runs.pop(session) - 1
-                if left:
-                    self._session_runs[session] = left
-                retired = not left and session is not self.session
-            if retired:  # its notebook was switched away mid-run
-                session.close()
+            self._release(session)
+
+    def _acquire(self, session: RunSession | None) -> RunSession:
+        """Count a use of ``session`` (None: the current one, taken under the
+        lock, so a switch can't close it between the read and the count)."""
+        with self._session_lock:
+            session = session or self.session
+            self._session_runs[session] = self._session_runs.get(session, 0) + 1
+            return session
+
+    def _release(self, session: RunSession) -> None:
+        with self._session_lock:
+            left = self._session_runs.pop(session) - 1
+            if left:
+                self._session_runs[session] = left
+            retired = not left and session is not self.session
+        if retired:  # its notebook was switched away mid-use
+            session.close()

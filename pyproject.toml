@@ -107,11 +107,14 @@ forbidden_modules = [
     "quicksql.catalog",
     "quicksql.cli",
     "quicksql.lsp",
+    "quicksql.live",
+    "quicksql.live.**",
     "quicksql.lsp.**",
     "quicksql.scaffold",
     "quicksql.sheet",
     "quicksql.tui",
     "quicksql.tui.**",
+    "quicksql.vocabulary",
     "quicksql.watcher",
 ]
 ignore_imports = []
@@ -142,11 +145,14 @@ forbidden_modules = [
     "quicksql.catalog",
     "quicksql.cli",
     "quicksql.lsp",
+    "quicksql.live",
+    "quicksql.live.**",
     "quicksql.lsp.**",
     "quicksql.scaffold",
     "quicksql.sheet",
     "quicksql.tui",
     "quicksql.tui.**",
+    "quicksql.vocabulary",
     "quicksql.watcher",
 ]
 ignore_imports = []

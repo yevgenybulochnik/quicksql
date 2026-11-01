@@ -2433,3 +2433,97 @@ async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
         assert list(app.project.cells) == ["a", "c"]  # still notebook two
         assert app.results == {} and app.running == set()
         assert _row(app, "a")[3] == "·" and _row(app, "c")[3] == "·"
+
+
+# ---------- the live host (an agent alongside the TUI) ----------
+
+
+async def test_the_keys_set_the_live_hosts_controls(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("p")
+        assert app.host.armed is True
+        changed = [e for e in app.host.since(0) if e["kind"] == "controls_changed"]
+        assert changed[-1]["by"] == "keys" and changed[-1]["armed"] is True
+        await pilot.press("a")
+        assert app.host.since(0)[-1]["autorun_off"] == ["users"]
+
+
+async def test_an_agent_control_change_repaints_the_tui(notebook) -> None:
+    from textual.widgets import RichLog
+
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one(TabbedContent).active = "tab_log"
+        await pilot.pause()
+        app.host.set_autorun(["users"], False, by="agent")
+        app.host.set_armed(True, by="agent")
+        await pilot.pause()
+        assert app.query_one("#cells", DataTable).get_row_at(0)[2] == "☐"
+        assert "▶ live" in app.title
+        lines = [s.text for s in app.query_one("#log", RichLog).lines]
+        assert "agent: autorun users off" in lines and "agent: arm" in lines
+
+
+async def test_a_saves_rerun_settles_in_the_live_host(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("p")
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(5)"))
+        project = compile_file(notebook)
+        assert "events" in app._on_recompiled(project)
+        assert project.source_hash not in app.host.outcomes  # its rerun settles it
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        outcome = app.host.outcomes[project.source_hash]
+        assert outcome["state"] == "ran" and outcome["summary"]["failed"] == 0
+        assert "events" in [r["cell"] for r in outcome["results"]]
+
+
+async def test_the_tui_serves_its_live_session_to_an_agent(notebook) -> None:
+    import asyncio
+
+    from quicksql.live.client import LiveClient
+    from quicksql.live.protocol import socket_path
+
+    app = QsqlApp(path=notebook, watch=False, live=True)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await app.workers.wait_for_complete()  # the socket is bound
+        assert socket_path(notebook).exists()
+
+        def agent() -> dict:
+            with LiveClient.connect(notebook) as client:
+                snapshot = client.call("snapshot")
+                client.call("arm")
+                run_id = client.call("run", cells=["users"])["run_id"]
+                record = client.call("run.wait", run_id=run_id, timeout=60)
+                head = client.call("head", cell="users", rows=2)
+                client.call("focus", cell="users", tab="data")
+                return {"snapshot": snapshot, "record": record, "head": head}
+
+        got = await asyncio.to_thread(agent)
+        await pilot.pause()
+        assert [c["cell"] for c in got["snapshot"]["cells"]][0] == "users"
+        assert got["record"]["state"] == "finished" and got["record"]["summary"]["ok"] >= 1
+        assert len(got["head"]["rows"]) == 2
+        assert app.armed is True and app.results["users"].ok
+        assert app.current_cell == "users"
+        assert app.query_one(TabbedContent).active == "tab_data"
+        assert app.host.clients == 0  # the agent's gone: no marker in the title
+        assert "agent" not in app.title
+    assert not socket_path(notebook).exists()  # quitting removes it
+
+
+async def test_a_live_tui_logs_why_it_isnt_serving(notebook) -> None:
+    from textual.widgets import RichLog
+
+    first = QsqlApp(path=notebook, watch=False, live=True)
+    async with first.run_test() as pilot:
+        await first.workers.wait_for_complete()
+        second = QsqlApp(path=notebook, watch=False, live=True)
+        async with second.run_test(size=(100, 40)) as pilot2:
+            second.query_one(TabbedContent).active = "tab_log"
+            await second.workers.wait_for_complete()
+            await pilot2.pause()
+            lines = [s.text for s in second.query_one("#log", RichLog).lines]
+            assert any("agent socket off" in line for line in lines)

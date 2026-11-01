@@ -19,13 +19,17 @@ from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, T
 
 from ..bootstrap import compile_file
 from ..compiler import Project
-from ..errors import QsqlError
+from ..errors import QsqlError, error_dicts
+from ..live.host import LiveHost
+from ..live.server import LiveServer
+from ..live.protocol import REFUSED, LiveError, file_hash
 from ..models import RunResult
 from ..registry import Registries
 from ..runner import RunSession
 from ..sheet import Sheet
 from ..watcher import plan_rerun
 from . import previews
+from .agent import AppDriver
 from .catalog_view import CatalogView
 from .panes import DataPanes, SheetTable, Surface
 from .previews import preview_frame
@@ -82,6 +86,7 @@ class QsqlApp(App):
         auto_run: bool = False,
         plugins: Sequence[str] = (),
         registries: Registries | None = None,
+        live: bool = False,
     ) -> None:
         super().__init__()
         self.path = Path(path)
@@ -92,12 +97,16 @@ class QsqlApp(App):
         # given: every compile uses these instead (an embedding app, a test)
         self.registries = registries
         self.watch = watch
+        # serve the notebook's live session (``quicksql live``): on for
+        # ``quicksql tui``, off by default so embedding apps and tests opt in
+        self.live = live
+        self._server: LiveServer | None = None
         self.auto_run = auto_run
-        self.armed = False  # watch reruns stay dormant until the first run-all
         self.project: Project | None = None
+        # the controls (armed, autorun switches), the run mirror and the events
+        # an agent reads; watch reruns stay dormant until the first run-all
+        self.host = LiveHost(AppDriver(self), self.path)
         self.runs = RunController(self)  # the session, results and pending cells
-        self.autorun_off: set[str] = set()
-        self.autorun_global = True
         self.show_rendered = True
         self.mode = "cells"  # or "data" / "catalog": whose keys these are
         self.data = DataPanes(self)  # the Data tab's sheet stacks
@@ -111,6 +120,18 @@ class QsqlApp(App):
     @property
     def session(self) -> RunSession:
         return self.runs.session
+
+    @property
+    def armed(self) -> bool:
+        return self.host.armed
+
+    @property
+    def autorun_off(self) -> set[str]:
+        return self.host.autorun_off
+
+    @property
+    def autorun_global(self) -> bool:
+        return self.host.autorun_global
 
     @property
     def results(self) -> dict[str, RunResult]:
@@ -212,15 +233,18 @@ class QsqlApp(App):
         self.data.reset()
         self.catalog.reset()
         self.mode = "cells"
-        self.armed = False
+        self.host.switch(self.path)  # disarms: a notebook opens paused
+        self._serve()
         self._refresh_armed_indicator()
         self.project = None
         try:
             self.project = self.compile_notebook(self.path)
         except QsqlError as exc:
             self.log_line(f"compile error: {exc}")
+            self._compile_failed(exc)
             return
         self.session.see(self.project)  # the baseline a save is compared against
+        self.host.loaded(self.project)
         self._refresh_cells()
         self._refresh_detail()
         if self.query_one(TabbedContent).active == "tab_catalog":
@@ -282,7 +306,32 @@ class QsqlApp(App):
         body.set_class(event.size.height < self.COMPACT_HEIGHT, "-compact")
 
     def on_unmount(self) -> None:
+        if self._server is not None:
+            self._server.close()
         self.runs.close()
+
+    def _serve(self) -> None:
+        """Serve this notebook's live session on its socket, replacing the
+        last notebook's (``o``): an agent's ``quicksql live`` talks to it."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        if not self.live:
+            return
+        server = LiveServer(self.host, self.path, screen=True)
+        self._server = server
+        self.run_worker(self._bind(server), group="live")
+
+    async def _bind(self, server: LiveServer) -> None:
+        try:
+            why = await server.start()
+        except Exception as exc:  # no Unix sockets here, a refused directory: never fatal
+            why = f"{type(exc).__name__}: {exc}"
+        if why is not None:
+            server.close()
+            if self._server is server:
+                self._server = None
+            self.log_line(f"agent socket off: {why}")
 
     # ---------- state helpers ----------
 
@@ -294,12 +343,41 @@ class QsqlApp(App):
         return self._row_names[min(table.cursor_row, len(self._row_names) - 1)]
 
     def cell_autorun(self, name: str) -> bool:
-        if not self.project:
-            return False
-        from ..watcher import should_rerun
+        return self.host.cell_autorun(name)
 
-        configured = should_rerun(self.project.cells[name], self.project.registries.plugins)
-        return self.autorun_global and configured and name not in self.autorun_off
+    def controls_changed(self) -> None:
+        """The host's controls changed, by a key or by the agent: repaint."""
+        self._refresh_armed_indicator()
+        if self.project:
+            self._refresh_cells()
+
+    def focus_cell(self, cell: str, tab: str | None) -> None:
+        """An agent points at ``cell``: select it, and show ``tab`` if named.
+        Refused while a dialog (the picker, help) has the screen."""
+        if len(self.screen_stack) > 1:
+            raise LiveError(REFUSED, "a dialog is open in the TUI")
+        if cell not in self._row_names:
+            return
+        self.mode = "cells"
+        self.query_one("#cells", DataTable).move_cursor(row=self._row_names.index(cell))
+        if tab:
+            self.query_one(TabbedContent).active = f"tab_{tab}"
+        self._refresh_detail()
+        if tab == "data":
+            self._show_current_data()
+
+    def _compile_failed(self, exc: QsqlError) -> None:
+        try:
+            h = file_hash(self.path)
+        except OSError:
+            return  # gone while we compiled; the next save says more
+        self.host.compile_failed(h, error_dicts(exc))
+
+    def run_compile_failed(self, gen: int, path: Path, exc: QsqlError) -> None:
+        """A run's own compile failed (r/R/an agent's run): it never ran."""
+        self.host.run_dropped(gen, "compile error")
+        if path == self.path:
+            self._compile_failed(exc)
 
     def log_line(self, text: str) -> None:
         self.query_one("#log", RichLog).write(text)
@@ -436,27 +514,23 @@ class QsqlApp(App):
     def action_toggle_autorun(self) -> None:
         name = self.current_cell
         if name:
-            self.autorun_off.symmetric_difference_update({name})
-            self._refresh_cells()
+            self.host.toggle_autorun(name)
 
     def action_toggle_autorun_global(self) -> None:
-        self.autorun_global = not self.autorun_global
-        self._refresh_cells()
+        self.host.toggle_autorun_global()
 
     def action_run_cell(self) -> None:
         if self.current_cell:
             self.runs.start([self.current_cell], closure=True, path=self.path)
 
     def action_run_all(self) -> None:
-        self.armed = True
-        self._refresh_armed_indicator()
+        self.host.set_armed(True, by="keys")
         self.runs.start(None, closure=True, path=self.path)
 
     def action_toggle_armed(self) -> None:
         """Arm/disarm watch reruns *without* running anything — the light-weight
         counterpart to run-all (R), which arms only as a side effect of a full run."""
-        self.armed = not self.armed
-        self._refresh_armed_indicator()
+        self.host.toggle_armed()
         self.log_line(
             "autorun on — saves rerun changed cells (no full run)"
             if self.armed
@@ -465,7 +539,8 @@ class QsqlApp(App):
 
     def _refresh_armed_indicator(self) -> None:
         state = "▶ live" if self.armed else "⏸ paused"
-        self.title = f"quicksql · {self.path.name} · {state}"
+        agent = " · agent" if self.host.clients else ""  # an agent is connected
+        self.title = f"quicksql · {self.path.name} · {state}{agent}"
 
     def action_frequency(self) -> None:
         if self.mode in self.SHEET_MODES and self.sheet_stack:
@@ -823,15 +898,18 @@ class QsqlApp(App):
                 project = self.compile_notebook(self.path)
             except QsqlError as exc:
                 self.log_line(f"compile error: {exc}")
+                self._compile_failed(exc)
                 continue
             self._on_recompiled(project)
 
     def _on_recompiled(self, project: Project) -> list[str]:
         self.log_line(f"recompiled {self.path.name}: {len(project.cells)} cell(s)")
         planned = plan_rerun(project, self.session)
-        # adopt the new project before consulting autorun overlays: a freshly
-        # added cell only exists in the new one (KeyError otherwise)
+        # adopt the new project before consulting autorun switches: a freshly
+        # added cell only exists in the new one. The host settles the save,
+        # unless its rerun (started below) will.
         self.project = project
+        to_run = self.host.recompiled(project, planned)
         self.catalog.cache.invalidate()  # cells/contexts may have changed
         self._refresh_cells()
         self._refresh_detail()
@@ -842,7 +920,6 @@ class QsqlApp(App):
                 if planned else "nothing to rerun"
             )
             return []
-        to_run = [n for n in planned if self.cell_autorun(n)]
         if to_run:
             self.log_line(f"changed -> rerunning: {', '.join(to_run)}")
             self.runs.start(to_run, closure=False, path=self.path, project=project)

@@ -1,0 +1,17 @@
+-- A notebook on DuckDB: a header, a ref() chain, a multi-statement cell, two sinks.
+-- @vars: { min_total: 10 }
+
+-- @cell orders
+SELECT range AS id, range % 3 AS store, (range * 7) % 100 AS total
+FROM range(1000);
+
+-- @cell big_orders
+-- Setup statements run for effect; the last statement is what lands.
+CREATE OR REPLACE TEMP TABLE big AS
+SELECT * FROM {{ ref('orders') }} WHERE total >= {{ var('min_total') }};
+SELECT store, count(*) AS n, sum(total) AS total FROM big GROUP BY 1 ORDER BY 1;
+
+-- @cell by_store
+-- @output: { type: duckdb, path: warehouse.db }
+SELECT store, n, total, round(total / n, 2) AS avg_total
+FROM {{ ref('big_orders') }};

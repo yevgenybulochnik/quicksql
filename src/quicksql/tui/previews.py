@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
-from ..conduit import preview
-from ..config import make_sink
-from ..errors import QsqlError
+from ..conduit import landed_relation, preview
+from ..conduit import read_landed as conduit_read_landed
 from ..models import Preview, RunResult
 
 if TYPE_CHECKING:
@@ -55,20 +54,17 @@ def read_parquet_head(target: str) -> pl.DataFrame:
 
 def read_landed(project: Project, name: str, connect: Callable[[], Any]) -> pl.DataFrame | None:
     """An earlier run's output, read back through the cell's own sink but
-    never its prepare(): previews follow the cursor, and an ATTACH creates a
-    missing database file or connects to a server. So a database sink
-    previews only once a run this session has attached it to the conduit."""
-    import duckdb
-
-    sink = make_sink(project.cells[name].config, project.root, project.registries)
-    if not sink.lands_output:
+    never its prepare() (``conduit.read_landed``): previews follow the cursor,
+    so a database sink previews only once a run this session has attached it."""
+    relation = landed_relation(project, name)
+    if relation is None:
+        sink = project.cells[name].sink_type
         return pl.DataFrame(
-            {"info": [f"{name!r} is effect-only (output: {sink.name}): it lands nothing to preview"]}
+            {"info": [f"{name!r} is effect-only (output: {sink}): it lands nothing to preview"]}
         )
     con = connect()
     try:
-        return frame_of(preview(con, sink.ref_expr(name), PREVIEW_ROWS))
-    except (duckdb.Error, QsqlError):
-        return None  # never landed, or its database isn't attached this session
+        head = conduit_read_landed(con, relation, PREVIEW_ROWS)
+        return None if head is None else frame_of(head)
     finally:
         con.close()

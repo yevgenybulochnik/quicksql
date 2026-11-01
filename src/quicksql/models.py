@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from datetime import date, time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
+
+
+def source_hash(text: str) -> str:
+    """The hash a notebook's text compiles under (``Project.source_hash``).
+    A live session and ``quicksql live wait`` both compute it, one from what it
+    compiled and the other from the file on disk, so it stays this simple."""
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 class Scope(str, Enum):
@@ -87,6 +95,13 @@ class Preview:
         i = self.columns.index(name)
         return [row[i] for row in self.rows]
 
+    def to_dict(self, rows: int) -> dict[str, Any]:
+        """Up to ``rows`` rows as JSON-safe values (see ``_jsonable``)."""
+        return {
+            "columns": list(self.columns),
+            "rows": [[_jsonable(v) for v in row] for row in self.rows[:rows]],
+        }
+
 
 @dataclass
 class RunResult:
@@ -130,10 +145,7 @@ class RunResult:
         }
         if rows > 0:
             head = self.preview
-            out["preview"] = None if head is None else {
-                "columns": list(head.columns),
-                "rows": [[_jsonable(v) for v in row] for row in head.rows[:rows]],
-            }
+            out["preview"] = None if head is None else head.to_dict(rows)
         return out
 
 
@@ -170,6 +182,17 @@ class RunEvent:
     # (closure / missing-temp upstreams included) — consumers can't derive it
     # from their own select list
     cells: tuple[str, ...] | None = None
+
+    def to_dict(self, rows: int = 0) -> dict[str, Any]:
+        """The event as JSON-safe values; ``rows`` adds the result's preview
+        rows, as ``RunResult.to_dict`` does."""
+        return {
+            "kind": self.kind,
+            "cell": self.cell,
+            "detail": self.detail,
+            "cells": list(self.cells) if self.cells is not None else None,
+            "result": self.result.to_dict(rows) if self.result is not None else None,
+        }
 
     def line(self) -> str:
         """One human-readable log line; the TUI log tab and CLI both use this."""

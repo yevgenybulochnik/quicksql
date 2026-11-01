@@ -11,7 +11,7 @@ from .config import make_sink, resolve_cell, resolve_engine, resolve_global, res
 from .errors import CellError, ConfigError, ConfigErrorGroup
 from .executors.base import split_statements
 from .graph import topo_sort
-from .models import RawBlock, RenderedCell, RunResult
+from .models import RawBlock, RenderedCell, RunResult, source_hash
 from .parser import body_hash, parse_text
 from .registry import Registries
 from .render import Producer, render_sql
@@ -45,6 +45,9 @@ class Project:
     # (1-indexed line, message) for non-fatal compile findings, e.g. a
     # directive key repeated within a block (later silently won)
     warnings: list[tuple[int, str]] = field(default_factory=list)
+    # models.source_hash of the text compiled: a live session reports it, so an
+    # agent can tell which save a run or a compile error belongs to
+    source_hash: str = ""
 
     @property
     def edges(self) -> dict[str, list[str]]:
@@ -216,6 +219,7 @@ def compile_text(
         registries=registries,
         overrides=overrides,
         warnings=warnings,
+        source_hash=source_hash(text),
     )
     for plug in plugins.overriding("after_compile"):
         plug.after_compile(project)  # a validation seam: raising rejects the compile

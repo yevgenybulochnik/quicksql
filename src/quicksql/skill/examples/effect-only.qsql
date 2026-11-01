@@ -1,0 +1,14 @@
+-- An effect-only cell runs its statements and lands nothing; a cell that needs
+-- its effect orders itself after it with depends_on (it can't ref() it).
+
+-- @cell batch
+SELECT range AS id FROM range(5);
+
+-- @cell audit
+-- @output: { type: none }
+CREATE TABLE IF NOT EXISTS audit_log (logged_at TIMESTAMP, n BIGINT);
+INSERT INTO audit_log SELECT now(), count(*) FROM {{ ref('batch') }};
+
+-- @cell audit_report
+-- @depends_on: [audit]
+SELECT count(*) AS audits, max(n) AS last_batch FROM audit_log;
