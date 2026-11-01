@@ -47,5 +47,21 @@ services:
     ports:
       - "9050:9050"
 
+  # Catalog stress (stress/catalog/README.md): a second emulator, so a stress
+  # run that crashes it never takes the one pytest uses down with it. Project
+  # `quicksql-stress`, seeded at startup from the generated YAML; only
+  # `--profile stress` starts it, and `stress/catalog/stack.py up` generates
+  # the seed first. Clean up by restarting it, never by deleting datasets: a
+  # large dataset's delete panics the emulator.
+  bigquery-emulator-stress:
+    profiles: ["stress"]
+    image: ghcr.io/goccy/bigquery-emulator:latest
+    command: ["--project=quicksql-stress", "--data-from-yaml=/seed/bq-seed.yaml"]
+    mem_limit: 3g  # the host has no swap: past this the emulator dies, not the box
+    ports:
+      - "9052:9050"
+    volumes:
+      - ./stress/catalog/.seed:/seed:ro
+
 volumes:
   quicksql-pg:
