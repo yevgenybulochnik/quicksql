@@ -138,6 +138,19 @@ def _normalize_arrow(ctx: RunContext, frame: Any) -> Any:
     return frame
 
 
+def engine_input(config: Any, engine: str, shorthand: str = "path") -> dict[str, Any]:
+    """The ``input.<engine>`` directive as a dict, ``{}`` when absent. A bare
+    string is the engine's shorthand for its main key: ``input: {sqlite: x.db}``
+    is ``{path: x.db}``. Read an engine's input through its executor's
+    ``input_spec``, which knows the shorthand; the conduit reads duckdb's here."""
+    spec = (getattr(config, "input", None) or {}).get(engine)
+    if spec is None:
+        return {}
+    if isinstance(spec, dict):
+        return spec
+    return {shorthand: spec}
+
+
 class Executor(ABC):
     name: ClassVar[str] = ""
     # engines that keep a per-context session where same-context cells can
@@ -150,6 +163,10 @@ class Executor(ABC):
     supports_multistatement_materialization: ClassVar[bool] = True
     # the key a bare string in the cell's input means: {sqlite: x.db} is {path: x.db}
     input_shorthand: ClassVar[str] = "path"
+
+    def input_spec(self, config: Any) -> dict[str, Any]:
+        """This engine's ``input.<name>`` directive as a dict, ``{}`` when absent."""
+        return engine_input(config, self.name, self.input_shorthand)
 
     def context_key(self, config: Any) -> str:
         """Cells with equal keys share an execution context (engine + target)."""

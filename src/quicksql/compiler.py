@@ -6,18 +6,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .bootstrap import load_builtins
 from .config import resolve_cell, resolve_engine, resolve_global, resolve_sink_type
 from .conduit import conduit_target
-from .config import input_spec
 from .errors import CellError, ConfigError, ConfigErrorGroup
 from .executors.base import split_statements
 from .graph import topo_sort
 from .models import RawBlock, RenderedCell, RunResult
 from .parser import body_hash, parse_text
-from .registry import EXECUTORS, PLUGINS, SINKS
+from .registry import Registries
 from .render import Producer, render_sql
-from .sinks import make_sink
+from .sinks.base import make_sink
 
 
 def _cell_error(blk: RawBlock, exc: ConfigError) -> CellError:
@@ -39,6 +37,11 @@ class Project:
     global_raw: dict[str, Any]
     cells: dict[str, RenderedCell]
     order: list[str]
+    # the notebook's plugins, executors, sinks and readers: everything that
+    # runs, watches or browses it reads them from here
+    registries: Registries
+    # the run overrides (--set, QUICKSQL_*) the project was compiled with;
+    # quicksql itself doesn't read them back, an after_compile hook may
     overrides: dict[str, Any] = field(default_factory=dict)
     # (1-indexed line, message) for non-fatal compile findings, e.g. a
     # directive key repeated within a block (later silently won)
@@ -59,14 +62,18 @@ def compile_text(
     root: Path | str = ".",
     path: Path | None = None,
     overrides: dict[str, Any] | None = None,
+    *,
+    registries: Registries,
 ) -> Project:
-    load_builtins()
+    """Compile notebook text with the notebook's registries, which the project
+    then carries. Front-ends get them from :mod:`quicksql.bootstrap`."""
     root = Path(root)
+    plugins, executors = registries.plugins, registries.executors
     overrides = overrides or {}
     where = str(path) if path else "<text>"
     blocks = parse_text(text)
     header, cell_blocks = blocks[0], blocks[1:]
-    global_cfg = resolve_global(header.directives, overrides)
+    global_cfg = resolve_global(header.directives, overrides, registries=registries)
 
     # stage 1: resolve every cell's config, reporting all failures together
     configs: dict[str, Any] = {}
@@ -74,18 +81,18 @@ def compile_text(
     for blk in cell_blocks:
         try:
             configs[blk.name] = resolve_cell(
-                header.directives, blk.directives, overrides, name=blk.name
+                header.directives, blk.directives, overrides, registries=registries, name=blk.name
             )
         except ConfigError as exc:
             errors.append(_cell_error(blk, exc))
     if errors:
         raise ConfigErrorGroup(where, errors)
-    engines = {name: resolve_engine(cfg) for name, cfg in configs.items()}
+    engines = {name: resolve_engine(cfg, plugins) for name, cfg in configs.items()}
     contexts = {
-        name: EXECUTORS.get(engines[name]).context_key(cfg) for name, cfg in configs.items()
+        name: executors.get(engines[name]).context_key(cfg) for name, cfg in configs.items()
     }
     producers = {
-        name: Producer(sink=make_sink(cfg, root), context=contexts[name])
+        name: Producer(sink=make_sink(cfg, root, registries), context=contexts[name])
         for name, cfg in configs.items()
     }
 
@@ -101,11 +108,12 @@ def compile_text(
                 cfg,
                 producers,
                 root,
+                registries,
                 context=contexts[blk.name],
-                supports_context_refs=EXECUTORS.get(engine).supports_context_refs,
+                supports_context_refs=executors.get(engine).supports_context_refs,
             )
             deps: list[str] = []
-            for plug in PLUGINS.overriding("collect_edges"):
+            for plug in plugins.overriding("collect_edges"):
                 for dep in plug.collect_edges(blk.name, cfg) or []:
                     if dep not in deps:
                         deps.append(dep)
@@ -133,7 +141,7 @@ def compile_text(
             sql=sql,
             hash=body_hash(blk.sql),
             engine=engine,
-            sink_type=resolve_sink_type(cfg),
+            sink_type=resolve_sink_type(cfg, plugins),
             depends_on=deps,
             extensions=extensions,
             line=blk.line,
@@ -156,8 +164,9 @@ def compile_text(
         # duckdb cells all run on the conduit; a database of the cell's own would
         # be ignored, so name it in the header instead
         if cell.engine == "duckdb" and conduit_target(cell.config, root) != conduit:
-            own = input_spec(cell.config, "duckdb").get("path") or ":memory:"
-            header = input_spec(global_cfg, "duckdb").get("path") or ":memory:"
+            on_conduit = executors.get("duckdb")
+            own = on_conduit.input_spec(cell.config).get("path") or ":memory:"
+            header = on_conduit.input_spec(global_cfg).get("path") or ":memory:"
             semantic.append(
                 CellError(cell.name, cell.line, f"input.duckdb {own!r} isn't the conduit's "
                           f"({header!r}): every duckdb cell runs on the database the "
@@ -167,7 +176,7 @@ def compile_text(
         # back; only ref()/source() edges read data — a plain @depends_on ordering
         # edge is fine.
         for name in [*cell.context_refs, *cell.external_refs]:
-            if not SINKS.get(cells[name].sink_type).lands_output:
+            if not registries.sinks.get(cells[name].sink_type).lands_output:
                 semantic.append(
                     CellError(cell.name, cell.line, f"cannot ref({name!r}): it uses sink "
                               f"{cells[name].sink_type!r} and lands nothing")
@@ -176,7 +185,7 @@ def compile_text(
         # statement; engines with native scripting can't be split to isolate it.
         if (
             cell.reffed_in_context
-            and not EXECUTORS.get(cell.engine).supports_multistatement_materialization
+            and not executors.get(cell.engine).supports_multistatement_materialization
             and len(split_statements(cell.sql, cell.engine)) > 1
         ):
             semantic.append(
@@ -204,14 +213,19 @@ def compile_text(
         global_raw=header.directives,
         cells=cells,
         order=order,
+        registries=registries,
         overrides=overrides,
         warnings=warnings,
     )
-    for plug in PLUGINS.overriding("after_compile"):
+    for plug in plugins.overriding("after_compile"):
         plug.after_compile(project)  # a validation seam: raising rejects the compile
     return project
 
 
-def compile_file(path: Path | str, overrides: dict[str, Any] | None = None) -> Project:
+def compile_file(
+    path: Path | str, overrides: dict[str, Any] | None = None, *, registries: Registries
+) -> Project:
     p = Path(path)
-    return compile_text(p.read_text(), root=p.parent, path=p, overrides=overrides)
+    return compile_text(
+        p.read_text(), root=p.parent, path=p, overrides=overrides, registries=registries
+    )

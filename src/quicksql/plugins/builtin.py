@@ -9,11 +9,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 
+from ..config import registries_of
 from ..errors import ConfigError
 from ..models import Merge, Scope
-from ..registry import EXECUTORS, SINKS, plugin
+from ..registry import plugin
 from .base import Plugin, qfield
 
 _MISSING = object()
@@ -28,11 +29,11 @@ class Engine(Plugin):
 
         @field_validator("engine")
         @classmethod
-        def _registered(cls, v: str | None) -> str | None:
-            if v is not None and v not in EXECUTORS:
-                raise ValueError(
-                    f"engine {v!r} is not a registered executor (have: {', '.join(EXECUTORS.names())})"
-                )
+        def _registered(cls, v: str | None, info: ValidationInfo) -> str | None:
+            registries = registries_of(info)
+            if v is not None and registries is not None and v not in registries.executors:
+                have = ", ".join(registries.executors.names())
+                raise ValueError(f"engine {v!r} is not a registered executor (have: {have})")
             return v
 
     def resolve_engine(self, config: Any) -> str | None:
@@ -88,7 +89,7 @@ class Sources(Plugin):
                 opts = {**spec, **opts}
             else:
                 path, type_ = name_or_path, opts.pop("type", None)
-            reader = reader_for(path, type_)
+            reader = reader_for(path, type_, rctx.registries.readers)
             rctx.require_extensions(reader.requires)
             rctx.mark_source_used()
             return reader.expr(rctx.resolve_path(path), **opts)
@@ -123,12 +124,12 @@ class Output(Plugin):
 
         @field_validator("output")
         @classmethod
-        def _sink_registered(cls, v: dict[str, Any]) -> dict[str, Any]:
+        def _sink_registered(cls, v: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+            registries = registries_of(info)
             sink_type = v.get("type", "parquet")
-            if sink_type not in SINKS:
-                raise ValueError(
-                    f"output.type {sink_type!r} is not a registered sink (have: {', '.join(SINKS.names())})"
-                )
+            if registries is not None and sink_type not in registries.sinks:
+                have = ", ".join(registries.sinks.names())
+                raise ValueError(f"output.type {sink_type!r} is not a registered sink (have: {have})")
             return v
 
 
@@ -229,13 +230,14 @@ class Catalog(Plugin):
         # in the merged model's MRO
         @field_validator("catalog", mode="before")
         @classmethod
-        def _catalog_targets(cls, v: dict[str, Any]) -> dict[str, Any]:
+        def _catalog_targets(cls, v: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+            registries = registries_of(info)
             out: dict[str, Any] = {}
             for engine, targets in (v or {}).items():
-                if engine not in EXECUTORS:
+                if registries is not None and engine not in registries.executors:
                     raise ValueError(
                         f"catalog engine {engine!r} is not a registered executor"
-                        f" (have: {', '.join(EXECUTORS.names())})"
+                        f" (have: {', '.join(registries.executors.names())})"
                     )
                 out[engine] = [targets] if isinstance(targets, str) else list(targets)
             return out

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RunContext
 from ..registry import executor
@@ -93,7 +92,7 @@ class BigQueryExecutor(Executor):
         return [strip_trailing_semicolon(sql)]
 
     def context_key(self, config: Any) -> str:
-        return f"bigquery:{input_spec(config, 'bigquery').get('project')}"
+        return f"bigquery:{self.input_spec(config).get('project')}"
 
     def make_client(self, spec: dict[str, Any]) -> Any:
         """Split out so tests can substitute a fake client."""
@@ -128,5 +127,5 @@ class BigQueryExecutor(Executor):
         return {"retry": None, "job_retry": None}
 
     def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
-        spec = input_spec(config, "bigquery")
+        spec = self.input_spec(config)
         return BigQuerySession(self.make_client(spec), self._query_opts(spec))

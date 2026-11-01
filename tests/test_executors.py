@@ -5,27 +5,35 @@ import duckdb
 import polars as pl
 import pytest
 
-from quicksql.config import resolve_cell, resolve_engine, resolve_sink_type
+from quicksql import config
+from quicksql.bootstrap import builtin_registries
 from quicksql.errors import ExecutorError
 from quicksql.executors.bigquery_exec import BigQueryExecutor, BigQuerySession
 from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.models import RenderedCell, RunContext
-from quicksql.registry import EXECUTORS
 from quicksql.runner import execute_cell
+
+BUILTINS = builtin_registries()  # read-only here
+EXECUTORS = BUILTINS.executors
+
+
+def resolve_cell(global_raw, cell_raw):
+    return config.resolve_cell(global_raw, cell_raw, registries=BUILTINS)
 
 
 def _cell(name: str, sql: str, cell_raw: dict | None = None) -> RenderedCell:
     cfg = resolve_cell({}, cell_raw or {})
     return RenderedCell(
         name=name, config=cfg, sql_raw=sql, sql=sql, hash="",
-        engine=resolve_engine(cfg), sink_type=resolve_sink_type(cfg),
+        engine=config.resolve_engine(cfg, BUILTINS.plugins),
+        sink_type=config.resolve_sink_type(cfg, BUILTINS.plugins),
     )
 
 
 @pytest.fixture
 def ctx(tmp_path):
     conn = duckdb.connect()
-    yield RunContext(conn=conn, root=tmp_path)
+    yield RunContext(conn=conn, root=tmp_path, registries=BUILTINS)
     conn.close()
 
 
@@ -145,7 +153,7 @@ def test_sqlite_executor_bad_sql_raises(ctx) -> None:
 def test_sqlite_failure_message_does_not_repeat_the_cell_name(tmp_path) -> None:
     """The CLI prints "FAIL a: <message>": the engine prefix is news, the
     cell name isn't."""
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     project = compile_text(
         "-- @cell a\n-- @input: {sqlite: \":memory:\"}\nSELECT * FROM nope\n", root=tmp_path
@@ -197,7 +205,7 @@ def test_duckdb_effect_only_runs_all_statements_lands_nothing(ctx) -> None:
 def test_bigquery_same_context_cells_share_a_session(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     calls: list[tuple[str, object]] = []
     events: list[str] = []  # submit/wait interleaving: sessions forbid concurrency
@@ -254,7 +262,7 @@ def test_bigquery_reffed_cte_parent_materializes_unwrapped(tmp_path, monkeypatch
     error: Expected ")" but got end of statement)."""
     import sqlglot
 
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     sqls: list[str] = []
 
@@ -315,7 +323,7 @@ def test_bigquery_emulator_endpoint_disables_retries(tmp_path, monkeypatch) -> N
     emulator blocks the same way via the API retry. Emulator endpoints must
     fail fast: retry=None and job_retry=None on every query. Specs without
     an endpoint (real BigQuery) keep the client defaults."""
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     captured: list[dict] = []
 
@@ -367,7 +375,7 @@ def test_bigquery_make_client_honors_emulator_endpoint() -> None:
 
 @pytest.mark.bigquery
 def test_bigquery_cell_runs_against_the_emulator(tmp_path, bq_emulator) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     project = compile_text(
         f"/*@ input: {{ bigquery: {{ project: quicksql-test, endpoint: {bq_emulator} }} }} */\n"
@@ -382,7 +390,7 @@ def test_bigquery_cell_runs_against_the_emulator(tmp_path, bq_emulator) -> None:
 
 @pytest.mark.bigquery
 def test_bigquery_multistatement_script_lands_terminal(tmp_path, bq_emulator) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     # bigquery runs the whole script server-side; the terminal SELECT's rows land
     project = compile_text(
@@ -516,7 +524,7 @@ def test_postgres_executor_wraps_driver_errors(ctx, fake_pg) -> None:
 
 
 def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     project = compile_text(
         "/*@ input: { postgres: { dsn: 'postgresql://x' } } */\n"
@@ -542,7 +550,7 @@ def test_postgres_same_context_cells_share_a_connection(tmp_path, fake_pg) -> No
 
 
 def test_a_dead_postgres_session_is_reopened_and_its_temps_rematerialized(tmp_path, fake_pg) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
     from quicksql.runner import RunSession, run_project
 
     project = compile_text(
@@ -622,7 +630,7 @@ BQ_PARENT_CHILD = (
 
 
 def test_bigquery_reuses_one_client_per_context(tmp_path, monkeypatch) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     jobs, clients = _expiring_bigquery(monkeypatch, expired=set())
     project = compile_text(
@@ -637,7 +645,7 @@ def test_bigquery_reuses_one_client_per_context(tmp_path, monkeypatch) -> None:
 def test_an_expired_bigquery_session_is_reopened_rematerialized_and_retried(
     tmp_path, monkeypatch
 ) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
     from quicksql.runner import RunSession, run_project
 
     expired: set = set()
@@ -660,7 +668,7 @@ def test_an_expired_bigquery_session_is_reopened_rematerialized_and_retried(
 
 
 def test_a_bigquery_retry_that_finds_its_session_gone_again_fails(tmp_path, monkeypatch) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
     from quicksql.runner import RunSession, run_project
 
     expired = {f"sess-{n}" for n in range(2, 100)}  # every session after the first
@@ -680,7 +688,7 @@ def test_a_bigquery_retry_that_finds_its_session_gone_again_fails(tmp_path, monk
 def test_after_a_lost_session_every_later_cell_gets_the_temps_it_reads(tmp_path, monkeypatch) -> None:
     """Losing the session loses every temp in it, not just the ones the retried
     cell reads: a later cell re-creates its own before it runs."""
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
     from quicksql.runner import RunSession, run_project
 
     expired: set = set()

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from quicksql.compiler import compile_file, compile_text
+from quicksql.bootstrap import compile_file, compile_text
 from quicksql.runner import RunSession, run_project
 from quicksql.state import Landed, current_fingerprints, read_state, statuses
 
@@ -177,7 +177,7 @@ def test_a_fingerprint_is_the_same_in_every_process(tmp_path) -> None:
 
     script = textwrap.dedent(f"""
         from pydantic import BaseModel
-        from quicksql.compiler import compile_text
+        from quicksql.bootstrap import builtin_registries, compile_text
         from quicksql.plugins.base import Plugin, qfield
         from quicksql.registry import plugin
         from quicksql.state import current_fingerprints
@@ -187,8 +187,10 @@ def test_a_fingerprint_is_the_same_in_every_process(tmp_path) -> None:
             class Config(BaseModel):
                 labels: set[str] = qfield(set())
 
+        registries = builtin_registries().add(Labels)
         text = "-- @labels: [alpha, beta, gamma, delta, epsilon]\\n-- @cell a\\nSELECT 1;"
-        print(current_fingerprints(compile_text(text, root={str(tmp_path)!r}), {{}})["a"])
+        project = compile_text(text, root={str(tmp_path)!r}, registries=registries)
+        print(current_fingerprints(project, {{}})["a"])
     """)
     prints = {
         subprocess.run(

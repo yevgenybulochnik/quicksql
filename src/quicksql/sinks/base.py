@@ -10,9 +10,12 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..models import RenderedCell
+
+if TYPE_CHECKING:
+    from ..registry import Registries
 
 
 class Sink(ABC):
@@ -41,15 +44,14 @@ def path_alias(prefix: str, key: str) -> str:
     return f"{prefix}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
-def make_sink(config: Any, root: Path) -> Sink:
-    """Build a cell's sink: output config amended by sink_config hooks
-    (e.g. the Schema plugin injecting its directive)."""
+def make_sink(config: Any, root: Path, registries: Registries) -> Sink:
+    """Build a cell's sink from the notebook's registries: output config
+    amended by sink_config hooks (e.g. the Schema plugin injecting its directive)."""
     from ..config import resolve_sink_type
-    from ..registry import PLUGINS, SINKS
 
     cfg = dict(config.output or {})
-    for plug in PLUGINS.overriding("sink_config"):
+    for plug in registries.plugins.overriding("sink_config"):
         amended = plug.sink_config(config, cfg)
         if amended is not None:
             cfg = amended
-    return SINKS.get(resolve_sink_type(config))(cfg, root)
+    return registries.sinks.get(resolve_sink_type(config, registries.plugins))(cfg, root)

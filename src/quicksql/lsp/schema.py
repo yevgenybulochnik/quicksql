@@ -24,7 +24,6 @@ import polars as pl
 from dataclasses import dataclass
 
 from .. import catalog
-from ..config import input_spec
 from ..sources import reader_for
 
 Column = tuple[str, str]  # (name, type)
@@ -67,7 +66,9 @@ def ref_columns(project: Any, cell_name: str) -> list[Column]:
     if cell is None:
         return []
     try:
-        frame = catalog.sink_output_node(cell.name, cell.config, project.root).load()
+        frame = catalog.sink_output_node(
+            cell.name, cell.config, project.root, project.registries
+        ).load()
     except Exception:
         return []  # not landed / unreadable: best effort, no columns
     return _cols(frame)
@@ -79,7 +80,7 @@ def source_columns(project: Any, spec: str | None) -> list[Column]:
         return []
     path = spec if os.path.isabs(spec) else str(project.root / spec)
     try:
-        reader = reader_for(path)
+        reader = reader_for(path, None, project.registries.readers)
         con = duckdb.connect()
         try:
             from ..runner import _load_extension
@@ -101,7 +102,8 @@ def _table_frame(project: Any, cell: Any, name: str) -> pl.DataFrame | None:
     builder = catalog._CONTEXT_BUILDERS.get(engine)
     if builder is None:
         return None
-    root = builder(cell.config, project.root)
+    registries = project.registries
+    root = builder(cell.config, project.root, registries)
     if root is None or root.child is None:
         return None
     parts = name.replace('"', "").split(".")
@@ -117,11 +119,11 @@ def _table_frame(project: Any, cell: Any, name: str) -> pl.DataFrame | None:
         elif engine == "sqlite":
             leaf = root.child({"table": table})
         elif engine == "bigquery":
-            spec = input_spec(cell.config, "bigquery")
+            spec = registries.executors.get("bigquery").input_spec(cell.config)
             if len(parts) >= 3:
                 # project.dataset.table — introspect that project, not the
                 # spec's default (endpoint etc. carry over)
-                root = catalog.bigquery_context_node({**spec, "project": parts[-3]})
+                root = catalog.bigquery_context_node({**spec, "project": parts[-3]}, registries)
             dataset = parts[-2] if len(parts) >= 2 else spec.get("dataset")
             mid = root.child({"dataset": dataset}) if dataset else None
             leaf = mid.child({"table": table}) if mid and mid.child else None
@@ -138,7 +140,7 @@ def table_columns(project: Any, cell: Any, name: str) -> list[Column]:
 
 
 def relation_names(
-    cell: Any, parts: list[str], cache: SchemaCache | None = None
+    cell: Any, parts: list[str], registries: Any, cache: SchemaCache | None = None
 ) -> list[Column]:
     """Completion candidates for the next segment of a partial dotted relation
     in a bigquery cell (v1: other engines return []): with no typed segments,
@@ -147,15 +149,15 @@ def relation_names(
     (project.dataset.), that project's dataset's tables."""
     if cell.engine != "bigquery" or len(parts) > 2:
         return []
-    spec = input_spec(cell.config, "bigquery")
+    spec = registries.executors.get("bigquery").input_spec(cell.config)
     key = ("relations", getattr(cell, "context", ""), tuple(parts))
 
     def datasets(s: dict) -> list[Column]:
-        frame = catalog.bigquery_context_node(s).load()
+        frame = catalog.bigquery_context_node(s, registries).load()
         return [(d, "dataset") for d in frame["dataset"].to_list()]
 
     def tables(s: dict, ds: str) -> list[Column]:
-        frame = catalog.bigquery_context_node(s).child({"dataset": ds}).load()
+        frame = catalog.bigquery_context_node(s, registries).child({"dataset": ds}).load()
         return [
             (row["table"], row["type"] or "table") for row in frame.iter_rows(named=True)
         ]

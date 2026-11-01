@@ -6,7 +6,7 @@ from textual._compositor import CompositorUpdate
 from textual.geometry import Region
 from textual.widgets import DataTable, TabbedContent
 
-from quicksql.compiler import compile_file
+from quicksql.bootstrap import compile_file
 from quicksql.scaffold import write_scaffold
 from quicksql.tui import QsqlApp
 
@@ -1901,7 +1901,7 @@ async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypa
         assert app.running == set()
 
 
-async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
+async def test_mid_run_cells_retire_one_at_a_time(tmp_path, registries) -> None:
     """End-to-end through the real worker: while the second cell is executing,
     the first already shows done — not the old wholesale flip at run end."""
     import threading
@@ -1929,6 +1929,7 @@ async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
         def open_session(self, config, ctx):
             return GatedSession()
 
+    registries.add(GatedExecutor)
     path = tmp_path / "base.qsql"
     path.write_text(
         "-- @engine: gated\n\n"
@@ -1936,7 +1937,7 @@ async def test_mid_run_cells_retire_one_at_a_time(tmp_path) -> None:
         "-- @cell second\nSELECT 2;\n\n"
         "-- @cell third\nSELECT 3;\n"
     )
-    app = QsqlApp(path=path, watch=False)
+    app = QsqlApp(path=path, watch=False, registries=registries)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         await pilot.press("R")
@@ -2067,9 +2068,9 @@ async def test_idle_notebook_switch_closes_the_old_session(tmp_path) -> None:
         assert first.conn is None  # no run uses it: closed right away
 
 
-def _gated_engine():
-    """Register a `gated` engine whose cells block mid-execute until `gate`
-    is set; `reached` fires once one is blocked there."""
+def _gated_engine(registries):
+    """Add a `gated` engine to ``registries`` whose cells block mid-execute
+    until `gate` is set; `reached` fires once one is blocked there."""
     import threading
 
     from quicksql.executors.base import EngineSession, Executor
@@ -2092,18 +2093,21 @@ def _gated_engine():
         def open_session(self, config, ctx):
             return GatedSession()
 
+    registries.add(GatedExecutor)
     return gate, reached
 
 
-async def test_switch_mid_run_closes_the_old_session_only_after_the_run(tmp_path) -> None:
+async def test_switch_mid_run_closes_the_old_session_only_after_the_run(
+    tmp_path, registries
+) -> None:
     """Closing a DuckDB connection under another thread's query risks a
     crash: the run that still uses the old session closes it on its way out."""
-    gate, reached = _gated_engine()
+    gate, reached = _gated_engine(registries)
     one = tmp_path / "one.qsql"
     one.write_text("-- @engine: gated\n\n-- @cell a\nSELECT 1;\n")
     two = tmp_path / "two.qsql"
     two.write_text("-- @cell a\nSELECT 2 AS x;\n")
-    app = QsqlApp(path=one, watch=False)
+    app = QsqlApp(path=one, watch=False, registries=registries)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("R")
@@ -2138,11 +2142,11 @@ async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
     reached = threading.Event()
     real_compile = tui_mod.compile_file
 
-    def compile_gated(path, overrides=None):
+    def compile_gated(path, *args, **kwargs):
         if path == one and threading.current_thread() is not threading.main_thread():
             reached.set()  # the run worker, compiling notebook one
             assert gate.wait(timeout=10)
-        return real_compile(path, overrides)
+        return real_compile(path, *args, **kwargs)
 
     monkeypatch.setattr(tui_mod, "compile_file", compile_gated)
     app = QsqlApp(path=one, watch=False)

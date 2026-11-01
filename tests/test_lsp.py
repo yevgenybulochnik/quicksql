@@ -9,7 +9,7 @@ import pytest
 # the lsp extra (sqlglot + pygls) is optional; skip this whole module without it
 pytest.importorskip("sqlglot", reason="install the 'lsp' extra to run LSP tests")
 
-from quicksql.compiler import compile_file
+from quicksql.bootstrap import compile_file
 from quicksql.lsp.mask import Opaque, Ref, Source, mask_jinja
 
 
@@ -186,18 +186,19 @@ def test_diagnostics_flag_a_template_escaping_the_sandbox_without_running_it(
     assert not marker.exists()
 
 
-def test_diagnostics_flag_a_render_hook_that_raises_instead_of_crashing(tmp_path) -> None:
+def test_diagnostics_flag_a_render_hook_that_raises_instead_of_crashing(
+    tmp_path, add_plugin, registries
+) -> None:
     from quicksql.lsp.analysis import Analyzer
     from quicksql.plugins.base import Plugin
-    from quicksql.registry import plugin
 
-    @plugin
+    @add_plugin
     class Boom(Plugin):
         def after_render(self, rctx, sql):
             raise KeyError("x")
 
     text = "-- @engine: duckdb\n-- @cell a\nSELECT 1 AS x;\n"
-    diags = Analyzer().diagnostics(text, tmp_path)
+    diags = Analyzer(registries=registries).diagnostics(text, tmp_path)
     assert [(d.line, d.message) for d in diags] == [
         (1, "template error: plugin 'boom' after_render: KeyError: 'x'")
     ]

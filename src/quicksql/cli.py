@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import importlib
-import importlib.util
 import json
 import sys
 import textwrap
@@ -15,8 +12,8 @@ from typing import Any, Optional
 
 import typer
 
-from .bootstrap import load_builtins
-from .compiler import Project, compile_file
+from .bootstrap import compile_file
+from .compiler import Project
 from .errors import ConfigErrorGroup, QsqlError
 from .overrides import gather_overrides
 from .runner import _message, run_project
@@ -62,31 +59,10 @@ def _init(file: Path) -> None:
     typer.echo(f"scaffolded {file} — try: quicksql run {file}")
 
 
-def _load_plugin_module(spec: str) -> None:
-    if spec.endswith(".py"):
-        path = Path(spec).resolve()
-        name = f"qsql_user_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:8]}"
-        if name in sys.modules:
-            return
-        mod_spec = importlib.util.spec_from_file_location(name, path)
-        if mod_spec is None or mod_spec.loader is None:
-            raise QsqlError(f"cannot load plugin module {spec!r}")
-        module = importlib.util.module_from_spec(mod_spec)
-        sys.modules[name] = module
-        mod_spec.loader.exec_module(module)
-    else:
-        importlib.import_module(spec)
-
-
 def _compile(file: Path, sets: list[str] | None, plugins: list[str] | None) -> Project:
-    """Load plugins and compile, warnings to stderr; a QsqlError propagates."""
-    load_builtins()
-    rc = file.parent / "quicksqlrc.py"
-    if rc.exists():
-        _load_plugin_module(str(rc))
-    for spec in plugins or []:
-        _load_plugin_module(spec)
-    project = compile_file(file, overrides=gather_overrides(list(sets or [])))
+    """Compile with the notebook's own registries (the builtins, its
+    quicksqlrc.py, --plugins), warnings to stderr; a QsqlError propagates."""
+    project = compile_file(file, gather_overrides(list(sets or [])), plugins or ())
     for line, message in project.warnings:
         typer.secho(f"warning: {message}", fg="yellow", err=True)
     return project
@@ -269,20 +245,19 @@ def explain(
     plugins: Optional[list[str]] = PLUGINS_OPT,
 ) -> None:
     """Show the effective plugin chain and hook participants for this project."""
-    from .registry import PLUGINS
-
     project = _project(file, set_, plugins)
+    registry = project.registries.plugins
 
     def names(plugs: list) -> str:
         return " → ".join(f"{p.name}({p.priority})" for p in plugs) or "(none)"
 
-    typer.echo(f"run chain:      {names(PLUGINS.chain())} → [execute on engine, land via sink]")
+    typer.echo(f"run chain:      {names(registry.chain())} → [execute on engine, land via sink]")
     for hook in (
         "render_context", "after_render", "resolve_engine", "resolve_sink",
         "collect_edges", "sink_config", "should_rerun",
         "after_compile", "before_run", "after_run",
     ):
-        typer.echo(f"{hook + ':':<16}{names(PLUGINS.overriding(hook))}")
+        typer.echo(f"{hook + ':':<16}{names(registry.overriding(hook))}")
     typer.echo("cells:")
     for name in project.order:
         cell = project.cells[name]
@@ -306,7 +281,7 @@ def watch(
     try:
         for project, event in watch_events(
             file, overrides=gather_overrides(list(set_ or [])), on_event=_live_event,
-            project=project,
+            project=project, plugins=plugins or (),
         ):
             _watch_cycle(project, event)
     except KeyboardInterrupt:
@@ -368,17 +343,12 @@ def tui(
 ) -> None:
     """Open the interactive TUI (VisiData-style keys, reflect-only)."""
     if file.exists():
-        _project(file, set_, plugins)  # load plugins + fail fast on compile errors
-    else:  # the TUI opens its notebook picker; plugins still need loading
-        load_builtins()
-        rc = file.parent / "quicksqlrc.py"
-        if rc.exists():
-            _load_plugin_module(str(rc))
-        for spec in plugins or []:
-            _load_plugin_module(spec)
+        _project(file, set_, plugins)  # fail fast on compile errors
     from .tui import QsqlApp
 
-    QsqlApp(path=file, overrides=gather_overrides(list(set_ or []))).run()
+    QsqlApp(
+        path=file, overrides=gather_overrides(list(set_ or [])), plugins=plugins or ()
+    ).run()
 
 
 @app.command()

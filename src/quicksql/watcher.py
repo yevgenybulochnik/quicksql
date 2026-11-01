@@ -9,12 +9,14 @@ tags doesn't. Cells with autorun:false are skipped.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
-from .compiler import Project, compile_file
+from .bootstrap import compile_file
+from .compiler import Project
 from .errors import QsqlError
 from .graph import downstream
 from .models import RunEvent, RunResult
+from .registry import PluginRegistry
 from .runner import RunSession, run_project
 from .state import current_fingerprints
 
@@ -30,11 +32,9 @@ def touches(changes: set[tuple[Any, str]], path: Path) -> bool:
     return any(str(Path(changed).resolve()) == target for _, changed in changes)
 
 
-def should_rerun(cell: Any) -> bool:
+def should_rerun(cell: Any, plugins: PluginRegistry) -> bool:
     """First-result decision (the Autorun plugin answers); default: rerun."""
-    from .registry import PLUGINS
-
-    answer = PLUGINS.first_result("should_rerun", cell)
+    answer = plugins.first_result("should_rerun", cell)
     return True if answer is None else bool(answer)
 
 
@@ -48,7 +48,7 @@ def plan_rerun(project: Project, session: RunSession) -> list[str]:
     changed = {name for name, fp in current.items() if session.seen.get(name) != fp}
     return downstream(
         list(project.cells), project.edges, changed,
-        through=lambda n: should_rerun(project.cells[n]),
+        through=lambda n: should_rerun(project.cells[n], project.registries.plugins),
     )
 
 
@@ -57,8 +57,11 @@ def run_changed(
     session: RunSession,
     overrides: dict[str, Any] | None = None,
     on_event: Callable[[RunEvent], None] | None = None,
+    plugins: Sequence[str] = (),
 ) -> tuple[Project, list[RunResult]]:
-    project = compile_file(path, overrides)
+    """Recompile with the notebook's own registries (its rc reloads if edited)
+    and rerun what changed."""
+    project = compile_file(path, overrides, plugins)
     to_run = plan_rerun(project, session)
     results = (
         run_project(project, select=to_run, closure=False, session=session, on_event=on_event)
@@ -74,6 +77,7 @@ def watch_events(
     stop_event: Any = None,
     on_event: Callable[[RunEvent], None] | None = None,
     project: Project | None = None,
+    plugins: Sequence[str] = (),
 ) -> Iterator[tuple[Project | None, list[RunResult] | QsqlError]]:
     """Initial full autorun pass, then one event per file save.
 
@@ -87,8 +91,10 @@ def watch_events(
     path = Path(path)
     session = RunSession()  # one conduit for the whole watch, not per rerun
     try:
-        project = project or compile_file(path, overrides)
-        autorun = [n for n in project.order if should_rerun(project.cells[n])]
+        project = project or compile_file(path, overrides, plugins)
+        autorun = [
+            n for n in project.order if should_rerun(project.cells[n], project.registries.plugins)
+        ]
         results = (
             run_project(project, select=autorun, closure=False, session=session, on_event=on_event)
             if autorun
@@ -100,7 +106,9 @@ def watch_events(
             if not touches(changes, path):
                 continue
             try:
-                project, results = run_changed(path, session, overrides, on_event=on_event)
+                project, results = run_changed(
+                    path, session, overrides, on_event=on_event, plugins=plugins
+                )
             except QsqlError as exc:
                 yield None, exc
                 continue

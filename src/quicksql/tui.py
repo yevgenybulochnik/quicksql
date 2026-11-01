@@ -31,7 +31,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import polars as pl
 import yaml
@@ -47,7 +47,9 @@ from textual.widgets import DataTable, Footer, Header, Input, OptionList, RichLo
 from textual.widgets.option_list import Option
 
 from .catalog import CatalogCache, CatalogNode, project_root_node
-from .compiler import Project, compile_file
+from .bootstrap import compile_file
+from .compiler import Project
+from .registry import Registries
 from .errors import QsqlError
 from .models import RunEvent, RunResult
 from .runner import RunSession, run_project
@@ -286,10 +288,17 @@ class QsqlApp(App):
         overrides: dict[str, Any] | None = None,
         watch: bool = True,
         auto_run: bool = False,
+        plugins: Sequence[str] = (),
+        registries: Registries | None = None,
     ) -> None:
         super().__init__()
         self.path = Path(path)
         self.overrides = overrides or {}
+        # --plugins modules; each compile adds them to the notebook's own
+        # registries, after its quicksqlrc.py (reloaded when edited)
+        self.plugins = tuple(plugins)
+        # given: every compile uses these instead (an embedding app, a test)
+        self.registries = registries
         self.watch = watch
         self.auto_run = auto_run
         self.armed = False  # watch reruns stay dormant until the first run-all
@@ -434,6 +443,11 @@ class QsqlApp(App):
         else:
             self._show_picker(startup=True)
 
+    def _compile(self, path: Path) -> Project:
+        """Compile with the notebook's own registries: the builtins, the
+        quicksqlrc.py next to it (reloaded when edited) and --plugins."""
+        return compile_file(path, self.overrides, self.plugins, registries=self.registries)
+
     def _load_notebook(self, path: Path | str) -> None:
         """Open a notebook (fresh state), arming and watching per-notebook."""
         self.path = Path(path)
@@ -457,7 +471,7 @@ class QsqlApp(App):
         self._refresh_armed_indicator()
         self.project = None
         try:
-            self.project = compile_file(self.path, self.overrides)
+            self.project = self._compile(self.path)
         except QsqlError as exc:
             self.log_line(f"compile error: {exc}")
             return
@@ -561,7 +575,7 @@ class QsqlApp(App):
             return False
         from .watcher import should_rerun
 
-        configured = should_rerun(self.project.cells[name])
+        configured = should_rerun(self.project.cells[name], self.project.registries.plugins)
         return self.autorun_global and configured and name not in self.autorun_off
 
     def log_line(self, text: str) -> None:
@@ -812,7 +826,8 @@ class QsqlApp(App):
         from .runner import _preview
         from .sinks import make_sink
 
-        sink = make_sink(self.project.cells[name].config, self.project.root)
+        project = self.project
+        sink = make_sink(project.cells[name].config, project.root, project.registries)
         if not sink.lands_output:
             return pl.DataFrame(
                 {"info": [f"{name!r} is effect-only (output: {sink.name}): it lands nothing to preview"]}
@@ -1344,7 +1359,7 @@ class QsqlApp(App):
         with self._session_in_use(session):
             if project is None:
                 try:
-                    project = compile_file(path, self.overrides)
+                    project = self._compile(path)
                 except QsqlError as exc:
                     self.call_from_thread(self.log_line, f"compile error: {exc}")
                     return
@@ -1415,7 +1430,7 @@ class QsqlApp(App):
             if not touches(changes, self.path):
                 continue
             try:
-                project = compile_file(self.path, self.overrides)
+                project = self._compile(self.path)
             except QsqlError as exc:
                 self.log_line(f"compile error: {exc}")
                 continue

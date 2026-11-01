@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 import duckdb
 import polars as pl
 
-from .config import input_spec
 
 if TYPE_CHECKING:
     from .compiler import Project
+    from .registry import Registries
 
 FIELD_PATH_SCHEMA = {
     "column": pl.Utf8,
@@ -137,7 +137,11 @@ def _info_node(title: str, message: str) -> CatalogNode:
 
 
 def sink_output_node(
-    cell_name: str, config: Any, root: Path, connect: Callable[[], Any] | None = None
+    cell_name: str,
+    config: Any,
+    root: Path,
+    registries: Registries,
+    connect: Callable[[], Any] | None = None,
 ) -> CatalogNode:
     """Leaf: field paths of a cell's landed sink, read back via its ref_expr.
 
@@ -150,7 +154,7 @@ def sink_output_node(
         from .runner import _load_extension
         from .sinks import make_sink
 
-        sink = make_sink(config, root)
+        sink = make_sink(config, root, registries)
         con = connect() if connect is not None else duckdb.connect()
         try:
             for ext in sink.requires:
@@ -164,16 +168,16 @@ def sink_output_node(
     return CatalogNode(title=f"schema({cell_name})", load=load)
 
 
-def bigquery_context_node(spec: dict[str, Any], dataset: str | None = None) -> CatalogNode:
+def bigquery_context_node(
+    spec: dict[str, Any], registries: Registries, dataset: str | None = None
+) -> CatalogNode:
     """datasets -> tables -> field paths, on one client memoized per chain.
     With ``dataset``, the chain starts at that dataset's tables instead."""
     holder: dict[str, Any] = {}
 
     def client() -> Any:
         if "client" not in holder:
-            from .registry import EXECUTORS
-
-            holder["client"] = EXECUTORS.get("bigquery").make_client(spec)
+            holder["client"] = registries.executors.get("bigquery").make_client(spec)
         return holder["client"]
 
     title = f"bigquery:{spec.get('project')}"
@@ -212,13 +216,11 @@ def bigquery_context_node(spec: dict[str, Any], dataset: str | None = None) -> C
     return CatalogNode(title=title, load=load, child=child)
 
 
-def postgres_context_node(dsn: str) -> CatalogNode:
+def postgres_context_node(dsn: str, registries: Registries) -> CatalogNode:
     """schemas -> tables -> flat columns, a throwaway connection per load."""
 
     def query(sql: str, params: tuple | None = None) -> list[tuple]:
-        from .registry import EXECUTORS
-
-        con = EXECUTORS.get("postgres").make_connection(dsn)
+        con = registries.executors.get("postgres").make_connection(dsn)
         try:
             return con.execute(sql, params).fetchall()
         finally:
@@ -364,50 +366,58 @@ def duckdb_context_node(spec: Any, root: Path) -> CatalogNode:
     return CatalogNode(title=f"duckdb:{path}", load=load, child=child)
 
 
-def _postgres_from_config(config: Any) -> CatalogNode | None:
+def _postgres_from_config(config: Any, registries: Registries) -> CatalogNode | None:
     from .executors.postgres_exec import _dsn
 
     dsn = _dsn(config)
-    return postgres_context_node(dsn) if dsn else None
+    return postgres_context_node(dsn, registries) if dsn else None
 
 
-_CONTEXT_BUILDERS: dict[str, Callable[[Any, Path], CatalogNode | None]] = {
-    "bigquery": lambda config, root: bigquery_context_node(input_spec(config, "bigquery")),
-    "postgres": lambda config, root: _postgres_from_config(config),
-    "sqlite": lambda config, root: sqlite_context_node(input_spec(config, "sqlite"), root),
-    "duckdb": lambda config, root: duckdb_context_node(input_spec(config, "duckdb"), root),
+def _input(registries: Registries, engine: str, config: Any) -> dict[str, Any]:
+    return registries.executors.get(engine).input_spec(config)
+
+
+# a cell's context: engine -> (config, root, registries) -> its node
+_CONTEXT_BUILDERS: dict[str, Callable[[Any, Path, Registries], CatalogNode | None]] = {
+    "bigquery": lambda config, root, regs: bigquery_context_node(
+        _input(regs, "bigquery", config), regs
+    ),
+    "postgres": lambda config, root, regs: _postgres_from_config(config, regs),
+    "sqlite": lambda config, root, regs: sqlite_context_node(_input(regs, "sqlite", config), root),
+    "duckdb": lambda config, root, regs: duckdb_context_node(_input(regs, "duckdb", config), root),
 }
 
 
-def _bigquery_target(target: str) -> tuple[str, CatalogNode]:
+def _bigquery_target(target: str, registries: Registries) -> tuple[str, CatalogNode]:
     """A @catalog bigquery target: ``project`` or ``project.dataset``."""
     project, _, dataset = target.partition(".")
     if dataset:
         return f"bigquery:{project}/{dataset}", bigquery_context_node(
-            {"project": project}, dataset=dataset
+            {"project": project}, registries, dataset=dataset
         )
-    return f"bigquery:{project}", bigquery_context_node({"project": project})
+    return f"bigquery:{project}", bigquery_context_node({"project": project}, registries)
 
 
-# @catalog directive targets: engine -> (target string, root) -> (row name, node)
-_CATALOG_TARGETS: dict[str, Callable[[str, Path], tuple[str, CatalogNode]]] = {
-    "bigquery": lambda target, root: _bigquery_target(target),
-    "postgres": lambda target, root: (f"postgres:{target}", postgres_context_node(target)),
-    "sqlite": lambda target, root: (f"sqlite:{target}", sqlite_context_node(target, root)),
-    "duckdb": lambda target, root: (f"duckdb:{target}", duckdb_context_node(target, root)),
+# @catalog directive targets: engine -> (target string, root, registries) -> (row name, node)
+_CATALOG_TARGETS: dict[str, Callable[[str, Path, Registries], tuple[str, CatalogNode]]] = {
+    "bigquery": lambda target, root, regs: _bigquery_target(target, regs),
+    "postgres": lambda target, root, regs: (
+        f"postgres:{target}", postgres_context_node(target, regs)
+    ),
+    "sqlite": lambda target, root, regs: (f"sqlite:{target}", sqlite_context_node(target, root)),
+    "duckdb": lambda target, root, regs: (f"duckdb:{target}", duckdb_context_node(target, root)),
 }
 
 
 def project_root_node(project: Project, connect: Callable[[], Any] | None = None) -> CatalogNode:
     """Top level: the project's engine contexts (deduped), @catalog-declared
     browse targets, and cell outputs."""
-    from .registry import EXECUTORS
-
+    registries = project.registries
     contexts: list[tuple[str, str, Any]] = []  # (context_key, engine, config)
     seen: set[str] = set()
     for name in project.order:
         cell = project.cells[name]
-        key = EXECUTORS.get(cell.engine).context_key(cell.config)
+        key = registries.executors.get(cell.engine).context_key(cell.config)
         if key not in seen:
             seen.add(key)
             contexts.append((key, cell.engine, cell.config))
@@ -419,7 +429,7 @@ def project_root_node(project: Project, connect: Callable[[], Any] | None = None
         if make_target is None:
             continue
         for target in targets:
-            name, node = make_target(target, project.root)
+            name, node = make_target(target, project.root, registries)
             if name in seen:
                 continue  # a cell's context already covers it
             seen.add(name)
@@ -439,11 +449,13 @@ def project_root_node(project: Project, connect: Callable[[], Any] | None = None
     def child(row: dict[str, Any]) -> CatalogNode | None:
         if row["kind"] == "output":
             cell = project.cells[row["name"]]
-            return sink_output_node(cell.name, cell.config, project.root, connect=connect)
+            return sink_output_node(
+                cell.name, cell.config, project.root, registries, connect=connect
+            )
         if row["name"] in declared:
             return declared[row["name"]]
         engine, config = by_key[row["name"]]
         builder = _CONTEXT_BUILDERS.get(engine)
-        return builder(config, project.root) if builder else None
+        return builder(config, project.root, registries) if builder else None
 
     return CatalogNode(title="catalog", load=lambda: frame, child=child)

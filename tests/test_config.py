@@ -4,18 +4,34 @@ import pytest
 from pydantic import BaseModel, field_validator
 
 from quicksql import config
-from quicksql.compiler import compile_text
-from quicksql.config import (
-    build_models,
-    resolve_cell,
-    resolve_engine,
-    resolve_global,
-    resolve_sink_type,
-)
+from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.errors import ConfigError
 from quicksql.models import Scope
 from quicksql.plugins.base import Plugin, qfield
-from quicksql.registry import PLUGINS, plugin
+from quicksql.registry import plugin
+
+
+# the config functions with the builtins unless a test passes its own registries
+def build_models(registries=None):
+    return config.build_models((registries or builtin_registries()).plugins)
+
+
+def resolve_global(raw, overrides=None, *, registries=None):
+    return config.resolve_global(raw, overrides, registries=registries or builtin_registries())
+
+
+def resolve_cell(global_raw, cell_raw, overrides=None, *, registries=None):
+    return config.resolve_cell(
+        global_raw, cell_raw, overrides, registries=registries or builtin_registries()
+    )
+
+
+def resolve_engine(cfg):
+    return config.resolve_engine(cfg, builtin_registries().plugins)
+
+
+def resolve_sink_type(cfg):
+    return config.resolve_sink_type(cfg, builtin_registries().plugins)
 
 
 def test_build_models_fields_and_defaults() -> None:
@@ -105,7 +121,7 @@ def test_schema_alias_field() -> None:
     assert cfg.schema_ == "analytics"
 
 
-def test_third_party_config_plugin_extends_models() -> None:
+def test_third_party_config_plugin_extends_models(registries) -> None:
     @plugin
     class RowLimit(Plugin):
         scope = Scope.CELL
@@ -120,15 +136,16 @@ def test_third_party_config_plugin_extends_models() -> None:
                     raise ValueError("row_limit must be positive")
                 return v
 
-    cfg = resolve_cell({}, {"row_limit": 10})
+    registries.add(RowLimit)
+    cfg = resolve_cell({}, {"row_limit": 10}, registries=registries)
     assert cfg.row_limit == 10
     with pytest.raises(ConfigError, match="positive"):
-        resolve_cell({}, {"row_limit": -1})
+        resolve_cell({}, {"row_limit": -1}, registries=registries)
     with pytest.raises(ConfigError, match="not allowed in global scope"):
-        resolve_global({"row_limit": 5})
+        resolve_global({"row_limit": 5}, registries=registries)
 
 
-def test_duplicate_validator_names_across_plugins_are_rejected() -> None:
+def test_duplicate_validator_names_across_plugins_are_rejected(registries) -> None:
     # pydantic composes plugin Configs by inheritance, so a validator whose
     # attribute name repeats an existing one (e.g. Sources' _shape) silently
     # shadows it in the MRO — the guard must fail loudly instead
@@ -142,12 +159,13 @@ def test_duplicate_validator_names_across_plugins_are_rejected() -> None:
             def _shape(cls, v: list[str]) -> list[str]:  # clashes with Sources
                 return v
 
+    registries.add(Shadowing)
     for _ in range(2):  # a failed compose must not be cached
         with pytest.raises(ConfigError, match="_shape"):
-            build_models()
+            build_models(registries)
 
 
-def test_override_keys_scoped_to_target_model() -> None:
+def test_override_keys_scoped_to_target_model(registries) -> None:
     # global-only override keys are dropped when resolving cells, not errors
     @plugin
     class Auditish(Plugin):
@@ -156,9 +174,10 @@ def test_override_keys_scoped_to_target_model() -> None:
         class Config(BaseModel):
             audit_dir: str | None = qfield(None)
 
-    g = resolve_global({}, overrides={"audit_dir": "build/"})
+    registries.add(Auditish)
+    g = resolve_global({}, overrides={"audit_dir": "build/"}, registries=registries)
     assert g.audit_dir == "build/"
-    c = resolve_cell({}, {}, overrides={"audit_dir": "build/"})
+    c = resolve_cell({}, {}, overrides={"audit_dir": "build/"}, registries=registries)
     assert not hasattr(c, "audit_dir")
 
 
@@ -196,8 +215,8 @@ def composed(monkeypatch) -> list[str]:
     return made
 
 
-def _register_row_limit(where: Scope = Scope.CELL, *, positive: bool = False) -> None:
-    """Register a scratch plugin owning @row_limit; each call defines fresh classes."""
+def _register_row_limit(registries, where: Scope = Scope.CELL, *, positive: bool = False) -> None:
+    """Add a scratch plugin owning @row_limit; each call defines fresh classes."""
 
     @plugin
     class RowLimit(Plugin):
@@ -213,10 +232,13 @@ def _register_row_limit(where: Scope = Scope.CELL, *, positive: bool = False) ->
                     raise ValueError("row_limit must be positive")
                 return v
 
+    registries.add(RowLimit)
 
-def test_compile_composes_each_config_model_once(tmp_path, composed) -> None:
-    _register_row_limit(Scope.BOTH)  # fresh bases for both models: no compile has seen them
-    compile_text(NOTEBOOK, root=tmp_path)
+
+def test_compile_composes_each_config_model_once(tmp_path, composed, registries) -> None:
+    # fresh bases for both models: no compile has seen them
+    _register_row_limit(registries, Scope.BOTH)
+    compile_text(NOTEBOOK, root=tmp_path, registries=registries)
     assert Counter(composed) == {"GlobalConfig": 1, "CellConfig": 1}
 
 
@@ -227,43 +249,48 @@ def test_recompile_with_same_registry_composes_nothing(tmp_path, composed) -> No
     assert composed == []
 
 
-def test_registering_a_plugin_between_compiles_composes_anew(tmp_path, composed) -> None:
-    compile_text(NOTEBOOK, root=tmp_path)
+def test_registering_a_plugin_between_compiles_composes_anew(
+    tmp_path, composed, registries
+) -> None:
+    compile_text(NOTEBOOK, root=tmp_path, registries=registries)
     composed.clear()
-    _register_row_limit()  # cell scope: only CellConfig's bases change
+    _register_row_limit(registries)  # cell scope: only CellConfig's bases change
     project = compile_text(
-        NOTEBOOK.replace("-- @cell a\n", "-- @cell a\n-- @row_limit: 10\n"), root=tmp_path
+        NOTEBOOK.replace("-- @cell a\n", "-- @cell a\n-- @row_limit: 10\n"),
+        root=tmp_path,
+        registries=registries,
     )
     assert composed == ["CellConfig"]
     assert project.cells["a"].config.row_limit == 10
 
 
-def test_unregistering_a_plugin_between_compiles_rejects_its_directive(tmp_path) -> None:
-    snap = PLUGINS.snapshot()  # what the autouse fixture restores between tests
-    _register_row_limit()
+def test_unregistering_a_plugin_between_compiles_rejects_its_directive(
+    tmp_path, registries
+) -> None:
+    _register_row_limit(registries)
     text = "-- @cell a\n-- @row_limit: 10\nSELECT 1;\n"
-    assert compile_text(text, root=tmp_path).cells["a"].config.row_limit == 10
-    PLUGINS.restore(snap)
+    assert compile_text(text, root=tmp_path, registries=registries).cells["a"].config.row_limit == 10
+    registries.plugins.remove("row_limit")
     with pytest.raises(ConfigError, match="unknown directive: @row_limit"):
-        compile_text(text, root=tmp_path)
-    cfg = compile_text("-- @cell a\nSELECT 1;\n", root=tmp_path).cells["a"].config
+        compile_text(text, root=tmp_path, registries=registries)
+    cfg = compile_text("-- @cell a\nSELECT 1;\n", root=tmp_path, registries=registries)
+    cfg = cfg.cells["a"].config
     assert "row_limit" not in type(cfg).model_fields
 
 
-def test_reregistering_a_plugin_name_composes_its_new_config(tmp_path) -> None:
+def test_reregistering_a_plugin_name_composes_its_new_config(tmp_path, registries) -> None:
     # same plugin name and field key, new Config class: the composed model must
     # follow the class, not the name
-    snap = PLUGINS.snapshot()
-    _register_row_limit()
+    _register_row_limit(registries)
     text = "-- @cell a\n-- @row_limit: -1\nSELECT 1;\n"
-    assert compile_text(text, root=tmp_path).cells["a"].config.row_limit == -1
-    PLUGINS.restore(snap)
-    _register_row_limit(positive=True)
+    assert compile_text(text, root=tmp_path, registries=registries).cells["a"].config.row_limit == -1
+    registries.plugins.remove("row_limit")
+    _register_row_limit(registries, positive=True)
     with pytest.raises(ConfigError, match="positive"):
-        compile_text(text, root=tmp_path)
+        compile_text(text, root=tmp_path, registries=registries)
 
 
-# ---------- input_spec: an engine's input as a dict ----------
+# ---------- an executor's input_spec: its engine's input as a dict ----------
 
 
 @pytest.mark.parametrize(
@@ -279,14 +306,12 @@ def test_reregistering_a_plugin_name_composes_its_new_config(tmp_path) -> None:
     ids=["duckdb-str", "sqlite-str", "postgres-str", "bigquery-str", "sqlite-dict", "bigquery-dict"],
 )
 def test_input_spec_expands_the_engines_string_shorthand(engine, raw, spec) -> None:
-    from quicksql.config import input_spec
-
-    assert input_spec(resolve_cell({}, {"input": {engine: raw}}), engine) == spec
+    executor = builtin_registries().executors.get(engine)
+    assert executor.input_spec(resolve_cell({}, {"input": {engine: raw}})) == spec
 
 
 def test_input_spec_of_an_absent_or_empty_input_is_empty() -> None:
-    from quicksql.config import input_spec
-
-    assert input_spec(resolve_cell({}, {}), "duckdb") == {}
-    assert input_spec(resolve_cell({}, {"input": {"duckdb": None}}), "duckdb") == {}
-    assert input_spec(resolve_cell({}, {"input": {"sqlite": "x.db"}}), "duckdb") == {}
+    duckdb = builtin_registries().executors.get("duckdb")
+    assert duckdb.input_spec(resolve_cell({}, {})) == {}
+    assert duckdb.input_spec(resolve_cell({}, {"input": {"duckdb": None}})) == {}
+    assert duckdb.input_spec(resolve_cell({}, {"input": {"sqlite": "x.db"}})) == {}

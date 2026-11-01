@@ -11,7 +11,7 @@ from pathlib import PurePath
 from typing import Any, ClassVar
 
 from .errors import ConfigError
-from .registry import SOURCE_READERS, source_reader
+from .registry import Registry, source_reader
 
 EXTENSION_TYPES = {
     ".csv": "csv",
@@ -73,14 +73,15 @@ class ExcelReader(SourceReader):
         return f"read_xlsx({_args(path, opts)})"
 
 
-def reader_for(path: str, type_: str | None = None) -> SourceReader:
-    """Resolve a reader explicitly by type or by the path's extension."""
+def reader_for(path: str, type_: str | None, readers: Registry) -> SourceReader:
+    """Resolve one of the notebook's readers explicitly by type or by the
+    path's extension."""
     if type_ is not None:
-        return SOURCE_READERS.get(type_)
+        return readers.get(type_)
     ext = PurePath(path).suffix.lower()
     name = EXTENSION_TYPES.get(ext)
     if name is None:
         raise ConfigError(
             f"cannot infer source type for {path!r} (extension {ext!r}); set type explicitly"
         )
-    return SOURCE_READERS.get(name)
+    return readers.get(name)

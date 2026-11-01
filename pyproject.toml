@@ -78,8 +78,8 @@ source_modules = [
     "quicksql.render",
     "quicksql.runner",
     "quicksql.state",
-    # the contracts extensions implement; the package __init__s are core because after
-    # Phase 4 they only re-export their base module
+    # the contracts extensions implement; the package __init__s are core: they only
+    # re-export their base module
     "quicksql.executors",
     "quicksql.executors.base",
     "quicksql.plugins",
@@ -112,23 +112,7 @@ forbidden_modules = [
     "quicksql.tui",
     "quicksql.watcher",
 ]
-ignore_imports = [
-    # Phase 4: built-ins load from the app-layer composition root, not from the compiler.
-    "quicksql.compiler -> quicksql.bootstrap",
-    # Phase 4: the eager package __init__s. Importing a contract (config -> plugins.base)
-    # runs its package __init__, which imports every implementation. Grimp doesn't model
-    # that implicit parent-package import, so the debt is recorded here, at the __init__.
-    "quicksql.executors -> quicksql.executors.bigquery_exec",
-    "quicksql.executors -> quicksql.executors.duckdb_exec",
-    "quicksql.executors -> quicksql.executors.postgres_exec",
-    "quicksql.executors -> quicksql.executors.sqlite_exec",
-    "quicksql.plugins -> quicksql.plugins.builtin",
-    "quicksql.plugins -> quicksql.plugins.emit_sql",
-    "quicksql.sinks -> quicksql.sinks.duckdb_sink",
-    "quicksql.sinks -> quicksql.sinks.none_sink",
-    "quicksql.sinks -> quicksql.sinks.parquet_sink",
-    "quicksql.sinks -> quicksql.sinks.postgres_sink",
-]
+ignore_imports = []
 
 [[tool.importlinter.contracts]]
 id = "extensions"

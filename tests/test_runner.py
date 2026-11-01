@@ -3,9 +3,8 @@ import sqlite3
 import polars as pl
 import pytest
 
-from quicksql.compiler import compile_text
+from quicksql.bootstrap import compile_text
 from quicksql.plugins.base import Plugin
-from quicksql.registry import plugin
 from quicksql.runner import RunSession, run_project
 
 
@@ -25,7 +24,7 @@ def test_run_lands_parquet_and_previews(tmp_path) -> None:
     assert results[1].elapsed > 0
 
 
-def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_sink) -> None:
+def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_sink, registries) -> None:
     # effect-only is the sink's lands_output, not its name: the terminal INSERT
     # runs for effect instead of being wrapped as the result to land
     project = compile_text(
@@ -33,7 +32,7 @@ def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_
         "CREATE TABLE staged (n INT);\nINSERT INTO staged VALUES (1), (2), (3);\n"
         "-- @cell counted\n-- @depends_on: [load]\n"
         "SELECT count(*) AS c FROM staged;\n",
-        root=tmp_path,
+        root=tmp_path,registries=registries
     )
     results = {r.cell: r for r in project.run()}
     assert results["load"].ok, results["load"].error
@@ -132,13 +131,13 @@ def test_failed_result_splits_message_from_traceback(tmp_path) -> None:
     assert "Traceback" in result.traceback
 
 
-def test_plugin_bug_message_names_the_exception_type(tmp_path) -> None:
-    @plugin
+def test_plugin_bug_message_names_the_exception_type(tmp_path, add_plugin, registries) -> None:
+    @add_plugin
     class Buggy(Plugin):
         def run(self, cell, ctx, inner):
             raise KeyError("x")
 
-    [result] = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path).run()
+    [result] = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path, registries=registries).run()
     assert result.status == "failed"
     assert result.error == "KeyError: 'x'"
     assert "Traceback" in result.traceback
@@ -476,10 +475,10 @@ def test_sqlite_memory_context_shares_one_connection(tmp_path) -> None:
     assert pl.read_parquet(tmp_path / "data" / "reader.parquet")["answer"][0] == 42
 
 
-def test_chain_wraps_outermost_first(tmp_path) -> None:
+def test_chain_wraps_outermost_first(tmp_path, add_plugin, registries) -> None:
     calls: list[str] = []
 
-    @plugin
+    @add_plugin
     class InnerMost(Plugin):
         priority = 10
 
@@ -489,7 +488,7 @@ def test_chain_wraps_outermost_first(tmp_path) -> None:
             calls.append("in:end")
             return result
 
-    @plugin
+    @add_plugin
     class OuterMost(Plugin):
         priority = -10
 
@@ -499,15 +498,15 @@ def test_chain_wraps_outermost_first(tmp_path) -> None:
             calls.append("out:end")
             return result
 
-    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
+    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path, registries=registries)
     assert project.run()[0].ok
     assert calls == ["out:start", "in:start", "in:end", "out:end"]
 
 
-def test_retries_plugin_reinvokes_inner_on_error_result(tmp_path) -> None:
+def test_retries_plugin_reinvokes_inner_on_error_result(tmp_path, add_plugin, registries) -> None:
     attempts: list[int] = []
 
-    @plugin
+    @add_plugin
     class Retries(Plugin):
         def run(self, cell, ctx, inner):
             result = inner(cell, ctx)
@@ -517,20 +516,20 @@ def test_retries_plugin_reinvokes_inner_on_error_result(tmp_path) -> None:
                 attempts.append(2)
             return result
 
-    project = compile_text("-- @cell bad\nSELECT * FROM nope;", root=tmp_path)
+    project = compile_text("-- @cell bad\nSELECT * FROM nope;", root=tmp_path, registries=registries)
     results = project.run()
     assert results[0].ok is False
     assert attempts == [1, 2]
 
 
-def test_buggy_plugin_degrades_to_error_result(tmp_path) -> None:
-    @plugin
+def test_buggy_plugin_degrades_to_error_result(tmp_path, add_plugin, registries) -> None:
+    @add_plugin
     class Buggy(Plugin):
         def run(self, cell, ctx, inner):
             raise RuntimeError("plugin exploded")
 
     project = compile_text(
-        "-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT 2 AS y;", root=tmp_path
+        "-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT 2 AS y;", root=tmp_path, registries=registries
     )
     results = project.run()
     assert all(r.ok is False for r in results)
@@ -664,13 +663,13 @@ def test_extension_load_step_is_attributed_to_the_cell(tmp_path) -> None:
     assert all(e.cell == "a" for e in loads)
 
 
-def test_plugin_lifecycle_failures_surface_as_notes_before_run_finished(tmp_path) -> None:
-    @plugin
+def test_plugin_lifecycle_failures_surface_as_notes_before_run_finished(tmp_path, add_plugin, registries) -> None:
+    @add_plugin
     class BrokenAfterRun(Plugin):
         def after_run(self, project, results) -> None:
             raise RuntimeError("observer bug")
 
-    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
+    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path, registries=registries)
     events = []
     assert run_project(project, on_event=events.append)[0].ok
     kinds = [e.kind for e in events]
@@ -744,8 +743,9 @@ def _recording_session(calls: list):
 
 
 @pytest.fixture
-def recording_engine():
-    """Engine `rec`, whose sessions record the runner's calls; yields the calls."""
+def recording_engine(registries):
+    """Engine `rec` in the test's registries, whose sessions record the
+    runner's calls; yields the calls."""
     from quicksql.executors.base import Executor, split_statements
     from quicksql.registry import executor
 
@@ -762,15 +762,14 @@ def recording_engine():
             calls.append(("open",))
             return _recording_session(calls)
 
+    registries.add(Rec)
     return calls
 
 
-def test_a_plain_cell_runs_its_setup_then_extracts_its_terminal_statement(
-    tmp_path, recording_engine
-) -> None:
+def test_a_plain_cell_runs_its_setup_then_extracts_its_terminal_statement(tmp_path, recording_engine, registries) -> None:
     project = compile_text(
         "-- @engine: rec\n-- @cell a\nCREATE TEMP TABLE s AS SELECT 1;\nSELECT * FROM s;",
-        root=tmp_path,
+        root=tmp_path,registries=registries
     )
     [result] = project.run()
     assert result.ok, result.error
@@ -783,13 +782,11 @@ def test_a_plain_cell_runs_its_setup_then_extracts_its_terminal_statement(
     assert pl.read_parquet(tmp_path / "data" / "a.parquet")["x"].to_list() == [1]
 
 
-def test_an_effect_only_cell_runs_every_statement_and_extracts_nothing(
-    tmp_path, recording_engine
-) -> None:
+def test_an_effect_only_cell_runs_every_statement_and_extracts_nothing(tmp_path, recording_engine, registries) -> None:
     project = compile_text(
         "-- @engine: rec\n-- @cell a\n-- @output: { type: none }\n"
         "CREATE TABLE t (n INT);\nINSERT INTO t VALUES (1);",
-        root=tmp_path,
+        root=tmp_path,registries=registries
     )
     [result] = project.run()
     assert result.ok, result.error
@@ -801,12 +798,10 @@ def test_an_effect_only_cell_runs_every_statement_and_extracts_nothing(
     ]
 
 
-def test_a_cell_reffed_in_context_materializes_once_and_lands_from_its_temp(
-    tmp_path, recording_engine
-) -> None:
+def test_a_cell_reffed_in_context_materializes_once_and_lands_from_its_temp(tmp_path, recording_engine, registries) -> None:
     project = compile_text(
         "-- @engine: rec\n-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT * FROM {{ ref('a') }};",
-        root=tmp_path,
+        root=tmp_path,registries=registries
     )
     results = project.run()
     assert all(r.ok for r in results), [r.error for r in results]
@@ -819,16 +814,16 @@ def test_a_cell_reffed_in_context_materializes_once_and_lands_from_its_temp(
     ]
 
 
-def test_without_a_run_session_a_cell_gets_a_private_session(tmp_path, recording_engine) -> None:
+def test_without_a_run_session_a_cell_gets_a_private_session(tmp_path, recording_engine, registries) -> None:
     import duckdb
 
     from quicksql.models import RunContext
     from quicksql.runner import execute_cell
 
-    cell = compile_text("-- @engine: rec\n-- @cell a\nSELECT 1 AS x;", root=tmp_path).cells["a"]
+    cell = compile_text("-- @engine: rec\n-- @cell a\nSELECT 1 AS x;", root=tmp_path, registries=registries).cells["a"]
     conn = duckdb.connect()
     try:
-        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path))
+        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path, registries=registries))
         assert conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(1,)]
     finally:
         conn.close()
@@ -932,7 +927,7 @@ def test_a_runtime_error_landing_a_duckdb_cell_names_and_quotes_its_statement(tm
     )
 
 
-def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path) -> None:
+def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path, registries) -> None:
     import duckdb
 
     from quicksql.registry import sink
@@ -946,8 +941,11 @@ def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path) -> None:
         def ref_expr(self, cell_name):
             return "nowhere"
 
+    registries.add(Broken)
     [result] = compile_text(
-        "-- @cell a\n-- @output: { type: broken }\nSELECT 1 AS n;", root=tmp_path
+        "-- @cell a\n-- @output: { type: broken }\nSELECT 1 AS n;",
+        root=tmp_path,
+        registries=registries,
     ).run()
     assert result.error == "IO Error: the disk is full"
     assert result.statement is None

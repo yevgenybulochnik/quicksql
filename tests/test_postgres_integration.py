@@ -7,12 +7,19 @@ Each test drops/recreates its own tables in quicksql_test, so runs are idempoten
 import duckdb
 import pytest
 
-from quicksql.compiler import compile_text
+from quicksql import config
+from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.errors import ExecutorError
 from quicksql.models import RunContext
 from quicksql.runner import execute_cell
 
 pytestmark = pytest.mark.postgres
+
+BUILTINS = builtin_registries()  # read-only here
+
+
+def resolve_cell(global_raw, cell_raw):
+    return config.resolve_cell(global_raw, cell_raw, registries=BUILTINS)
 
 
 @pytest.fixture
@@ -32,7 +39,6 @@ def _cell_config(dsn: str) -> str:
 
 
 def test_executor_runs_real_sql(seeded, tmp_path) -> None:
-    from quicksql.config import resolve_cell
     from quicksql.models import RenderedCell
 
     cfg = resolve_cell({}, {"input": {"postgres": {"dsn": seeded}}})
@@ -43,7 +49,7 @@ def test_executor_runs_real_sql(seeded, tmp_path) -> None:
     )
     conn = duckdb.connect()
     try:
-        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path))
+        view = execute_cell(cell, RunContext(conn=conn, root=tmp_path, registries=BUILTINS))
         assert conn.sql(f'SELECT * FROM "{view}"').fetchall() == [
             (1, 1), (2, 4), (3, 9), (4, 16), (5, 25)
         ]
@@ -53,7 +59,6 @@ def test_executor_runs_real_sql(seeded, tmp_path) -> None:
 
 def test_real_driver_errors_wrap_as_executor_error(seeded, tmp_path) -> None:
     """The offline test fakes the driver; only a real psycopg error proves the wrap."""
-    from quicksql.config import resolve_cell
     from quicksql.models import RenderedCell
 
     cfg = resolve_cell({}, {"input": {"postgres": {"dsn": seeded}}})
@@ -64,7 +69,7 @@ def test_real_driver_errors_wrap_as_executor_error(seeded, tmp_path) -> None:
     conn = duckdb.connect()
     try:
         with pytest.raises(ExecutorError, match="postgres.*no_such_table"):
-            execute_cell(cell, RunContext(conn=conn, root=tmp_path))
+            execute_cell(cell, RunContext(conn=conn, root=tmp_path, registries=BUILTINS))
     finally:
         conn.close()
 
@@ -200,7 +205,7 @@ def test_postgres_sink_reports_the_rows_each_write_landed(seeded, tmp_path) -> N
     import psycopg
 
     from quicksql.models import RenderedCell
-    from quicksql.registry import SINKS
+    SINKS = BUILTINS.sinks
 
     cell = RenderedCell(
         name="acc", config=None, sql_raw="", sql="", hash="",
