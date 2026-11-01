@@ -1,10 +1,11 @@
 """The Catalog tab: the project-wide schema browser, on its own drilling stack.
 
-`CatalogView` loads the notebook's catalog (`catalog.project_root_node`) one
+`CatalogView` loads the notebook's catalog (the live host's `catalog_root`) one
 level at a time on a thread worker, into a stack of Sheets whose ``drill`` is
 the CatalogNode each came from; Enter drills a row into its child node. Frames
-are cached by node (`catalog.CatalogCache`) and dropped when a run, a save or
-a notebook switch changes what they describe; ctrl+r refetches one level.
+are cached in the live host's `catalog_cache`, shared with an agent's
+``quicksql live catalog``: the host drops what a run or a save changed, and a
+notebook switch starts a fresh one; ctrl+r refetches one level.
 The stack is kept across tab switches: each Sheet holds its own
 cursor/sort/filter for S / Enter to resume. A notebook switch bumps the
 view's generation and starts a fresh cache: a load still running for the old
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING
 
 from textual.widgets import DataTable
 
-from ..catalog import CatalogCache, CatalogNode, project_root_node
+from ..catalog import CatalogCache, CatalogNode
 from ..sheet import Sheet
 from .panes import SheetTable, Surface
 
@@ -31,7 +32,6 @@ class CatalogView(Surface):
         super().__init__(app)
         self.stack: list[Sheet] = []
         self.subtitle = ""  # the top sheet's
-        self.cache = CatalogCache()
         self.loading: str | None = None  # the title of a load in flight
         self.dive_pending = False  # S pressed while the root loads
         self._root_loading = False  # a root load is in flight
@@ -62,11 +62,10 @@ class CatalogView(Surface):
         self.app.refresh_subtitle()
 
     def reset(self) -> None:
-        """A notebook switch: no stack, nothing cached or pending. The old
-        cache is left to the old notebook's loads still running."""
+        """A notebook switch: no stack, nothing pending (the host starts a
+        fresh cache; the old one is left to the old notebook's loads)."""
         self._gen += 1
         self.stack = []
-        self.cache = CatalogCache()
         self.loading = None
         self.dive_pending = False
         self._root_loading = False
@@ -91,7 +90,7 @@ class CatalogView(Surface):
         if self.stack or self._root_loading or not project:
             return
         self._root_loading = True
-        self._load(project_root_node(project, connect=self.app.runs.connect))
+        self._load(self.app.host.catalog_root(project))
 
     def drill(self) -> None:
         """Enter on a row: load the level beneath it (a leaf has none)."""
@@ -108,13 +107,13 @@ class CatalogView(Surface):
         node: CatalogNode | None = self.stack[-1].drill if self.stack else None
         if node is None:
             return
-        self.cache.invalidate(node)
+        self.app.host.catalog_cache.invalidate(node)
         self._load(node, replace=True)
 
     def _load(self, node: CatalogNode, replace: bool = False) -> None:
         # not `exclusive`: Textual would only flag the old thread cancelled;
         # the generation is what keeps an older notebook's load off the stack
-        work = partial(self._fetch, node, replace, self._gen, self.cache)
+        work = partial(self._fetch, node, replace, self._gen, self.app.host.catalog_cache)
         self.app.run_worker(work, thread=True, group="catalog")
 
     def _fetch(self, node: CatalogNode, replace: bool, gen: int, cache: CatalogCache) -> None:

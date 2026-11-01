@@ -1480,16 +1480,23 @@ async def test_5_on_an_empty_catalog_tab_loads_the_root_itself(deep_catalog) -> 
 async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeypatch) -> None:
     # S starts the root load itself *and* activates the tab, whose handler
     # also wants the root: only one load may start, or two roots get pushed
-    from quicksql.tui import catalog_view as tui
+    import dataclasses
+
+    from quicksql import catalog
 
     calls = []
-    real = tui.project_root_node
+    real = catalog.project_root_node  # the live host builds the root with it
 
     def counting(*args, **kwargs):
-        calls.append(1)
-        return real(*args, **kwargs)
+        node = real(*args, **kwargs)
 
-    monkeypatch.setattr(tui, "project_root_node", counting)
+        def load():
+            calls.append(1)
+            return node.load()
+
+        return dataclasses.replace(node, load=load)
+
+    monkeypatch.setattr(catalog, "project_root_node", counting)
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
@@ -1506,14 +1513,14 @@ async def test_a_catalog_load_from_the_previous_notebook_lands_nowhere(tmp_path,
     import dataclasses
     import threading
 
-    from quicksql.tui import catalog_view
+    from quicksql import catalog
 
     one = tmp_path / "one.qsql"
     one.write_text("-- @cell a\nSELECT 1 AS x;\n")
     two = tmp_path / "two.qsql"
     two.write_text("-- @cell c\nSELECT 2 AS y;\n")
     gate, reached = threading.Event(), threading.Event()
-    real = catalog_view.project_root_node
+    real = catalog.project_root_node  # the live host builds the root with it
 
     def gated(project, **kwargs):
         node = real(project, **kwargs)
@@ -1527,7 +1534,7 @@ async def test_a_catalog_load_from_the_previous_notebook_lands_nowhere(tmp_path,
 
         return dataclasses.replace(node, load=load)
 
-    monkeypatch.setattr(catalog_view, "project_root_node", gated)
+    monkeypatch.setattr(catalog, "project_root_node", gated)
     app = QsqlApp(path=one, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()

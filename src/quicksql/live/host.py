@@ -41,6 +41,7 @@ from .protocol import (
 )
 
 if TYPE_CHECKING:
+    from ..catalog import CatalogNode
     from ..compiler import Project
 
 
@@ -57,6 +58,10 @@ class Driver(Protocol):
     def reading(self) -> ContextManager[Any]:
         """A DuckDB handle that reads what the session landed, held in use
         (a notebook switch waits for it) until the block ends."""
+
+    def connect(self) -> Any:
+        """A DuckDB handle that reads what the session landed (the catalog
+        reads cell outputs through it); the caller closes it."""
 
     def controls_changed(self) -> None:
         """Repaint whatever shows the controls."""
@@ -111,6 +116,12 @@ class LiveHost:
         self.seen_at: dict[str, float] = {}  # source hash -> when it last compiled
         self._settles: dict[int, tuple[str, list[str]]] = {}  # run -> (hash, changed)
         self._awaiting: tuple[str, list[str]] | None = None  # a save's rerun, not yet requested
+        # the schema catalog: the Catalog tab's and an agent's, one per notebook
+        from ..catalog import CatalogCache
+
+        self.catalog_cache = CatalogCache()
+        self._catalog_root: CatalogNode | None = None
+        self._catalog_project: Project | None = None
 
     def switch(self, path: Path) -> None:
         """A notebook opened (first, or another with ``o``): forget the last
@@ -256,9 +267,12 @@ class LiveHost:
         """A save compiled; ``planned`` is what changed (``plan_rerun``).
         Returns the cells to rerun now. The save settles here, unless a rerun
         follows: then that run's end settles it."""
+        outputs = set(self.project.order) if self.project is not None else set()
         self._adopt(project)
         h = project.source_hash
         self._emit("compiled", hash=h, cells=list(project.order), changed=planned)
+        # a save changes the top level and where outputs land, never a warehouse
+        self._catalog_changed("save", top_level=True, scopes=outputs | set(project.order))
         if not self.armed:
             self._settle(h, "paused", changed=planned)
             return []
@@ -334,6 +348,7 @@ class LiveHost:
 
     def run_ended(self, run: int, results: list[RunResult]) -> None:
         """The run's thread finished (the controller's ``apply``)."""
+        self._catalog_changed("run", run=run, scopes=self._run_scopes(results))
         record = self.runs.get(run)
         if record is None:
             return
@@ -363,6 +378,49 @@ class LiveHost:
 
     def busy(self) -> bool:
         return any(r["state"] in ACTIVE for r in self.runs.values())
+
+    # ---------- the schema catalog ----------
+
+    def catalog_root(self, project: Project | None = None) -> CatalogNode:
+        """The catalog's top level for ``project`` (the host's by default),
+        built once per project: its engines' clients live across requests."""
+        project = project or self._need_project()
+        if self._catalog_project is not project:
+            from ..catalog import project_root_node
+
+            self._catalog_root = project_root_node(project, connect=self.driver.connect)
+            self._catalog_project = project
+        return self._catalog_root
+
+    def _run_scopes(self, results: Iterable[RunResult]) -> set[str]:
+        """The top-level rows a run's results may have changed: the contexts
+        on every engine its cells ran on or landed in, and their outputs. A
+        skipped cell never ran."""
+        project = self.project
+        if project is None:
+            return set()
+        ran = [project.cells[r.cell] for r in results
+               if r.cell in project.cells and r.status != "skipped"]
+        if not ran:
+            return set()
+        engines = {c.engine for c in ran} | {c.sink_type for c in ran}
+        top = self.catalog_root(project).load()
+        scopes = {row["name"] for row in top.iter_rows(named=True)
+                  if row["kind"] == "context" and row["engine"] in engines}
+        return scopes | {c.name for c in ran}
+
+    def _catalog_changed(
+        self, reason: str, *, run: int | None = None, top_level: bool = False,
+        scopes: Iterable[str] = (),
+    ) -> None:
+        scopes = sorted(scopes)
+        if not top_level and not scopes:
+            return
+        if top_level and self.project is not None:
+            self.catalog_cache.invalidate(self.catalog_root())
+        if scopes:
+            self.catalog_cache.invalidate(scopes=scopes)
+        self._emit("catalog_invalidated", reason=reason, run_id=run, top_level=top_level, scopes=scopes)
 
     # ---------- outcomes ----------
 

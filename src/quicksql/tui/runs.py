@@ -187,8 +187,7 @@ class RunController:
             self.app.run_progressed(event.cell)
 
     def apply(self, gen: int, results: list[RunResult]) -> None:
-        self.app.host.run_ended(gen, results)
-        self.app.run_landed()  # outputs and warehouses just changed
+        self.app.host.run_ended(gen, results)  # it drops the catalog levels the run changed
         if gen != self.gen:
             return  # a newer run owns the table; its own events paint it
         for result in results:  # normally a no-op: cell_finished stored each

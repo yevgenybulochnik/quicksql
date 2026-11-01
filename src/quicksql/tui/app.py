@@ -874,10 +874,6 @@ class QsqlApp(App):
         if finished is not None and finished == self.data.cell and self.data.stack:
             self.data.renew(self._preview_sheet(finished))  # never a stale sheet
 
-    def run_landed(self) -> None:
-        """A run ended, the current one or a replaced one: outputs changed."""
-        self.catalog.cache.invalidate()
-
     def run_finished(self) -> None:
         """The current run ended."""
         self._refresh_cells()
@@ -909,8 +905,7 @@ class QsqlApp(App):
         # added cell only exists in the new one. The host settles the save,
         # unless its rerun (started below) will.
         self.project = project
-        to_run = self.host.recompiled(project, planned)
-        self.catalog.cache.invalidate()  # cells/contexts may have changed
+        to_run = self.host.recompiled(project, planned)  # it drops what the save changed
         self._refresh_cells()
         self._refresh_detail()
         if not self.armed:

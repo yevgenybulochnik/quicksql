@@ -23,6 +23,9 @@ class AppDriver:
     def reading(self) -> ContextManager[Any]:
         return self.app.runs.reading()
 
+    def connect(self) -> Any:
+        return self.app.runs.connect()
+
     def controls_changed(self) -> None:
         self.app.controls_changed()
 
