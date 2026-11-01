@@ -720,6 +720,31 @@ async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
         assert not app.sub_title.startswith("loading")
 
 
+async def test_a_run_leaves_a_dived_sheets_subtitle_alone(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter")  # dive into users' Data sheet
+        shown = app.sub_title
+        assert shown.startswith("users · 3x")
+        await pilot.press("r")  # rerun the cell under the dive
+        await _settle(app, pilot)
+        assert app.sub_title == shown
+
+
+async def test_a_recompile_leaves_a_catalog_dives_subtitle_alone(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("S")
+        await _settle(app, pilot)
+        shown = app.sub_title
+        assert shown.startswith("catalog · ")
+        app._on_recompiled(compile_file(notebook))  # a save with nothing to rerun
+        await pilot.pause()
+        assert app.sub_title == shown
+
+
 async def test_catalog_tab_browses_then_enter_dives(notebook) -> None:
     # cycling onto the Catalog tab loads the root listing but stays in cells
     # mode (browse pass-through, like the Data tab); Enter is what dives.
