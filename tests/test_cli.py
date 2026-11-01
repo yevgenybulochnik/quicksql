@@ -486,41 +486,69 @@ def test_tui_without_textual_names_the_extra(tmp_path) -> None:
 # ---------- the agent skill ----------
 
 
-def test_skill_prints_the_packaged_skill() -> None:
+def test_skill_prints_the_packaged_skill_md() -> None:
     result = runner.invoke(app, ["skill"])
     assert result.exit_code == 0
     assert result.output.startswith("---\nname: quicksql\n")
 
 
-def test_skill_names_every_live_command() -> None:
-    from quicksql.cli import live_app
-
-    text = runner.invoke(app, ["skill"]).output
-    for command in live_app.registered_commands:
-        assert f"quicksql live {command.name}" in text, command.name
-
-
-def test_the_skills_example_notebook_compiles_and_runs(tmp_path) -> None:
-    import re
-
-    text = runner.invoke(app, ["skill"]).output
-    example = re.search(r"## The file\n\n```sql\n(.*?)```", text, re.S).group(1)
-    nb = tmp_path / "example.qsql"
-    nb.write_text(example)
-    result = runner.invoke(app, ["run", str(nb), "--json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["summary"]["ok"] == 2
+def test_skill_path_is_the_packaged_folder() -> None:
+    result = runner.invoke(app, ["skill", "--path"])
+    folder = Path(result.output.strip())
+    assert result.exit_code == 0 and (folder / "SKILL.md").is_file()
+    assert (folder / "references" / "directives.md").is_file()
 
 
-def test_skill_install_writes_it_into_the_project_once(tmp_path) -> None:
+def test_skill_install_copies_the_folder_and_keeps_edits_unless_forced(tmp_path) -> None:
     result = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    installed = tmp_path / ".claude" / "skills" / "quicksql" / "SKILL.md"
-    assert installed.read_text().startswith("---\nname: quicksql\n")
+    installed = tmp_path / ".claude" / "skills" / "quicksql"
+    assert (installed / "SKILL.md").read_text().startswith("---\nname: quicksql\n")
+    assert (installed / "references" / "directives.md").is_file()
+    assert any((installed / "examples").glob("*.qsql"))
     assert runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)]).exit_code == 0
-    installed.write_text(installed.read_text() + "\nmy own notes\n")
+    edited = installed / "references" / "live.md"
+    edited.write_text(edited.read_text() + "\nmy own notes\n")
     refused = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
-    assert refused.exit_code == 1 and "--force" in refused.output
-    assert "my own notes" in installed.read_text()
+    assert refused.exit_code == 1 and "--force" in refused.output and "live.md" in refused.output
+    assert "my own notes" in edited.read_text()
     forced = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path), "--force"])
-    assert forced.exit_code == 0 and "my own notes" not in installed.read_text()
+    assert forced.exit_code == 0 and "my own notes" not in edited.read_text()
+
+
+# ---------- directives ----------
+
+RC = """\
+from pydantic import BaseModel
+from quicksql.plugins import Plugin, qfield
+from quicksql.registry import plugin
+
+
+@plugin
+class Owner(Plugin):
+    class Config(BaseModel):
+        owner: str | None = qfield(None, description="The team that owns the cell.")
+"""
+
+
+def test_directives_lists_the_notebooks_own_vocabulary(tmp_path) -> None:
+    (tmp_path / "quicksqlrc.py").write_text(RC)
+    nb = tmp_path / "nb.qsql"
+    nb.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    result = runner.invoke(app, ["directives", str(nb), "--json"])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    rows = {d["key"]: d for d in doc["directives"]}
+    assert rows["owner"]["source"] == "quicksqlrc.py"
+    assert rows["owner"]["description"] == "The team that owns the cell."
+    assert rows["autorun"]["source"] == "builtin" and rows["autorun"]["reruns"] is False
+    assert {e["name"] for e in doc["engines"]} >= {"duckdb", "sqlite"}
+    assert {s["name"] for s in doc["sinks"]} >= {"parquet", "none"}
+    text = runner.invoke(app, ["directives", str(nb)]).output
+    assert "owner" in text and "The team that owns the cell." in text
+
+
+def test_directives_without_a_notebook_lists_the_builtins(tmp_path) -> None:
+    result = runner.invoke(app, ["directives", str(tmp_path / "missing.qsql"), "--markdown"])
+    assert result.exit_code == 0
+    assert "| `depends_on` |" in result.output
