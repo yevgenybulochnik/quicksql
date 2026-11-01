@@ -1,9 +1,37 @@
 # Plan: the schema catalog for agents, fast on big warehouses
 
-**Status:** Phase 0 done (2026-11-01, branch `feat/live-catalog`): the stress harness and
-the baseline are in `stress/catalog/`. Phases 1–2 implement issue #11
-(`quicksql live catalog`). Phases 3–5 are a follow-up issue: keeping the remote catalog
-across sessions, and warming it.
+**Status:** Phases 0–1 done (2026-11-01, branch `feat/live-catalog`): the stress harness
+and baseline are in `stress/catalog/`, and the catalog core is in `catalog.py`. Phases 1–2
+implement issue #11 (`quicksql live catalog`). Phases 3–5 are a follow-up issue: keeping
+the remote catalog across sessions, and warming it.
+
+Phase 1 as built, where it differs from the plan below:
+- **Walking by name.** `catalog.resolve(root, path, cache)` returns a `Resolved` (node,
+  frame, cached, path). A bad path raises `CatalogPathError`, which carries the depth,
+  the segment, a reason (`unknown` or `leaf`), up to 10 close names and the level's total.
+- **Guesses are checked when the end fails or comes back empty.** A level that declares
+  `name_columns` and isn't cached is never listed on the way: the walk guesses the next
+  level from the segment. Postgres and SQLite answer an unknown table with no columns
+  rather than an error, so an empty end also triggers the check.
+- **Pages name their rows.** `catalog.page` returns each row's `names` (the segment that
+  goes beneath it), and `catalog.narrow` filters before paging.
+- **The cache:** a 64 MiB cap by default, plus `peek`, `invalidate(node | scopes=…)` and
+  `size_bytes`. The TUI's Catalog tab gets all of it unchanged; verified in tmux.
+- **Redaction.** `Executor.redact(text)` is the hook, and `catalog.redact` applies every
+  engine's. Postgres hides `password=…` and URIs' `user:password@` in free text.
+  `_redacted` now also hides a password written without `=`: the context-key bug S10b
+  found.
+- **BigQuery:** `page_size = 1000` on its listings, so on the fake browsing went from 243
+  calls to 15, whatever the API's default page.
+- **Postgres connection reuse: skipped.** With walking by name, an exact path is one load
+  (a connect and a query, 4 round trips). Browsing still opens a connection per level;
+  Phase 2's long-lived root node is where reuse would fit, if S1 calls for it.
+- **Stress:** S2, S6, S10b and S11 meet their budgets.
+  - S2, round trips: BigQuery 3 → 1, the fake at 50 per page 43 → 1, Postgres 12 → 4.
+  - S6: 2 loads → 1.
+  - S11: 138 → 63.8 MB held.
+- **Arrow keys don't move the Catalog tab's cursor (pre-existing).** Its DataTable can't
+  take focus, and the app routes `j`/`k`.
 
 Phase 0 as built, where it differs from the plan below:
 - **It lives in `stress/catalog/`,** next to the existing compile and TUI benchmarks in
