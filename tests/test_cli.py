@@ -502,7 +502,9 @@ def test_skill_path_is_the_packaged_folder() -> None:
 def test_skill_install_copies_the_folder_and_keeps_edits_unless_forced(tmp_path) -> None:
     result = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    installed = tmp_path / ".claude" / "skills" / "quicksql"
+    # .agents/skills: the folder Codex, Gemini CLI and opencode all read
+    installed = tmp_path / ".agents" / "skills" / "quicksql"
+    assert not (tmp_path / ".claude").exists()
     assert (installed / "SKILL.md").read_text().startswith("---\nname: quicksql\n")
     assert (installed / "references" / "directives.md").is_file()
     assert any((installed / "examples").glob("*.qsql"))
@@ -558,7 +560,7 @@ def test_skill_install_updates_an_older_install_without_force(tmp_path) -> None:
     import hashlib
 
     assert runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)]).exit_code == 0
-    installed = tmp_path / ".claude" / "skills" / "quicksql"
+    installed = tmp_path / ".agents" / "skills" / "quicksql"
     manifest = installed / ".installed.json"
     # what an older quicksql installed: different text, recorded as installed
     old = "an older version of this reference\n"
