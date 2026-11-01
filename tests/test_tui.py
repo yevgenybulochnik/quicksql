@@ -720,6 +720,29 @@ async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
         assert not app.sub_title.startswith("loading")
 
 
+async def test_sheets_from_a_partial_preview_say_so(tmp_path) -> None:
+    """The Data tab holds an output's first 100 rows; its sheet and what's
+    derived from it (sort, freq, describe, a filter) say so, a whole one doesn't."""
+    path = tmp_path / "base.qsql"
+    path.write_text(
+        "-- @cell big\nSELECT range % 3 AS n FROM range(500);\n\n-- @cell small\nSELECT 1 AS n;\n"
+    )
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter")
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("]")  # sorting sorts those 100
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("F")
+        assert app.sheet_stack[-1].title == "freq(n)"
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("q", "q", "j", "enter")  # small: its preview is all of it
+        assert app.sheet_stack[-1].title == "small"
+        assert "rows only" not in app.sub_title
+
+
 async def test_the_data_sheet_follows_a_rerun_of_its_cell(notebook) -> None:
     """A watch rerun of the cell the Data tab shows refreshes its preview;
     sheets derived from it (freq, a committed filter) stay as they were."""
