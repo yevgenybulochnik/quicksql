@@ -38,8 +38,10 @@ NO_PROJECT = "no_project"  # the notebook hasn't compiled since the TUI opened i
 BUSY = "busy"  # a run is under way, or the cell asked for is running
 REFUSED = "refused"  # the file says otherwise, or the request isn't allowed
 NOT_READABLE = "not_readable"  # an output this session can't read (yet)
+QUERY_FAILED = "query_failed"  # the query ran and DuckDB raised
 EVENTS_LOST = "events_lost"
 UNSUPPORTED = "unsupported"  # a TUI verb on a host without a screen
+INTERNAL = "internal"  # a bug in the session; the connection carries on
 
 
 class LiveError(Exception):

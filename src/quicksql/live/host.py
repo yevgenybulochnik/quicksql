@@ -34,6 +34,7 @@ from .protocol import (
     MAX_ROWS,
     NO_PROJECT,
     NOT_READABLE,
+    QUERY_FAILED,
     REFUSED,
     UNKNOWN_CELL,
     LiveError,
@@ -375,6 +376,13 @@ class LiveHost:
         results: Iterable[RunResult] = (),
     ) -> None:
         results = list(results)
+        kept = self.outcomes.get(h)
+        if state == "nothing_to_rerun" and kept is not None and kept["state"] == "ran":
+            # the same text saved again: what its run found still stands
+            event = self._emit("settled", hash=h, state=kept["state"])
+            kept["seq"] = event["seq"]
+            self.latest_outcome = kept
+            return
         outcome = {
             "hash": h,
             "state": state,
@@ -558,7 +566,7 @@ class LiveHost:
                 rel = conn.sql(sql)
                 head = Preview(tuple(rel.columns), tuple(rel.limit(rows).fetchall()))
             except duckdb.Error as exc:
-                raise LiveError(INVALID, str(exc)) from None
+                raise LiveError(QUERY_FAILED, str(exc)) from None
         return head.to_dict(rows)
 
     # ---------- what an agent asks for ----------
@@ -574,7 +582,9 @@ class LiveHost:
         if self.busy() and not cancel:
             info = self.run_info()
             what = ", ".join(info["cells"]) if info and info["cells"] else "starting"
-            raise LiveError(BUSY, f"a run is under way ({what}): pass cancel to replace it")
+            raise LiveError(
+                BUSY, f"a run is under way ({what}): wait for it, or replace it with --cancel"
+            )
         if all_:
             self.set_armed(True, by="agent")  # like R
         self.driver.log_line(f"agent: run {'all' if all_ else ', '.join(cells)}")

@@ -374,3 +374,15 @@ def test_a_failing_query_says_why(landed) -> None:
         with pytest.raises(LiveError) as err:
             client.call("query", sql="SELECT nope FROM a")
     assert err.value.code == "query_failed" and "nope" in err.value.message
+
+
+def test_a_bug_in_a_handler_answers_internal_and_the_connection_lives(live, monkeypatch) -> None:
+    def broken():
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(live.host, "snapshot", broken)
+    with live.client() as client:
+        with pytest.raises(LiveError) as err:
+            client.call("snapshot")
+        assert err.value.code == "internal" and "a bug" in err.value.message
+        assert client.call("arm")["armed"] is True  # same connection, still answering

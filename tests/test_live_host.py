@@ -313,3 +313,15 @@ def test_cancel_stops_the_run_under_way(host) -> None:
     out = host.cancel()
     assert out == {"cancelled": True, "not_run": ["b"]}
     assert host.driver.cancelled == 1
+
+
+def test_saving_the_same_text_again_keeps_what_its_run_found(host) -> None:
+    project = host.project
+    host.set_armed(True, by="keys")
+    failed = RunResult(cell="b", status="failed", error="Binder Error: nope", statement=1)
+    host.run_requested(1, project.source_hash)
+    run_through(host, 1, project, [ok("a"), failed])
+    assert host.recompiled(project, []) == []  # saved again, unchanged: nothing reruns
+    outcome = host.outcomes[project.source_hash]
+    assert outcome["state"] == "ran" and outcome["summary"]["failed"] == 1
+    assert host.since(0)[-1]["kind"] == "settled"  # a waiter still hears it settle
