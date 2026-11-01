@@ -720,6 +720,40 @@ async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
         assert not app.sub_title.startswith("loading")
 
 
+async def test_the_data_sheet_follows_a_rerun_of_its_cell(notebook) -> None:
+    """A watch rerun of the cell the Data tab shows refreshes its preview;
+    sheets derived from it (freq, a committed filter) stay as they were."""
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")  # runs all and arms watch reruns
+        await _settle(app, pilot)
+        await pilot.press("j", "enter")  # dive into events: 10 rows
+        assert app.sheet_stack[-1].frame.height == 10
+        await pilot.press("F")
+        freq = app.sheet_stack[-1]
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(4)"))
+        assert "events" in app._on_recompiled(compile_file(notebook))
+        await _settle(app, pilot)
+        assert app.sheet_stack[-1] is freq  # a derived sheet is a snapshot
+        assert app.sheet_stack[0].frame.height == 4
+        await pilot.press("q")
+        assert app.sheet_stack[-1].frame.height == 4
+        assert app.query_one("#data", DataTable).row_count == 4
+
+
+async def test_the_browsed_data_sheet_follows_a_rerun(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("j", "2")  # browse events on the Data tab
+        assert app.mode == "cells" and app.sheet_stack[-1].frame.height == 10
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(4)"))
+        app._on_recompiled(compile_file(notebook))
+        await _settle(app, pilot)
+        assert app.sheet_stack[-1].frame.height == 4
+
+
 async def test_a_run_leaves_a_dived_sheets_subtitle_alone(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
