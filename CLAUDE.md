@@ -73,8 +73,10 @@ first `@cell`) inherited by every cell.
   are False), and the *landed* fingerprints of the cell's upstreams. `plan_rerun` reruns
   cells whose fingerprint differs from `RunSession.seen` (the fingerprint the session last
   ran it with, or first saw it at via `see`), plus downstream through autorun cells.
-  Each run writes `.quicksql/state.json` (status + what each landed output was built from;
-  `RunSession.landed` is seeded from it) for `quicksql status`; it never skips a run.
+  Each run writes the notebook's state file under `~/.quicksql/state/` (status + what each
+  landed output was built from; `RunSession.landed` is seeded from it) for
+  `quicksql status`; it never skips a run. `$QSQL_HOME` moves `~/.quicksql` (state and user
+  templates); an autouse fixture gives every test its own, so tests never touch the real one.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
 
 ## Commands
@@ -114,7 +116,8 @@ first `@cell`) inherited by every cell.
 - `render.py` — Jinja on SQL bodies; ref/source/var/env; records edges + extensions
 - `sources.py` — file reader registry (csv/parquet/json/excel)
 - `graph.py` — topo sort, cycle detection, downstream sets
-- `state.py` — fingerprints, the `.quicksql/state.json` state file, `statuses` for `status`
+- `state.py` — fingerprints, the per-notebook state file under `~/.quicksql/state/`,
+  `statuses` for `status`
 - `compiler.py` — parse → config → render → graph ⇒ `Project`
 - `runner.py` — topo run; the cell protocol (`execute_cell`); plugin run-chain;
   RunSession holds the conduit connection, engine sessions, and extension cache across

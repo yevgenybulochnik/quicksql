@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .state import quicksql_home
+
 BASE_SQL = """\
 -- quicksql starter — one SQL file, cells split by `-- @cell`, config in @-comments.
 -- Run it:      quicksql run
@@ -50,12 +52,13 @@ TEMPLATES: dict[str, str] = {"base": BASE_SQL}
 
 
 def user_templates_dir() -> Path:
-    return Path.home() / ".quicksql" / "templates"
+    return quicksql_home() / "templates"
 
 
 def user_templates() -> dict[str, Path]:
-    """User-defined starting templates: ~/.quicksql/templates/*.qsql[.sql],
-    named by file stem. Missing directory just means none."""
+    """User-defined starting templates: ~/.quicksql/templates/*.qsql[.sql]
+    (``$QSQL_HOME`` moves the directory), named by file stem. Missing
+    directory just means none."""
     directory = user_templates_dir()
     if not directory.is_dir():
         return {}

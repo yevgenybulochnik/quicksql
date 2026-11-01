@@ -505,7 +505,7 @@ def _save_state(project: Project, session: RunSession, ctx: RunContext) -> None:
     try:
         write_state(project, cells)
     except OSError as exc:
-        ctx.log.append(f"couldn't write {state_file(project.root)}: {exc}")
+        ctx.log.append(f"couldn't write {state_file(project.path)}: {exc}")
 
 
 def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:

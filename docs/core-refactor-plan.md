@@ -362,6 +362,11 @@ plan below:
   reruns nothing is `nothing to rerun`, since an edited `autorun: false` cell is a change.
 - Left: `RenderedCell.hash` (the body hash) no longer drives anything; tests build cells
   with it, so it stays until a cleanup.
+- Changed after merge (2026-11-01): state files live under `~/.quicksql/state/`, one per
+  notebook, keyed on its resolved path, instead of a shared `.quicksql/state.json` next
+  to the notebooks (user-reported: the folder cluttered notebook directories). One file
+  per notebook also removes the lost update between two notebooks' runs in one directory.
+  `QSQL_HOME` moves `~/.quicksql`, user templates included; tests get their own.
 
 As planned:
 - Fields declare `affects_results` on `qfield`, the way they declare `qsql_merge` today:

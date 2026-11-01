@@ -16,6 +16,15 @@ def fresh_registries():
         reg.restore(snap)
 
 
+@pytest.fixture(autouse=True)
+def qsql_home(tmp_path_factory, monkeypatch):
+    """Keep every test out of the real ~/.quicksql: runs write state files
+    there, and the notebook picker reads user templates from it."""
+    home = tmp_path_factory.mktemp("qsql-home")
+    monkeypatch.setenv("QSQL_HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def pg_dsn():
     """DSN of the compose Postgres's test database (docker compose up -d --wait);

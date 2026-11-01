@@ -67,15 +67,13 @@ async def test_picker_lists_qsql_and_qsql_sql_but_ignores_plain_sql(tmp_path) ->
         assert not any("schema_dump.sql" in p for p in prompts)
 
 
-async def test_user_templates_offered_and_seed_the_requested_file(tmp_path, monkeypatch) -> None:
+async def test_user_templates_offered_and_seed_the_requested_file(tmp_path, qsql_home) -> None:
     from textual.widgets import OptionList
 
-    home = tmp_path / "home"
-    (home / ".quicksql" / "templates").mkdir(parents=True)
-    (home / ".quicksql" / "templates" / "metrics.qsql").write_text(
+    (qsql_home / "templates").mkdir()
+    (qsql_home / "templates" / "metrics.qsql").write_text(
         "-- @cell tpl\nSELECT 7 AS seven;\n"
     )
-    monkeypatch.setenv("HOME", str(home))
     workdir = tmp_path / "proj"
     workdir.mkdir()
     app = QsqlApp(path=workdir / "base.qsql", watch=False)

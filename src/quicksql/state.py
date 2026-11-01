@@ -8,10 +8,12 @@ Hashing the upstreams' current fingerprints instead would be wrong: an edited
 ``autorun: false`` cell hasn't landed anything new, so its downstream, which
 read the old output, is still fresh.
 
-``.quicksql/state.json`` next to the notebook keeps, per notebook and cell, the
-last run's status and what its landed output was built from. It feeds
-``quicksql status`` and the fingerprints of later runs' downstream cells;
-nothing is ever skipped because of it (no result caching).
+Each notebook's state file, under ``~/.quicksql/state/`` (``$QSQL_HOME`` moves
+the whole directory), keeps each cell's last run's status and what its landed
+output was built from. It feeds ``quicksql status`` and the fingerprints of
+later runs' downstream cells; nothing is ever skipped because of it (no result
+caching). Losing it costs only ``status``'s memory, so keying it on the
+notebook's path is safe: a moved notebook starts over as ``new``.
 """
 
 from __future__ import annotations
@@ -30,8 +32,13 @@ from .models import RenderedCell
 if TYPE_CHECKING:
     from .compiler import Project
 
-STATE_DIR = ".quicksql"
-_VERSION = 1
+HOME_ENV = "QSQL_HOME"  # not QUICKSQL_*: overrides.py reads those as config
+_VERSION = 2  # 1 was one shared file next to the notebooks
+
+
+def quicksql_home() -> Path:
+    """quicksql's per-user directory: ``$QSQL_HOME``, else ``~/.quicksql``."""
+    return Path(os.environ.get(HOME_ENV) or Path.home() / ".quicksql")
 
 
 @dataclass(frozen=True)
@@ -130,8 +137,13 @@ def current_fingerprints(project: Project, landed: Mapping[str, Landed | None]) 
 # ---------- the state file ----------
 
 
-def state_file(root: Path) -> Path:
-    return root / STATE_DIR / "state.json"
+def state_file(notebook: Path) -> Path:
+    """The notebook's own file under the quicksql home, keyed on its resolved
+    path so every spelling of it (``./x.qsql``, ``sub/../x.qsql``, a symlink)
+    shares one state, and named after it so a person can tell which is which."""
+    resolved = notebook.resolve()
+    key = hashlib.sha256(str(resolved).encode()).hexdigest()[:12]
+    return quicksql_home() / "state" / f"{resolved.name}-{key}.json"
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -149,7 +161,9 @@ def read_state(project: Project) -> dict[str, CellState]:
     for a notebook compiled from text (it has no file to key on)."""
     if project.path is None:
         return {}
-    entries = _read(state_file(project.root)).get("notebooks", {}).get(project.path.name, {})
+    entries = _read(state_file(project.path)).get("cells")
+    if not isinstance(entries, dict):
+        return {}
     out: dict[str, CellState] = {}
     for name, entry in entries.items():
         try:
@@ -161,21 +175,20 @@ def read_state(project: Project) -> dict[str, CellState]:
 
 
 def write_state(project: Project, cells: Mapping[str, CellState]) -> None:
-    """Replace this notebook's entry, keeping other notebooks'. The write is
-    atomic, so a reader never sees half a file, and the directory carries a
-    .gitignore of its own, so it stays out of whatever repository it's in."""
+    """Replace the notebook's state file. The write is atomic, so a reader
+    never sees half a file. The file records the notebook's path, so a later
+    prune can find the files of notebooks that no longer exist."""
     if project.path is None:
         return
-    path = state_file(project.root)
-    path.parent.mkdir(exist_ok=True)
-    ignore = path.parent / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("*\n")
-    doc = _read(path) or {"version": _VERSION}
-    notebooks = doc.setdefault("notebooks", {})
-    notebooks[project.path.name] = {
-        name: {"status": cell.status, "landed": asdict(cell.landed) if cell.landed else None}
-        for name, cell in cells.items()
+    path = state_file(project.path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "version": _VERSION,
+        "notebook": str(project.path.resolve()),
+        "cells": {
+            name: {"status": cell.status, "landed": asdict(cell.landed) if cell.landed else None}
+            for name, cell in cells.items()
+        },
     }
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")

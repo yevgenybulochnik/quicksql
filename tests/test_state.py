@@ -59,19 +59,51 @@ def _notebook(tmp_path, text: str):
     return path
 
 
-def test_each_run_writes_the_state_file(tmp_path) -> None:
+def _state_files(qsql_home) -> list:
+    return sorted((qsql_home / "state").glob("*.json"))
+
+
+def test_each_run_writes_the_state_file_under_the_quicksql_home(tmp_path, qsql_home) -> None:
     path = _notebook(tmp_path, "-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT * FROM {{ ref('a') }};\n")
     project = compile_file(path)
     assert all(r.ok for r in run_project(project))
-    state = tmp_path / ".quicksql" / "state.json"
-    entries = json.loads(state.read_text())["notebooks"]["base.qsql"]
+    [state] = _state_files(qsql_home)
+    assert state.name.startswith("base.qsql-")
+    doc = json.loads(state.read_text())
+    assert doc["notebook"] == str(path.resolve())  # so a prune can find orphans
+    entries = doc["cells"]
     assert set(entries) == {"a", "b"}
     landed = {name: cell.landed for name, cell in read_state(project).items()}
     current = current_fingerprints(project, landed)
     assert {name: e["status"] for name, e in entries.items()} == {"a": "ok", "b": "ok"}
     assert {name: e["landed"]["fingerprint"] for name, e in entries.items()} == current
-    # the directory ignores itself, wherever the notebook's repository is
-    assert (tmp_path / ".quicksql" / ".gitignore").read_text().strip() == "*"
+    # nothing lands next to the notebook
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["base.qsql", "data"]
+
+
+def test_each_notebook_has_its_own_state_file(tmp_path, qsql_home) -> None:
+    run_project(compile_file(_notebook(tmp_path, BASE)))
+    other = tmp_path / "other.qsql"
+    other.write_text("-- @cell z\nSELECT 9 AS z;\n")
+    run_project(compile_file(other))
+    assert len(_state_files(qsql_home)) == 2
+    assert set(read_state(compile_file(other))) == {"z"}
+
+
+def test_two_spellings_of_one_notebook_share_its_state(tmp_path, qsql_home) -> None:
+    path = _notebook(tmp_path, BASE)
+    (tmp_path / "sub").mkdir()
+    run_project(compile_file(path))
+    assert set(read_state(compile_file(tmp_path / "sub" / ".." / "base.qsql"))) == {"a"}
+    assert len(_state_files(qsql_home)) == 1
+
+
+def test_the_quicksql_home_defaults_to_dot_quicksql_in_the_users_home(tmp_path, monkeypatch) -> None:
+    from quicksql.state import quicksql_home
+
+    monkeypatch.delenv("QSQL_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert quicksql_home() == tmp_path / ".quicksql"
 
 
 def test_a_run_keeps_the_state_of_cells_it_didnt_run(tmp_path) -> None:
@@ -81,8 +113,9 @@ def test_a_run_keeps_the_state_of_cells_it_didnt_run(tmp_path) -> None:
     assert set(read_state(compile_file(path))) == {"a", "b"}
 
 
-def test_a_notebook_compiled_from_text_writes_no_state(tmp_path) -> None:
+def test_a_notebook_compiled_from_text_writes_no_state(tmp_path, qsql_home) -> None:
     run_project(compile_text(BASE, root=tmp_path))
+    assert _state_files(qsql_home) == []
     assert not (tmp_path / ".quicksql").exists()
 
 
