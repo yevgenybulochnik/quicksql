@@ -121,7 +121,9 @@ def test_sources_demo_compiles_and_runs_without_polars_or_textual(tmp_path: Path
         assert done.returncode == 0, done.stdout + done.stderr
         return done
 
-    cli("compile", "sources.qsql")
+    for command in ("compile", "list", "explain"):
+        cli(command, "sources.qsql")
     report = json.loads(cli("run", "sources.qsql", "--json", "--rows", "2").stdout)
     assert [c["status"] for c in report["cells"]] == ["ok"] * len(report["cells"])
     assert all(c["preview"]["rows"] for c in report["cells"])
+    cli("status", "sources.qsql")
