@@ -21,12 +21,12 @@ from typing import TYPE_CHECKING, Any, Callable
 import duckdb
 import polars as pl
 
-from .conduit import ConduitSession, conduit_target
+from .conduit import ConduitSession, conduit_target, ensure_extension, preview
+from .config import make_sink
 from .errors import ExecutorError, QsqlError, describe
 from .executors.base import EngineSession, SessionLost, result_view
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import Registries
-from .sinks.base import make_sink
 from .state import (
     CellState,
     Landed,
@@ -42,30 +42,6 @@ if TYPE_CHECKING:
     from .compiler import Project
 
 Inner = Callable[[RenderedCell, RunContext], RunResult]
-
-
-def _preview(conn: Any, ref_expr: str, limit: int = 100) -> pl.DataFrame:
-    """Read the landed output back through ref_expr into a small Polars frame.
-    Built row-wise: duckdb's .pl()/.arrow() need pyarrow, an optional extra."""
-    rel = conn.sql(f"SELECT * FROM {ref_expr} LIMIT {limit}")
-    return pl.DataFrame(rel.fetchall(), schema=rel.columns, orient="row")
-
-
-def _load_extension(conn: Any, ext: str) -> None:
-    try:
-        conn.execute(f"LOAD {ext}")
-    except duckdb.Error:
-        conn.execute(f"INSTALL {ext}")
-        conn.execute(f"LOAD {ext}")
-
-
-def _load_ext_cached(ctx: RunContext, ext: str, cell: str | None = None) -> None:
-    if ext in ctx.ext_cache:
-        return
-    # first load per session — may INSTALL (the slow, network path)
-    ctx.emit("cell_step", cell, f"loading duckdb extension {ext}")
-    _load_extension(ctx.conn, ext)
-    ctx.ext_cache.add(ext)
 
 
 class RunSession:
@@ -189,7 +165,7 @@ class StatementError(ExecutorError):
 
     def __init__(self, index: int, count: int, cause: Exception) -> None:
         self.index = index
-        detail = _message(cause)
+        detail = error_message(cause)
         super().__init__(f"statement {index} of {count}: {detail}" if count > 1 else detail)
 
 
@@ -356,11 +332,11 @@ def base_runner(project: Project) -> Inner:
             ctx.emit("cell_step", cell.name, "preparing sinks")
             sink = make_sink(cell.config, ctx.root, project.registries)
             for ext in sink.requires:
-                _load_ext_cached(ctx, ext, cell.name)
+                ensure_extension(ctx, ext, cell.name)
             for upstream in cell.depends_on:
                 up_sink = make_sink(project.cells[upstream].config, ctx.root, project.registries)
                 for ext in up_sink.requires:
-                    _load_ext_cached(ctx, ext, cell.name)
+                    ensure_extension(ctx, ext, cell.name)
                 up_sink.prepare(ctx.conn)
             sink.prepare(ctx.conn)
             ctx.emit("cell_step", cell.name, f"executing on {cell.engine}")
@@ -378,15 +354,15 @@ def base_runner(project: Project) -> Inner:
                 _blame_the_query(cell, ctx)
                 raise
             # effect-only sinks (none) land nothing, so there's nothing to read back
-            preview = _preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else pl.DataFrame()
-            ctx.emit("cell_step", cell.name, f"preview cached ({preview.height} rows)")
+            head = preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else pl.DataFrame()
+            ctx.emit("cell_step", cell.name, f"preview cached ({head.height} rows)")
             return RunResult(
                 cell=cell.name,
                 status="ok",
                 rows=rows,
                 target=target,
                 elapsed=time.perf_counter() - started,
-                preview=preview,
+                preview=head,
             )
         except Exception as exc:
             return _failed(cell.name, exc, elapsed=time.perf_counter() - started)
@@ -519,15 +495,16 @@ def _failed(name: str, exc: Exception, elapsed: float = 0.0) -> RunResult:
         cell=name,
         status="failed",
         elapsed=elapsed,
-        error=_message(exc),
+        error=error_message(exc),
         traceback=traceback.format_exc(),
         statement=exc.index if isinstance(exc, StatementError) else None,
     )
 
 
-def _message(exc: Exception) -> str:
-    """Our errors and duckdb's ("Catalog Error: ...") describe themselves;
-    anything else, e.g. a plugin bug, needs its type to read: "KeyError: 'x'"."""
+def error_message(exc: Exception) -> str:
+    """How a failure reads: our errors and duckdb's ("Catalog Error: ...")
+    describe themselves; anything else, e.g. a plugin bug, needs its type to
+    read: "KeyError: 'x'"."""
     return describe(exc, (QsqlError, duckdb.Error))
 
 

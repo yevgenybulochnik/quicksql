@@ -5,12 +5,19 @@ Needs the ``bigquery`` extra (google-cloud-bigquery, pyarrow).
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterable
 
 from ..errors import ExecutorError
-from ..models import RunContext
+from ..models import CatalogNode, RunContext
 from ..registry import executor
-from .base import EngineSession, Executor, SessionLost, strip_trailing_semicolon
+from .base import (
+    EngineSession,
+    Executor,
+    SessionLost,
+    field_path_frame,
+    strip_trailing_semicolon,
+)
 
 
 def _expired(exc: Exception) -> bool:
@@ -20,6 +27,22 @@ def _expired(exc: Exception) -> bool:
     return "Session" in message and (
         "has expired" in message or "is no longer available" in message
     )
+
+
+def bq_field_paths(fields: Iterable[Any]) -> Any:
+    """A table's schema as a field-path frame, from BigQuery SchemaFields
+    (.name/.field_type/.mode/.fields/.description), depth-first."""
+    rows: list[tuple[str, str, str, str, str]] = []
+
+    def walk(field: Any, column: str, prefix: str) -> None:
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        rows.append((column, path, field.field_type, field.mode or "", field.description or ""))
+        for sub in field.fields or ():
+            walk(sub, column, path)
+
+    for field in fields:
+        walk(field, field.name, "")
+    return field_path_frame(rows)
 
 
 class BigQuerySession(EngineSession):
@@ -81,6 +104,7 @@ class BigQuerySession(EngineSession):
 
 @executor("bigquery")
 class BigQueryExecutor(Executor):
+    dialect = "bigquery"
     supports_context_refs = True
     # bigquery runs multi-statement scripts server-side in one job; splitting
     # client-side would run the pieces as separate jobs and lose session state,
@@ -129,3 +153,100 @@ class BigQueryExecutor(Executor):
     def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
         spec = self.input_spec(config)
         return BigQuerySession(self.make_client(spec), self._query_opts(spec))
+
+    def catalog(self, config: Any, root: Path) -> CatalogNode:
+        return self.context_node(self.input_spec(config))
+
+    def catalog_target(self, target: str, root: Path) -> tuple[str, CatalogNode]:
+        """``project``, or ``project.dataset`` to start at that dataset's tables."""
+        project, _, dataset = target.partition(".")
+        if dataset:
+            return f"bigquery:{project}/{dataset}", self.context_node(
+                {"project": project}, dataset=dataset
+            )
+        return f"bigquery:{project}", self.context_node({"project": project})
+
+    def catalog_table(self, config: Any, root: Path, parts: list[str]) -> CatalogNode | None:
+        """``table`` in the context's dataset, ``dataset.table``, or
+        ``project.dataset.table``: that project, the endpoint carrying over."""
+        spec = self.input_spec(config)
+        if len(parts) >= 3:
+            spec = {**spec, "project": parts[-3]}
+        dataset = parts[-2] if len(parts) >= 2 else spec.get("dataset")
+        if not dataset:
+            return None
+        tables = self.context_node(spec, dataset=dataset)
+        return tables.child({"table": parts[-1]}) if tables.child else None
+
+    def catalog_relations(self, config: Any, root: Path, parts: list[str]) -> list[tuple[str, str]]:
+        """With no typed segments, the context's datasets; with one, that
+        dataset's tables — falling back to the *project* of that name's datasets
+        when it isn't a dataset; with two (project.dataset.), that project's
+        dataset's tables."""
+        spec = self.input_spec(config)
+
+        def datasets(s: dict[str, Any]) -> list[tuple[str, str]]:
+            frame = self.context_node(s).load()
+            return [(d, "dataset") for d in frame["dataset"].to_list()]
+
+        def tables(s: dict[str, Any], ds: str) -> list[tuple[str, str]]:
+            frame = self.context_node(s, dataset=ds).load()
+            return [(row["table"], row["type"] or "table") for row in frame.iter_rows(named=True)]
+
+        if len(parts) == 0:
+            return datasets(spec)
+        if len(parts) == 2:
+            return tables({**spec, "project": parts[0]}, parts[1])
+        if len(parts) > 2:
+            return []
+        try:
+            return tables(spec, parts[0])
+        except Exception:
+            return datasets({**spec, "project": parts[0]})
+
+    def context_node(self, spec: dict[str, Any], dataset: str | None = None) -> CatalogNode:
+        """datasets -> tables -> field paths, on one client memoized per chain.
+        With ``dataset``, the chain starts at that dataset's tables instead."""
+        import polars as pl
+
+        holder: dict[str, Any] = {}
+
+        def client() -> Any:
+            if "client" not in holder:
+                holder["client"] = self.make_client(spec)
+            return holder["client"]
+
+        title = f"bigquery:{spec.get('project')}"
+
+        def dataset_node(ds: str) -> CatalogNode:
+            def tables_load() -> pl.DataFrame:
+                tables = list(client().list_tables(ds))
+                return pl.DataFrame(
+                    {
+                        "table": [t.table_id for t in tables],
+                        "type": [getattr(t, "table_type", None) or "" for t in tables],
+                    },
+                    schema={"table": pl.Utf8, "type": pl.Utf8},
+                )
+
+            def tables_child(trow: dict[str, Any]) -> CatalogNode:
+                table = trow["table"]
+                return CatalogNode(
+                    title=f"{ds}.{table}",
+                    load=lambda: bq_field_paths(client().get_table(f"{ds}.{table}").schema),
+                    key=f"{title}/{ds}.{table}",
+                )
+
+            return CatalogNode(title=f"{title}/{ds}", load=tables_load, child=tables_child)
+
+        if dataset is not None:
+            return dataset_node(dataset)
+
+        def load() -> pl.DataFrame:
+            datasets = [d.dataset_id for d in client().list_datasets()]
+            return pl.DataFrame({"dataset": datasets}, schema={"dataset": pl.Utf8})
+
+        def child(row: dict[str, Any]) -> CatalogNode:
+            return dataset_node(row["dataset"])
+
+        return CatalogNode(title=title, load=load, child=child)

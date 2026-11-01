@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import resolve_cell, resolve_engine, resolve_global, resolve_sink_type
-from .conduit import conduit_target
+from . import conduit
+from .config import make_sink, resolve_cell, resolve_engine, resolve_global, resolve_sink_type
 from .errors import CellError, ConfigError, ConfigErrorGroup
 from .executors.base import split_statements
 from .graph import topo_sort
@@ -15,7 +15,6 @@ from .models import RawBlock, RenderedCell, RunResult
 from .parser import body_hash, parse_text
 from .registry import Registries
 from .render import Producer, render_sql
-from .sinks.base import make_sink
 
 
 def _cell_error(blk: RawBlock, exc: ConfigError) -> CellError:
@@ -126,7 +125,7 @@ def compile_text(
             extensions = list(dict.fromkeys([*cfg.extensions, *rec.extensions]))
             # cross-context refs and file sources read through the duckdb
             # conduit; same-context refs stay in-engine and are exempt
-            if engine != "duckdb" and (rec.external_refs or rec.used_source or extensions):
+            if engine != conduit.ENGINE and (rec.external_refs or rec.used_source or extensions):
                 raise ConfigError(
                     f"uses cross-context ref()/source()/@extensions and must run on "
                     f"duckdb, not {engine!r} (duckdb is the cross-cell conduit)"
@@ -159,14 +158,14 @@ def compile_text(
 
     # stage 3: cross-cell semantic checks that need every cell's sink/engine known
     semantic: list[CellError] = []
-    conduit = conduit_target(global_cfg, root)
+    on_conduit = conduit.conduit_target(global_cfg, root)
     for cell in cells.values():
         # duckdb cells all run on the conduit; a database of the cell's own would
         # be ignored, so name it in the header instead
-        if cell.engine == "duckdb" and conduit_target(cell.config, root) != conduit:
-            on_conduit = executors.get("duckdb")
-            own = on_conduit.input_spec(cell.config).get("path") or ":memory:"
-            header = on_conduit.input_spec(global_cfg).get("path") or ":memory:"
+        if cell.engine == conduit.ENGINE and conduit.conduit_target(cell.config, root) != on_conduit:
+            executor = executors.get(conduit.ENGINE)
+            own = executor.input_spec(cell.config).get("path") or ":memory:"
+            header = executor.input_spec(global_cfg).get("path") or ":memory:"
             semantic.append(
                 CellError(cell.name, cell.line, f"input.duckdb {own!r} isn't the conduit's "
                           f"({header!r}): every duckdb cell runs on the database the "
@@ -186,7 +185,8 @@ def compile_text(
         if (
             cell.reffed_in_context
             and not executors.get(cell.engine).supports_multistatement_materialization
-            and len(split_statements(cell.sql, cell.engine)) > 1
+            # counted in its dialect, though the executor won't split it
+            and len(split_statements(cell.sql, executors.get(cell.engine).dialect or "")) > 1
         ):
             semantic.append(
                 CellError(cell.name, cell.line, f"a {cell.engine} cell referenced "

@@ -1,4 +1,4 @@
-"""Config model composition and layer merging.
+"""Config model composition and layer merging, and resolving a cell's engine and sink.
 
 ``build_models`` composes every registered plugin's ``Config`` into one
 GlobalConfig / CellConfig via multi-inheritance ``create_model``, cached on the
@@ -12,7 +12,8 @@ context (``info.context["registries"]``).
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError, create_model
 
@@ -20,6 +21,9 @@ from .errors import ConfigError
 from .models import Merge, Scope
 from .plugins.base import EmptyConfig
 from .registry import FieldEntry, PluginRegistry, Registries
+
+if TYPE_CHECKING:
+    from .sinks.base import Sink
 
 
 def build_models(plugins: PluginRegistry) -> tuple[type[BaseModel], type[BaseModel]]:
@@ -190,6 +194,17 @@ def resolve_engine(cfg: BaseModel, plugins: PluginRegistry) -> str:
 
 def resolve_sink_type(cfg: BaseModel, plugins: PluginRegistry) -> str:
     return plugins.first_result("resolve_sink", cfg) or "parquet"
+
+
+def make_sink(config: Any, root: Path, registries: Registries) -> Sink:
+    """Build a cell's sink from the notebook's registries: output config
+    amended by sink_config hooks (e.g. the Schema plugin injecting its directive)."""
+    cfg = dict(config.output or {})
+    for plug in registries.plugins.overriding("sink_config"):
+        amended = plug.sink_config(config, cfg)
+        if amended is not None:
+            cfg = amended
+    return registries.sinks.get(resolve_sink_type(config, registries.plugins))(cfg, root)
 
 
 def registries_of(info: Any) -> Registries | None:

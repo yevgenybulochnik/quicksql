@@ -2,9 +2,10 @@
 
 Three relation kinds, mirroring what shows up in a cell's FROM/JOIN:
 
-* an engine-native table (``claims.medical_claims``) — walked through the same
-  per-engine catalog nodes the TUI browser uses (`catalog._CONTEXT_BUILDERS`),
-  so duckdb/sqlite read locally and postgres/bigquery over their live connection;
+* an engine-native table (``claims.medical_claims``) — the leaf the cell's
+  executor finds in its own catalog (`Executor.catalog_table`), the tree the TUI
+  browser walks, so duckdb/sqlite read locally and postgres/bigquery over their
+  live connection;
 * a ``ref('cell')`` — the upstream cell's landed output columns
   (`catalog.sink_output_node`);
 * a ``source('file')`` — the file's columns via its DuckDB reader (`sources.py`).
@@ -24,6 +25,7 @@ import polars as pl
 from dataclasses import dataclass
 
 from .. import catalog
+from ..conduit import load_extension
 from ..sources import reader_for
 
 Column = tuple[str, str]  # (name, type)
@@ -83,10 +85,8 @@ def source_columns(project: Any, spec: str | None) -> list[Column]:
         reader = reader_for(path, None, project.registries.readers)
         con = duckdb.connect()
         try:
-            from ..runner import _load_extension
-
             for ext in reader.requires:
-                _load_extension(con, ext)
+                load_extension(con, ext)
             rel = con.sql(f"SELECT * FROM {reader.expr(path)} LIMIT 0")
             return [(str(c), str(t)) for c, t in zip(rel.columns, rel.types)]
         finally:
@@ -96,39 +96,12 @@ def source_columns(project: Any, spec: str | None) -> list[Column]:
 
 
 def _table_frame(project: Any, cell: Any, name: str) -> pl.DataFrame | None:
-    """Walk the cell engine's catalog to ``name``'s field-path frame. ``name``
-    may be schema-qualified; unqualified falls back to a per-engine default."""
-    engine = cell.engine
-    builder = catalog._CONTEXT_BUILDERS.get(engine)
-    if builder is None:
-        return None
-    registries = project.registries
-    root = builder(cell.config, project.root, registries)
-    if root is None or root.child is None:
-        return None
+    """The field-path frame of table ``name`` (maybe qualified) in the cell's
+    context, from its engine's catalog; None when unknown or unreachable."""
+    executor = project.registries.executors.get(cell.engine)
     parts = name.replace('"', "").split(".")
-    table = parts[-1]
     try:
-        if engine == "postgres":
-            schema = parts[-2] if len(parts) >= 2 else "public"
-            mid = root.child({"schema": schema})
-            leaf = mid.child({"table": table}) if mid and mid.child else None
-        elif engine == "duckdb":
-            schema = parts[-2] if len(parts) >= 2 else "main"
-            leaf = root.child({"schema": schema, "table": table})
-        elif engine == "sqlite":
-            leaf = root.child({"table": table})
-        elif engine == "bigquery":
-            spec = registries.executors.get("bigquery").input_spec(cell.config)
-            if len(parts) >= 3:
-                # project.dataset.table — introspect that project, not the
-                # spec's default (endpoint etc. carry over)
-                root = catalog.bigquery_context_node({**spec, "project": parts[-3]}, registries)
-            dataset = parts[-2] if len(parts) >= 2 else spec.get("dataset")
-            mid = root.child({"dataset": dataset}) if dataset else None
-            leaf = mid.child({"table": table}) if mid and mid.child else None
-        else:
-            return None
+        leaf = executor.catalog_table(cell.config, project.root, parts)
         return leaf.load() if leaf is not None else None
     except Exception:
         return None
@@ -140,38 +113,17 @@ def table_columns(project: Any, cell: Any, name: str) -> list[Column]:
 
 
 def relation_names(
-    cell: Any, parts: list[str], registries: Any, cache: SchemaCache | None = None
+    project: Any, cell: Any, parts: list[str], cache: SchemaCache | None = None
 ) -> list[Column]:
     """Completion candidates for the next segment of a partial dotted relation
-    in a bigquery cell (v1: other engines return []): with no typed segments,
-    the context's datasets; with one, that dataset's tables — falling back to
-    the *project* of that name's datasets when it isn't a dataset; with two
-    (project.dataset.), that project's dataset's tables."""
-    if cell.engine != "bigquery" or len(parts) > 2:
-        return []
-    spec = registries.executors.get("bigquery").input_spec(cell.config)
+    (``parts``: the segments typed so far) in the cell's context, as its
+    engine's catalog offers them; [] when it offers none or can't be reached."""
+    executor = project.registries.executors.get(cell.engine)
     key = ("relations", getattr(cell, "context", ""), tuple(parts))
-
-    def datasets(s: dict) -> list[Column]:
-        frame = catalog.bigquery_context_node(s, registries).load()
-        return [(d, "dataset") for d in frame["dataset"].to_list()]
-
-    def tables(s: dict, ds: str) -> list[Column]:
-        frame = catalog.bigquery_context_node(s, registries).child({"dataset": ds}).load()
-        return [
-            (row["table"], row["type"] or "table") for row in frame.iter_rows(named=True)
-        ]
 
     def compute() -> list[Column]:
         try:
-            if len(parts) == 0:
-                return datasets(spec)
-            if len(parts) == 2:
-                return tables({**spec, "project": parts[0]}, parts[1])
-            try:
-                return tables(spec, parts[0])
-            except Exception:
-                return datasets({**spec, "project": parts[0]})
+            return executor.catalog_relations(cell.config, project.root, parts)
         except Exception:
             return []  # unreachable dataset/project: best effort, no names
 

@@ -156,6 +156,31 @@ the runtime order is registry state, and this makes it readable.
   DB-API driver gets all of this from `DbApiSession` (see the sqlite/postgres
   executors). Keep connection/client construction behind a small seam
   (`make_connection` / `make_client`) so tests can fake the backend offline.
+
+  An executor also declares what front-ends need to know, so a new engine works
+  everywhere with no core edits:
+  - `dialect` — the sqlglot dialect its SQL is written in (`"tsql"`, `"snowflake"`, ...;
+    the engine's name needn't be one). Cell bodies split into statements in it, and the
+    LSP checks syntax and offers keywords and functions in it. Left `None`, bodies split
+    on generic SQL's tokens and the LSP checks no syntax.
+  - a catalog, optionally. Each method returns lazy `quicksql.models.CatalogNode`s: a
+    `title`, a `load()` returning a Polars frame, and a `child(row)` to drill into a row
+    (None at a leaf). A table's leaf loads `executors.base.field_path_frame(rows)`, one
+    `(column, field_path, type, mode, description)` row per column (nested fields get
+    their own paths). Building a node must connect to nothing; only `load()` does.
+    - `catalog(config, root)` — the tree of the context `config` names, which the TUI's
+      catalog drills into. Without it, the context is listed but not browsable.
+    - `catalog_target(target, root)` — a `@catalog: {<engine>: [target]}` entry as
+      `(row name, node)`. Make the row name the `context_key` a cell in that context
+      would have, so the two show once.
+    - `catalog_table(config, root, parts)` — the leaf of a table a cell reads (`parts`:
+      its dotted name, qualifiers first; fill in your engine's default schema), for the
+      LSP's column completions.
+    - `catalog_relations(config, root, parts)` — `(name, detail)` candidates for the
+      next segment of a dotted name typed after `FROM`/`JOIN` (BigQuery's datasets and
+      tables).
+
+  `tests/conftest.py`'s `tsql_engine` fixture is a complete, offline example.
 - `@sink("name")` — a new destination: `prepare` (ATTACH/mkdir), `write`, and
   `ref_expr` (how downstream DuckDB cells read it back).
 - `@source_reader("name")` — map a file extension to a DuckDB reader expression;

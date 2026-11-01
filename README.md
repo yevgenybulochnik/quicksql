@@ -301,7 +301,11 @@ separator. Overrides are literal values, layered on top of the merged global+cel
 
 ## Plugins
 
-`@plugin` / `@executor` / `@source_reader` / `@sink` decorators register into the runtime.
+`@plugin` / `@executor` / `@source_reader` / `@sink` decorators only mark a class: each
+notebook's registries hold the builtins plus the classes its `quicksqlrc.py` and `--plugins`
+modules define. An executor declares its sqlglot `dialect` and, optionally, a catalog, so a new engine
+gets statement splitting, LSP syntax checks and column completion, and the TUI catalog
+with no core edits.
 A `Plugin` pairs a pydantic `Config` (whose fields *become* directives) with behavior hooks —
 `run`/`before_execute`/`after_execute` wrap execution, `render_context` contributes Jinja
 globals, `after_render` transforms SQL, and decision hooks like `resolve_engine` /
@@ -456,8 +460,9 @@ without Docker.
 | `state.py` | fingerprints, the per-notebook state file under `~/.quicksql/state/`, `status` |
 | `compiler.py` | parse → config → render → graph ⇒ a `Project` |
 | `runner.py` | topo run; the cell protocol (`execute_cell`) over each context's engine session; the plugin run-chain; the run session |
-| `conduit.py` | the DuckDB conduit: its target, and the duckdb engine's session on it |
-| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context), sinks, and file readers |
+| `conduit.py` | the DuckDB conduit: its target, the duckdb engine's session on it, and reading through it (extensions, previews) |
+| `catalog.py` | the TUI's schema catalog: each context's tree from its executor, `@catalog` targets, landed outputs |
+| `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context and declares its dialect and catalog), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
 | `cli.py`, `watcher.py`, `tui.py`, `sheet.py`, `scaffold.py` | CLI, watch loop, TUI |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |

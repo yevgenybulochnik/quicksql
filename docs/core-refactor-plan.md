@@ -64,7 +64,11 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   modules into the notebook's own registries; the TUI loads the rc at startup and on `o`;
   an edited rc reloads; the package `__init__`s are lazy and the core's ignore list is
   empty.
-- Next — Phase 6. The agent-facing CLI beyond `run --json` is planned in
+- Done — Phase 6 (2026-11-01, branch `refactor/phase6-capabilities`): executors declare
+  their sqlglot `dialect` and, optionally, a catalog; `catalog.py` and the LSP name no
+  engine; the conduit owns extension loading and previews; import-linter's ignore lists
+  are empty and no module imports another's private names.
+- Next — Phase 7. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
 ## Context
@@ -108,8 +112,11 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | `executors/`, `sinks/` and `plugins/__init__.py` import every implementation, so importing a contract (`plugins.base`) loads all builtins (2026-10-30) | read | 4 (fixed) |
 | Unregistering the Input plugin breaks every compile (`AttributeError`) | reproduced | 5 |
 | Validator names must be unique across all plugins (configs composed by inheritance) | read | 5 |
-| Engine names hard-coded in `catalog.py` (12), `lsp/schema.py` (7), the LSP dialect map | grep | 6 |
-| Plugins, catalog, LSP and TUI import runner privates; 32 function-level imports | grep | 6 |
+| Engine names hard-coded in `catalog.py` (12), `lsp/schema.py` (7), the LSP dialect map | grep | 6 (fixed) |
+| Plugins, catalog, LSP and TUI import runner privates; 32 function-level imports | grep | 6 (fixed) |
+| The CLI imports the runner's `_message`, and the catalog the Postgres executor's `_dsn` (2026-11-01) | AST scan | 6 (fixed) |
+| Browsing a duckdb context whose input is `':memory:'` created a database file named `:memory:` in the notebook's directory (2026-11-01) | reproduced | 6 (fixed) |
+| A Postgres `@catalog` target showed its password, left `$VAR`s unexpanded, and repeated a cell's own context as a second row (2026-11-01) | reproduced | 6 (fixed) |
 | CLI commands auto-import `quicksqlrc.py`; the LSP never loads it | read | 7 |
 | Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 (fixed) |
 | A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
@@ -348,8 +355,45 @@ internal and nothing depends on it, so it goes last, if at all.
   `docs/plugin-authoring.md`, the `emit_sql` demonstrator and the README's
   directive table.
 
-**Phase 6 — capabilities and layering (M).** Needs Phases 3 and 4: the empty ignore list
-needs Phase 4's composition root and lazy package `__init__`s.
+**Phase 6 — capabilities and layering (M; done).** As built, where it differs from the
+plan below:
+- Done: `Executor.dialect`, the sqlglot dialect, declared by each builtin; `None` (the
+  default) splits on generic SQL's tokens and gets no LSP syntax checks. Statement
+  splitting, the compiler's single-statement check and the LSP read it; `_DIALECT` is gone.
+- Done: the catalog capability is four optional executor methods returning
+  `models.CatalogNode`s: `catalog(config, root)` (a context's tree), `catalog_target`
+  (a `@catalog` entry; its row name is the context key a cell there would have),
+  `catalog_table` (the LSP's columns) and `catalog_relations` (BigQuery's dotted
+  FROM/JOIN names). The node builders moved from `catalog.py` into their executors, and
+  the LSP's per-engine `_table_frame` branches and BigQuery relation logic with them. An
+  engine without `catalog` is listed but not browsable; one without `catalog_target`
+  takes no `@catalog` rows. Table leaves load `executors.base.field_path_frame`.
+- Done: `conduit.py` holds `ENGINE`, `load_extension`, `ensure_extension` (loading once
+  per run session), `preview` and `duckdb_field_paths`. The runner's `_message`, which
+  the CLI imported, is `runner.error_message`; the plan's list missed it.
+- Differs: `register_frame` stays in `executors.base`. The conduit imports the session
+  contract to define `ConduitSession`, and `EngineSession.extract`'s default registers
+  through it, so moving it would be an import cycle; it was never a runner private.
+- Differs: `split_statements`/`statement_spans` stay in `executors.base`: Phase 4 made it
+  a contract module whose package `__init__` loads no executor, so the compiler importing
+  it is core → core, and the split is `Executor.split_statements`' default. `make_sink`
+  moved into `config.py`, beside `resolve_sink_type`, dropping its function-level import.
+- Done: both ignore lists are empty. `tests/test_layering.py` also fails when any module
+  imports another module's private name, the separate check planned below, widened past
+  the runner.
+- Check: the engine names left outside their modules are `conduit.ENGINE` (the conduit is
+  duckdb by design), config's and the Output directive's duckdb/parquet defaults, and the
+  LSP's vocabulary and googlesql branches, which key on sqlglot dialect names.
+- Kept: compiling imports no polars (the conduit and the duckdb executor import it
+  lazily), and kitchen-sink compiles in 5.8 ms.
+- Done, found on the way: a duckdb `':memory:'` context isn't browsable instead of
+  creating that file (`f504874`), and a Postgres `@catalog` target reads like an input
+  DSN: env vars expanded, shown as its context key, password hidden, one row with a
+  cell's context (`b55faa5`).
+- Tests: `tests/conftest.py`'s `tsql_engine`, an `mssql` engine written in T-SQL, is the
+  scratch executor; its tests sit in the modules they exercise.
+
+As planned:
 - Executors declare `dialect`, replacing the engine-name-as-sqlglot-dialect convention and
   the LSP's `_DIALECT` map, and optionally a catalog capability, replacing
   `catalog._CONTEXT_BUILDERS`/`_CATALOG_TARGETS` and the engine branches in

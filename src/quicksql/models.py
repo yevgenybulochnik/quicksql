@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal, Optional
 
 
 class Scope(str, Enum):
@@ -205,3 +205,27 @@ class RunContext:
             self.on_event(RunEvent(kind=kind, cell=cell, detail=detail, result=result, cells=cells))
         except Exception as exc:
             self.log.append(f"on_event callback failed for {kind}: {exc}")
+
+
+@dataclass(frozen=True)
+class CatalogNode:
+    """One drillable level of the schema catalog: a frame to show, and how to
+    go deeper. Executors build their contexts' trees from these (``Executor.catalog``);
+    the TUI browses them and the LSP reads table leaves for column completions.
+
+    ``load`` blocks (network/disk) and returns a Polars frame — call it off the
+    UI thread. ``child`` maps a named row of the loaded frame to the next level;
+    None marks a leaf. A leaf describing a table's columns loads a field-path
+    frame (``executors.base.field_path_frame``).
+    """
+
+    title: str
+    load: Callable[[], Any]
+    child: Optional[Callable[[dict[str, Any]], Optional["CatalogNode"]]] = None
+    # stable cache identity across node re-creation (drilling rebuilds nodes);
+    # set it wherever the display title isn't globally unique
+    key: str | None = None
+
+    @property
+    def cache_key(self) -> str:
+        return self.key if self.key is not None else self.title

@@ -101,3 +101,65 @@ def discard_sink(registries):
 
     registries.add(Discard)
     return Discard
+
+
+@pytest.fixture
+def tsql_engine(registries):
+    """A third-party engine ``mssql`` written in T-SQL, added to the test's
+    ``registries`` with no core edits: it declares ``dialect = "tsql"`` (its
+    name is no sqlglot dialect) and a catalog of one database, ``wh``, holding
+    ``dbo.t (x INT)``. Its sessions record each statement they run; the
+    fixture's value is that list."""
+    import polars as pl
+
+    from quicksql.executors.base import EngineSession, Executor, field_path_frame
+    from quicksql.models import CatalogNode
+    from quicksql.registry import executor
+
+    ran: list[str] = []
+
+    class Session(EngineSession):
+        def execute(self, sql, *, scoped=True):
+            ran.append(sql)
+
+        def fetch(self, sql, *, scoped=True):
+            ran.append(sql)
+            return pl.DataFrame({"x": [1]})
+
+    def table(schema: str, name: str) -> CatalogNode | None:
+        if (schema, name) != ("dbo", "t"):
+            return None
+        return CatalogNode(
+            title=f"{schema}.{name}",
+            load=lambda: field_path_frame([("x", "x", "INT", "", "")]),
+        )
+
+    def database(db: str) -> CatalogNode:
+        return CatalogNode(
+            title=f"mssql:{db}",
+            load=lambda: pl.DataFrame({"schema": ["dbo"], "table": ["t"]}),
+            child=lambda row: table(row["schema"], row["table"]),
+        )
+
+    @executor("mssql")
+    class MsSql(Executor):
+        dialect = "tsql"
+        supports_context_refs = True
+
+        def context_key(self, config):
+            return "mssql:wh"
+
+        def open_session(self, config, ctx):
+            return Session()
+
+        def catalog(self, config, root):
+            return database("wh")
+
+        def catalog_target(self, target, root):
+            return f"mssql:{target}", database(target)
+
+        def catalog_table(self, config, root, parts):
+            return table(parts[-2] if len(parts) >= 2 else "dbo", parts[-1])
+
+    registries.add(MsSql)
+    return ran

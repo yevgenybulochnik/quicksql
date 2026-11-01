@@ -370,12 +370,12 @@ def test_session_reconnects_when_conduit_target_changes(tmp_path) -> None:
 
 
 def test_session_caches_extension_loads(tmp_path, monkeypatch) -> None:
-    import quicksql.runner as runner_mod
+    import quicksql.conduit as conduit
 
     loads: list[str] = []
-    original = runner_mod._load_extension
+    original = conduit.load_extension
     monkeypatch.setattr(
-        runner_mod, "_load_extension",
+        conduit, "load_extension",
         lambda conn, ext: (loads.append(ext), original(conn, ext))[1],
     )
     project = compile_text("-- @cell a\n-- @extensions: [json]\nSELECT 1;", root=tmp_path)
@@ -746,17 +746,15 @@ def _recording_session(calls: list):
 def recording_engine(registries):
     """Engine `rec` in the test's registries, whose sessions record the
     runner's calls; yields the calls."""
-    from quicksql.executors.base import Executor, split_statements
+    from quicksql.executors.base import Executor
     from quicksql.registry import executor
 
     calls: list = []
 
     @executor("rec")
     class Rec(Executor):
+        dialect = "duckdb"
         supports_context_refs = True
-
-        def split_statements(self, sql):
-            return split_statements(sql, "duckdb")
 
         def open_session(self, config, ctx):
             calls.append(("open",))
@@ -949,3 +947,16 @@ def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path, registries) -> N
     ).run()
     assert result.error == "IO Error: the disk is full"
     assert result.statement is None
+
+
+def test_a_third_party_engine_runs_each_statement_split_in_its_dialect(
+    tmp_path, tsql_engine, registries
+) -> None:
+    project = compile_text(
+        "-- @cell a\n-- @engine: mssql\nSELECT 1 AS [a;b];\nSELECT 2 AS x\n",
+        root=tmp_path,
+        registries=registries,
+    )
+    [result] = run_project(project)
+    assert result.ok, result.error
+    assert tsql_engine == ["SELECT 1 AS [a;b]", "SELECT 2 AS x"]

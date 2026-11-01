@@ -1,3 +1,3 @@
-from .base import Sink, make_sink
+from .base import Sink
 
-__all__ = ["Sink", "make_sink"]
+__all__ = ["Sink"]

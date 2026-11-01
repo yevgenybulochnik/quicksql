@@ -3,26 +3,95 @@
 A run session holds one connection to it, to the database the header's
 ``input.duckdb`` names, in memory without one. Every duckdb cell runs there, so
 a cell can't name a database of its own.
+
+Anything that reads through DuckDB uses the helpers here: loading extensions,
+previewing a landed output, describing a relation's columns.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 import duckdb
 
-from .executors.base import EngineSession, engine_input, unwrap_error_context
+from .executors.base import EngineSession, engine_input, field_path_frame, unwrap_error_context
 from .models import RunContext
+
+if TYPE_CHECKING:
+    import polars as pl
+
+ENGINE = "duckdb"  # the engine whose cells run on the conduit itself
 
 
 def conduit_target(config: Any, root: Path) -> str:
     """The database ``config``'s ``input.duckdb`` names: a path under ``root``,
     or ``:memory:``."""
-    path = engine_input(config, "duckdb").get("path")
+    path = engine_input(config, ENGINE).get("path")
     if not path or path == ":memory:":
         return ":memory:"
     return str(root / path)
+
+
+def load_extension(conn: Any, ext: str) -> None:
+    """LOAD a duckdb extension on ``conn``, INSTALLing it first if need be."""
+    try:
+        conn.execute(f"LOAD {ext}")
+    except duckdb.Error:
+        conn.execute(f"INSTALL {ext}")
+        conn.execute(f"LOAD {ext}")
+
+
+def ensure_extension(ctx: RunContext, ext: str, cell: str | None = None) -> None:
+    """Load ``ext`` on the run's conduit unless its run session already has."""
+    if ext in ctx.ext_cache:
+        return
+    # first load per session — may INSTALL (the slow, network path)
+    ctx.emit("cell_step", cell, f"loading duckdb extension {ext}")
+    load_extension(ctx.conn, ext)
+    ctx.ext_cache.add(ext)
+
+
+def preview(conn: Any, relation: str, limit: int = 100) -> pl.DataFrame:
+    """The first ``limit`` rows of ``relation`` (a sink's ``ref_expr``, a
+    ``read_parquet(...)``) as a Polars frame. Built row-wise: duckdb's
+    .pl()/.arrow() need pyarrow, an optional extra."""
+    import polars as pl  # only reading results needs it, never compiling
+
+    rel = conn.sql(f"SELECT * FROM {relation} LIMIT {limit}")
+    return pl.DataFrame(rel.fetchall(), schema=rel.columns, orient="row")
+
+
+def duckdb_field_paths(columns: Sequence[str], types: Sequence[Any]) -> pl.DataFrame:
+    """A relation's columns as a field-path frame, from DuckDBPyTypes
+    (.id/.children), depth-first.
+
+    ``.children`` raises on scalars, so recursion gates on ``.id``; fixed-size
+    arrays carry a non-type child (the size), filtered by the ``.id`` check.
+    LIMIT-0 relation types carry no comments, so descriptions stay empty.
+    """
+    rows: list[tuple[str, str, str, str, str]] = []
+
+    def walk(name: str, type_: Any, column: str, prefix: str) -> None:
+        path = f"{prefix}.{name}" if prefix else name
+        mode = "REPEATED" if type_.id in ("list", "array", "map") else ""
+        rows.append((column, path, str(type_), mode, ""))
+        descend(type_, column, path)
+
+    def descend(type_: Any, column: str, path: str) -> None:
+        if type_.id == "struct":
+            for sub_name, sub_type in type_.children:
+                walk(sub_name, sub_type, column, path)
+        elif type_.id in ("list", "array", "map"):
+            # the collection wrapper adds no path segment: recurse into the
+            # element type(s) under the collection's own path
+            for _, sub_type in type_.children:
+                if hasattr(sub_type, "id"):
+                    descend(sub_type, column, path)
+
+    for name, type_ in zip(columns, types):
+        walk(name, type_, name, "")
+    return field_path_frame(rows)
 
 
 class ConduitSession(EngineSession):

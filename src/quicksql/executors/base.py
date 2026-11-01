@@ -5,6 +5,10 @@ context (engine + connection target). The runner drives the session through the
 cell protocol (``runner.execute_cell``): setup statements run for effect, then
 the terminal statement is materialized as a temp for same-context consumers
 and/or extracted onto the DuckDB conduit, where every sink lands from.
+
+An executor also declares what front-ends need to know about its engine: the
+sqlglot ``dialect`` its SQL is written in, and optionally a catalog of the
+contexts it reaches, which the TUI browses and the LSP completes from.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import sqlglot
 from sqlglot.tokens import TokenType
 
 from ..errors import ExecutorError
-from ..models import RunContext
+from ..models import CatalogNode, RunContext
 
 
 def strip_trailing_semicolon(sql: str) -> str:
@@ -138,6 +142,27 @@ def _normalize_arrow(ctx: RunContext, frame: Any) -> Any:
     return frame
 
 
+FIELD_PATH_COLUMNS = ("column", "field_path", "type", "mode", "description")
+
+
+def field_path_frame(rows: list[tuple[str, str, str, str, str]]) -> Any:
+    """A catalog leaf's frame: one row per (column, field_path, type, mode,
+    description), mirroring BigQuery's ``information_schema.column_field_paths``
+    — one row per path level, intermediate STRUCTs included; a LIST wrapper adds
+    no path segment. A flat table's field path is its column name."""
+    import polars as pl
+
+    return pl.DataFrame(rows, schema={c: pl.Utf8 for c in FIELD_PATH_COLUMNS}, orient="row")
+
+
+def info_node(title: str, message: str) -> CatalogNode:
+    """A leaf that only says something, e.g. why a context can't be browsed."""
+    import polars as pl
+
+    frame = pl.DataFrame({"info": [message]})
+    return CatalogNode(title=title, load=lambda: frame)
+
+
 def engine_input(config: Any, engine: str, shorthand: str = "path") -> dict[str, Any]:
     """The ``input.<engine>`` directive as a dict, ``{}`` when absent. A bare
     string is the engine's shorthand for its main key: ``input: {sqlite: x.db}``
@@ -153,6 +178,11 @@ def engine_input(config: Any, engine: str, shorthand: str = "path") -> dict[str,
 
 class Executor(ABC):
     name: ClassVar[str] = ""
+    # the sqlglot dialect the engine's SQL is written in: cell bodies split into
+    # statements in it, and the LSP checks syntax and offers keywords in it.
+    # None: no dialect sqlglot knows, so bodies split on generic SQL's tokens
+    # and the LSP checks no syntax.
+    dialect: ClassVar[str | None] = None
     # engines that keep a per-context session where same-context cells can
     # reference each other as temp tables (in the engine's own dialect)
     supports_context_refs: ClassVar[bool] = False
@@ -173,15 +203,41 @@ class Executor(ABC):
         return f"{self.name}:"
 
     def split_statements(self, sql: str) -> list[str]:
-        """Split the cell body into statements. The engine name doubles as the
-        sqlglot dialect for all four engines (see lsp `_DIALECT`)."""
-        return split_statements(sql, self.name)
+        """Split the cell body into statements, in the engine's dialect."""
+        return split_statements(sql, self.dialect or "")
 
     @abstractmethod
     def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
         """Connect to the context ``config`` names. The runner keeps the session
         for every cell sharing its ``context_key`` and closes it with the run
         session (or right after the cell, when there is no run session)."""
+
+    # ---- the catalog: optional; an engine without one is listed, not browsed.
+    # Nodes load lazily, so building one connects to nothing.
+
+    def catalog(self, config: Any, root: Path) -> CatalogNode | None:
+        """The browsable tree of the context ``config`` names (the TUI's
+        catalog), or None when it can't be browsed."""
+        return None
+
+    def catalog_target(self, target: str, root: Path) -> tuple[str, CatalogNode] | None:
+        """A ``@catalog: {<engine>: [target]}`` entry as (row name, tree). The
+        row name is the ``context_key`` a cell in that context would have, so
+        the two show once. None: the engine takes no @catalog targets."""
+        return None
+
+    def catalog_table(self, config: Any, root: Path, parts: list[str]) -> CatalogNode | None:
+        """The field-path leaf of a table a cell in the context ``config``
+        names reads, for the LSP's column completions. ``parts`` is the table's
+        dotted name, qualifiers first; unqualified parts fall back to the
+        engine's defaults (a default schema). None when there's no such table."""
+        return None
+
+    def catalog_relations(self, config: Any, root: Path, parts: list[str]) -> list[tuple[str, str]]:
+        """(name, detail) candidates for the next segment of a partial dotted
+        relation, ``parts`` being the segments typed so far, for the LSP's
+        FROM/JOIN completions. [] when the engine offers none."""
+        return []
 
 
 class SessionLost(ExecutorError):

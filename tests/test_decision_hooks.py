@@ -80,12 +80,12 @@ def test_schema_directive_reaches_sink_config(tmp_path) -> None:
 
 
 def test_extensions_plugin_loads_via_before_execute(tmp_path, monkeypatch) -> None:
-    import quicksql.runner as runner_mod
+    import quicksql.conduit as conduit
 
     loads: list[str] = []
-    original = runner_mod._load_extension
+    original = conduit.load_extension
     monkeypatch.setattr(
-        runner_mod, "_load_extension",
+        conduit, "load_extension",
         lambda conn, ext: (loads.append(ext), original(conn, ext))[1],
     )
     project = compile_text("-- @cell a\n-- @extensions: [json]\nSELECT 1;", root=tmp_path)

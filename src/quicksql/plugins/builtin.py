@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationInfo, field_validator
 
+from ..conduit import ensure_extension
 from ..config import registries_of
 from ..errors import ConfigError
 from ..models import Merge, Scope
@@ -106,10 +107,8 @@ class Extensions(Plugin):
         extensions: list[str] = qfield([], merge=Merge.EXTEND)
 
     def before_execute(self, cell: Any, ctx: Any) -> None:
-        from ..runner import _load_ext_cached
-
         for ext in cell.extensions:
-            _load_ext_cached(ctx, ext, cell.name)
+            ensure_extension(ctx, ext, cell.name)
 
 
 @plugin
@@ -216,8 +215,9 @@ class Schema(Plugin):
 @plugin
 class Catalog(Plugin):
     """The catalog: directive — extra schema-browser targets (TUI ``S``)
-    beyond the contexts cells' inputs imply. Mapping engine -> targets:
-    bigquery takes ``project`` or ``project.dataset``; postgres takes DSNs;
+    beyond the contexts cells' inputs imply. Mapping engine -> targets, each
+    read by that engine's executor (``Executor.catalog_target``): bigquery
+    takes ``project`` or ``project.dataset``; postgres takes DSNs;
     sqlite/duckdb take database paths."""
 
     scope = Scope.GLOBAL
