@@ -19,13 +19,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
-import polars as pl
 
 from .conduit import ConduitSession, conduit_target, ensure_extension, preview
 from .config import make_sink
 from .errors import ExecutorError, QsqlError, describe
 from .executors.base import EngineSession, SessionLost, result_view
-from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
+from .models import Preview, RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import Registries
 from .state import (
     CellState,
@@ -354,7 +353,7 @@ def base_runner(project: Project) -> Inner:
                 _blame_the_query(cell, ctx)
                 raise
             # effect-only sinks (none) land nothing, so there's nothing to read back
-            head = preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else pl.DataFrame()
+            head = preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else Preview((), ())
             ctx.emit("cell_step", cell.name, f"preview cached ({head.height} rows)")
             return RunResult(
                 cell=cell.name,
