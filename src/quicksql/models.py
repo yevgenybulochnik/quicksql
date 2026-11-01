@@ -70,6 +70,24 @@ class RenderedCell:
 Status = Literal["ok", "failed", "skipped"]
 
 
+@dataclass(frozen=True)
+class Preview:
+    """The head of a cell's landed output as plain Python values: what a run
+    caches for front-ends, which read it without a dataframe library (the TUI
+    builds its own Polars frame from it)."""
+
+    columns: tuple[str, ...]
+    rows: tuple[tuple[Any, ...], ...]
+
+    @property
+    def height(self) -> int:
+        return len(self.rows)
+
+    def column(self, name: str) -> list[Any]:
+        i = self.columns.index(name)
+        return [row[i] for row in self.rows]
+
+
 @dataclass
 class RunResult:
     """Outcome of running one cell: where it landed, how many rows, or why not.
@@ -89,7 +107,7 @@ class RunResult:
     error: str | None = None
     traceback: str | None = None
     statement: int | None = None
-    preview: Any | None = None
+    preview: Preview | None = None  # an ok cell's; empty when its sink lands nothing
 
     @property
     def ok(self) -> bool:
@@ -111,10 +129,10 @@ class RunResult:
             "traceback": self.traceback,
         }
         if rows > 0:
-            frame = self.preview
-            out["preview"] = None if frame is None else {
-                "columns": list(frame.columns),
-                "rows": [[_jsonable(v) for v in row] for row in frame.head(rows).rows()],
+            head = self.preview
+            out["preview"] = None if head is None else {
+                "columns": list(head.columns),
+                "rows": [[_jsonable(v) for v in row] for row in head.rows[:rows]],
             }
         return out
 

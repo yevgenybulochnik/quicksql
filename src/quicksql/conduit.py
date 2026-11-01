@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 import duckdb
 
 from .executors.base import EngineSession, engine_input, field_path_frame, unwrap_error_context
-from .models import RunContext
+from .models import Preview, RunContext
 
 if TYPE_CHECKING:
     import polars as pl
@@ -52,14 +52,11 @@ def ensure_extension(ctx: RunContext, ext: str, cell: str | None = None) -> None
     ctx.ext_cache.add(ext)
 
 
-def preview(conn: Any, relation: str, limit: int = 100) -> pl.DataFrame:
+def preview(conn: Any, relation: str, limit: int = 100) -> Preview:
     """The first ``limit`` rows of ``relation`` (a sink's ``ref_expr``, a
-    ``read_parquet(...)``) as a Polars frame. Built row-wise: duckdb's
-    .pl()/.arrow() need pyarrow, an optional extra."""
-    import polars as pl  # only reading results needs it, never compiling
-
+    ``read_parquet(...)``) as plain values, the way DuckDB fetches them."""
     rel = conn.sql(f"SELECT * FROM {relation} LIMIT {limit}")
-    return pl.DataFrame(rel.fetchall(), schema=rel.columns, orient="row")
+    return Preview(tuple(rel.columns), tuple(rel.fetchall()))
 
 
 def duckdb_field_paths(columns: Sequence[str], types: Sequence[Any]) -> pl.DataFrame:

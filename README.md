@@ -46,7 +46,7 @@ $ uv run quicksql compile      # rendered SQL for every cell
 $ uv run quicksql explain      # the effective plugin chain + per-cell engine/sink/context
 $ uv run quicksql watch        # re-run changed cells + their dependents on every save
 $ uv run quicksql status       # each cell: ok, failed, skipped, stale (and why), or new
-$ uv run quicksql tui          # interactive VisiData-style terminal UI
+$ uv run quicksql tui          # interactive VisiData-style terminal UI (the `tui` extra)
 ```
 
 `quicksql` and the shorter `qsql` are the same entry point. The default file is `base.qsql`;
@@ -337,7 +337,8 @@ cells:
 ## The TUI
 
 `quicksql tui` opens a reflect-only terminal UI over the notebook (the file is edited
-elsewhere; the TUI shows results). Opening it on a missing file brings up a notebook picker —
+elsewhere; the TUI shows results). It needs the `tui` extra (`pip install 'quicksql[tui]'`;
+a checkout's dev group has it already). Opening it on a missing file brings up a notebook picker —
 existing `.qsql` files plus starter templates.
 
 | Key | Action | Key | Action |
@@ -408,6 +409,7 @@ LSP client) and a self-contained Neovim setup (`editors/nvim/qsql.lua`).
 ```console
 $ uv sync --extra bigquery      # BigQuery engine (google-cloud-bigquery + pyarrow)
 $ uv sync --extra postgres      # Postgres engine (psycopg)
+$ uv sync --extra tui           # the TUI (textual); the dev group has it already
 $ uv sync --extra visidata      # the TUI's V deep-dive into real VisiData
 $ uv sync --extra lsp           # the language server (pygls + sqlglot)
 ```

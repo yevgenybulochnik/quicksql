@@ -10,7 +10,7 @@ import polars as pl
 from ..conduit import preview
 from ..config import make_sink
 from ..errors import QsqlError
-from ..models import RunResult
+from ..models import Preview, RunResult
 
 if TYPE_CHECKING:
     from ..compiler import Project
@@ -23,8 +23,8 @@ def preview_frame(
 ) -> pl.DataFrame:
     """The frame to show for cell ``name``. ``connect`` opens the DuckDB handle
     a landed output is read back through (a cursor of the live conduit)."""
-    if result is not None and isinstance(result.preview, pl.DataFrame):
-        return result.preview
+    if result is not None and result.preview is not None:
+        return frame_of(result.preview)
     if result is not None and result.ok and result.target and result.target.endswith(".parquet"):
         return read_parquet_head(result.target)
     if project and name in project.cells:
@@ -32,6 +32,12 @@ def preview_frame(
         if landed is not None:
             return landed
     return pl.DataFrame({"info": [f"no output for {name!r} yet — press r to run"]})
+
+
+def frame_of(head: Preview) -> pl.DataFrame:
+    """A Polars frame of a run's plain preview, its dtypes inferred from the
+    values (as the runner's own frame was before the core dropped Polars)."""
+    return pl.DataFrame(list(head.rows), schema=list(head.columns), orient="row")
 
 
 def read_parquet_head(target: str) -> pl.DataFrame:
@@ -42,7 +48,7 @@ def read_parquet_head(target: str) -> pl.DataFrame:
 
     con = duckdb.connect()
     try:
-        return preview(con, f"read_parquet('{target}')", PREVIEW_ROWS)
+        return frame_of(preview(con, f"read_parquet('{target}')", PREVIEW_ROWS))
     finally:
         con.close()
 
@@ -61,7 +67,7 @@ def read_landed(project: Project, name: str, connect: Callable[[], Any]) -> pl.D
         )
     con = connect()
     try:
-        return preview(con, sink.ref_expr(name), PREVIEW_ROWS)
+        return frame_of(preview(con, sink.ref_expr(name), PREVIEW_ROWS))
     except (duckdb.Error, QsqlError):
         return None  # never landed, or its database isn't attached this session
     finally:

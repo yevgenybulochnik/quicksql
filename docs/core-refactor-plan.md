@@ -76,8 +76,11 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   session, and a replaced run stops between cells (`run_project(cancel=)`). The Data
   sheet follows a rerun, says when it holds a preview's first rows only, and keeps its
   dive across tabs; a catalog load from the previous notebook lands nowhere.
-- Next — Phase 10, with Phase 7 when it's wanted. The agent-facing CLI beyond
-  `run --json` is planned in `docs/agent-cli-plan.md`.
+- Done — Phase 10 (2026-11-01, branch `refactor/phase10-deps`): a run's preview is plain
+  columns and rows (`models.Preview`), so the runner imports no polars; `textual` is the
+  `tui` extra. The sources demo compiles, runs and reports with both blocked from import.
+- Next — Phase 7 when notebooks with rc files get shared; Phase 5 is optional. The
+  agent-facing CLI beyond `run --json` is planned in `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -130,7 +133,7 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
 | `tui.py` is 1,304 lines, one class with 82 methods | `wc` | 9 (fixed) |
 | A catalog load running across a notebook switch also cached its frame under the root's key, where the new notebook's own root load read it (2026-11-01) | reproduced by the Phase 9 test | 9 (fixed) |
-| `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 |
+| `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 (fixed) |
 
 ## Target
 
@@ -552,7 +555,30 @@ As planned:
 - Tests first: the existing pilot tests pass unchanged after each extraction; one new
   test per fixed issue; `/verify` in tmux after each step.
 
-**Phase 10 — dependencies (S).** Last.
+**Phase 10 — dependencies (S; done).** As built, where it differs from the plan below:
+- Done: `RunResult.preview` is a `models.Preview` (`columns`, `rows`, `height`,
+  `column(name)`), what `conduit.preview` fetches from DuckDB; an effect-only cell's is
+  empty. The runner imports no polars. The TUI builds its frame in `tui.previews.frame_of`
+  from the same fetched rows the runner's frame was built from, and `run --json` reads the
+  rows as they are.
+- Done: `textual` is the `tui` extra; the dev group keeps it, as it keeps pygls, so the
+  TUI tests run by default. `quicksql tui` without it prints "the TUI needs the 'tui'
+  extra: pip install 'quicksql[tui]'" and exits 1; an ImportError of anything else still
+  raises.
+- Differs: the SQLite and Postgres executors already imported polars lazily
+  (`DbApiSession.fetch`, the catalog builders), so nothing changed there. Polars stays a
+  dependency, imported where frames are built: the TUI and `sheet.py`, `catalog.py` and
+  `lsp/schema.py`, extraction (`DbApiSession.fetch`, `register_frame`) and the executors'
+  catalog builders.
+- Done: `tests/test_demos.py` runs the sources demo's compile, list, explain,
+  `run --json --rows 2` and status in a subprocess with polars and textual blocked;
+  `tests/test_cli.py` checks the install hint.
+- Measured: `quicksql run` of a one-cell DuckDB notebook, median of 7, went from 482 ms
+  to 377 ms with polars no longer loaded.
+- Breaking: `RunResult.preview` is a `Preview`, not a Polars frame; `quicksql tui` needs
+  `quicksql[tui]`.
+
+As planned:
 - Previews leave the core as columns plus rows; the TUI builds its own Polars frames.
 - `textual` moves to a `tui` extra; `quicksql tui` prints an install hint without it.
 - Polars remains only where frames are built (the TUI, and SQLite/Postgres extraction)

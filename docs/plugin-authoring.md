@@ -67,7 +67,10 @@ Two ways in:
 - **Full control** — override `run(cell, ctx, inner)` to own control flow: call
   `inner` zero or more times (caching, retries), transform the result.
 
-Cell failures arrive as `RunResult(status="failed", error=..., traceback=...)`, so
+An ok result's `preview` is a `quicksql.models.Preview`: the head of the landed output
+(at most 100 rows) as plain `columns` and `rows`, empty when the sink lands nothing; a
+plugin that synthesizes a result builds one. Cell failures arrive as
+`RunResult(status="failed", error=..., traceback=...)`, so
 retry-style plugins can inspect them: `error` is the human message (the engine's own,
 e.g. DuckDB's `Catalog Error: ...`, else prefixed with the exception type, `KeyError: 'x'`)
 and `traceback` the full trace. `status` is `"ok"` / `"failed"` / `"skipped"`; `ok` is a

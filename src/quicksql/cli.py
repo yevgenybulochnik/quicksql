@@ -342,10 +342,15 @@ def tui(
     plugins: Optional[list[str]] = PLUGINS_OPT,
 ) -> None:
     """Open the interactive TUI (VisiData-style keys, reflect-only)."""
+    try:
+        from .tui import QsqlApp
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").partition(".")[0] != "textual":
+            raise  # a bug of ours, not the missing extra
+        typer.secho("the TUI needs the 'tui' extra: pip install 'quicksql[tui]'", fg="red")
+        raise typer.Exit(1)
     if file.exists():
         _project(file, set_, plugins)  # fail fast on compile errors
-    from .tui import QsqlApp
-
     QsqlApp(
         path=file, overrides=gather_overrides(list(set_ or [])), plugins=plugins or ()
     ).run()
