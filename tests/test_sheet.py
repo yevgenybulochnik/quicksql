@@ -105,3 +105,11 @@ def test_filtered_invalid_or_empty_pattern_returns_self() -> None:
     sheet = Sheet(FRAME)
     assert sheet.filtered("[unclosed") is sheet
     assert sheet.filtered("") is sheet
+
+
+def test_a_sample_carries_through_every_derived_sheet() -> None:
+    # a sheet over an output's first rows: whatever is computed from it is too
+    s = Sheet(pl.DataFrame({"a": [1, 2, 2], "b": ["x", "y", "z"]}), sample=3)
+    derived = [s.sort(), s.freq(), s.describe(), s.filtered("y"), s.hide_current(), s.move(1, 0)]
+    assert [d.sample for d in derived] == [3] * len(derived)
+    assert Sheet(pl.DataFrame({"a": [1]})).freq().sample is None

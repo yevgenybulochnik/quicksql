@@ -100,6 +100,8 @@ first `@cell`) inherited by every cell.
   `quicksql status`; it never skips a run. `$QSQL_HOME` moves `~/.quicksql` (state and user
   templates); an autouse fixture gives every test its own, so tests never touch the real one.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
+  The TUI runs one run at a time per session: a new run, `o` or quitting cancels the one
+  under way, which stops between cells (`run_project(cancel=)`), and the next waits for it.
 
 ## Commands
 
@@ -154,7 +156,15 @@ first `@cell`) inherited by every cell.
   `@catalog` targets, landed outputs read back through DuckDB
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
   opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
-- `scaffold.py`, `cli.py`, `watcher.py`, `sheet.py` + `tui.py` — CLI, watch loop, TUI
+- `scaffold.py`, `cli.py`, `watcher.py` — CLI, watch loop
+- `tui/` — the TUI. `app.py` (`QsqlApp`: layout, key routing, the notebook's lifecycle
+  and watch loop), `runs.py` (`RunController`: the session, one run at a time,
+  generation-tagged; it repaints through the app's `run_*` hooks), `panes.py`
+  (`SheetTable` renders a Sheet; `Surface` holds the sheet verbs; `DataPanes` is the Data
+  tab's stacks and split), `catalog_view.py` (the Catalog tab's loads, cache and
+  per-notebook generation), `previews.py`, `screens.py`; `sheet.py` holds the pure Sheet
+  ops. The subtitle has one writer, `QsqlApp.refresh_subtitle`. Textual is the `tui` extra
+  (the dev group installs it); `quicksql tui` without it names the extra.
 - `lsp/` — `analysis.py` (diagnostics/completions on sqlglot in the cell's executor's
   dialect + length-preserving Jinja mask; tables and relations from its catalog), `server.py` (pygls stdio); bigquery cells prefer the googlesql
   `execute_query` binary when found (PATH or `QSQL_EXECUTE_QUERY` — deliberately
@@ -183,6 +193,12 @@ pass `registries=registries` to `compile_text`/`compile_file`/`QsqlApp`/`Analyze
   suite) under `systemd-run --user --scope -p MemoryMax=3G <cmd>` so a runaway process is
   killed instead of the session. Don't use `ulimit -v`: polars/duckdb reserve large virtual
   address arenas and abort under address-space caps.
+
+- **The core path imports neither polars nor textual.** `tests/test_demos.py` runs the
+  sources demo (compile, list, explain, `run --json`, status) in a subprocess with both
+  blocked. A run caches its preview as `models.Preview` (plain columns and rows); import
+  polars only where frames are built — the TUI, `sheet.py`, catalog/LSP column lists,
+  SQLite/Postgres extraction — and lazily outside the TUI.
 
 ## Conventional Commits
 

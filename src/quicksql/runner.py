@@ -19,13 +19,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import duckdb
-import polars as pl
 
 from .conduit import ConduitSession, conduit_target, ensure_extension, preview
 from .config import make_sink
 from .errors import ExecutorError, QsqlError, describe
 from .executors.base import EngineSession, SessionLost, result_view
-from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
+from .models import Preview, RenderedCell, RunContext, RunEvent, RunResult, Status
 from .registry import Registries
 from .state import (
     CellState,
@@ -354,7 +353,7 @@ def base_runner(project: Project) -> Inner:
                 _blame_the_query(cell, ctx)
                 raise
             # effect-only sinks (none) land nothing, so there's nothing to read back
-            head = preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else pl.DataFrame()
+            head = preview(ctx.conn, sink.ref_expr(cell.name)) if sink.lands_output else Preview((), ())
             ctx.emit("cell_step", cell.name, f"preview cached ({head.height} rows)")
             return RunResult(
                 cell=cell.name,
@@ -390,7 +389,11 @@ def run_project(
     closure: bool = True,
     session: RunSession | None = None,
     on_event: Callable[[RunEvent], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> list[RunResult]:
+    """Run the selected cells in topo order. ``cancel`` is asked before each
+    cell: once it says True, the cell under way has finished and the rest
+    don't start; the run still saves state and emits ``run_finished``."""
     owns_session = session is None
     session = session or RunSession()
     ctx = RunContext(
@@ -423,7 +426,15 @@ def run_project(
         # cell that didn't come out ok -> the failed cells behind it (itself if
         # it failed); depends_on carries both ref() and @depends_on edges
         failed_roots: dict[str, list[str]] = {}
-        for name in names:
+        not_run: list[str] = []
+        for i, name in enumerate(names):
+            if cancel is not None and cancel():
+                not_run = names[i:]
+                ctx.emit(
+                    "note",
+                    detail=f"cancelled — {len(not_run)} cell(s) not run: {', '.join(not_run)}",
+                )
+                break
             cell = project.cells[name]
             roots = list(
                 dict.fromkeys(r for up in cell.depends_on for r in failed_roots.get(up, ()))
@@ -459,10 +470,11 @@ def run_project(
         for line in list(ctx.log):  # plugin lifecycle failures were invisible before
             ctx.emit("note", detail=line)
         counts = Counter(r.status for r in results)
+        cancelled = f"; cancelled, {len(not_run)} not run" if not_run else ""
         ctx.emit(  # terminal: consumers may stop listening after this
             "run_finished",
             detail=f"{counts['ok']} ok, {counts['failed']} failed, {counts['skipped']} skipped"
-            f" in {time.perf_counter() - run_started:.1f}s",
+            f" in {time.perf_counter() - run_started:.1f}s{cancelled}",
         )
     finally:
         session.tmpdir = ctx.tmpdir  # adopt a lazily-created temp dir

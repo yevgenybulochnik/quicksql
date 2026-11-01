@@ -466,3 +466,18 @@ def test_status_json_reports_a_compile_error_as_json(tmp_path) -> None:
     assert result.exit_code == 3
     doc = json.loads(result.output)
     assert doc["cells"] == [] and doc["errors"][0]["cell"] == "a"
+
+
+def test_tui_without_textual_names_the_extra(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    nb = tmp_path / "base.qsql"
+    nb.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    blocked = "import sys; sys.modules['textual'] = None\nfrom quicksql.cli import app\napp()"
+    done = subprocess.run(
+        [sys.executable, "-c", blocked, "tui", str(nb)], capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 1
+    assert "the TUI needs the 'tui' extra: pip install 'quicksql[tui]'" in done.stdout
+    assert "Traceback" not in done.stderr

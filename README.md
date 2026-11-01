@@ -46,7 +46,7 @@ $ uv run quicksql compile      # rendered SQL for every cell
 $ uv run quicksql explain      # the effective plugin chain + per-cell engine/sink/context
 $ uv run quicksql watch        # re-run changed cells + their dependents on every save
 $ uv run quicksql status       # each cell: ok, failed, skipped, stale (and why), or new
-$ uv run quicksql tui          # interactive VisiData-style terminal UI
+$ uv run quicksql tui          # interactive VisiData-style terminal UI (the `tui` extra)
 ```
 
 `quicksql` and the shorter `qsql` are the same entry point. The default file is `base.qsql`;
@@ -337,7 +337,8 @@ cells:
 ## The TUI
 
 `quicksql tui` opens a reflect-only terminal UI over the notebook (the file is edited
-elsewhere; the TUI shows results). Opening it on a missing file brings up a notebook picker —
+elsewhere; the TUI shows results). It needs the `tui` extra (`pip install 'quicksql[tui]'`;
+a checkout's dev group has it already). Opening it on a missing file brings up a notebook picker —
 existing `.qsql` files plus starter templates.
 
 | Key | Action | Key | Action |
@@ -348,12 +349,21 @@ existing `.qsql` files plus starter templates.
 | `a` / `A` | toggle autorun (cell / global) | `V` | open the row set in real VisiData |
 | `/` | search | `o` | open another notebook |
 | `?` | help | `Ctrl+R` | refetch |
-| `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the catalog dive is kept) |
+| `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the dive is kept) |
 | `Ctrl+H` / `Ctrl+L` | previous / next tab, from any mode | `Ctrl+K` / `Ctrl+J` | up to the cell list (like `Esc`) / down into the sheet (like `Enter` on the cell list) |
 
 `Ctrl+H` needs a terminal with the kitty keyboard protocol (herdr, kitty, WezTerm, foot,
 ghostty…); under tmux's defaults it arrives as Backspace and does nothing, while `1`–`5`
 work everywhere.
+
+The Data tab shows the selected cell's preview: what its last run cached, at most its
+first 100 rows. When the preview holds only those, its subtitle ends `first 100 rows
+only`, and so do the subtitles of sheets sorted, filtered or counted from it. A rerun of
+the cell refreshes the preview; sheets derived from it stay as they were until you pop
+back. Leaving the Data or Catalog tab keeps its dive for when you come back (on the Data
+tab, while the same cell is selected). One run goes at a time: `R`, `r` or a save's rerun
+during a run stops the run under way after its current cell, and the new one starts once
+it has.
 
 ### What reruns, and what's stale
 
@@ -399,6 +409,7 @@ LSP client) and a self-contained Neovim setup (`editors/nvim/qsql.lua`).
 ```console
 $ uv sync --extra bigquery      # BigQuery engine (google-cloud-bigquery + pyarrow)
 $ uv sync --extra postgres      # Postgres engine (psycopg)
+$ uv sync --extra tui           # the TUI (textual); the dev group has it already
 $ uv sync --extra visidata      # the TUI's V deep-dive into real VisiData
 $ uv sync --extra lsp           # the language server (pygls + sqlglot)
 ```
@@ -464,5 +475,6 @@ without Docker.
 | `catalog.py` | the TUI's schema catalog: each context's tree from its executor, `@catalog` targets, landed outputs |
 | `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context and declares its dialect and catalog), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
-| `cli.py`, `watcher.py`, `tui.py`, `sheet.py`, `scaffold.py` | CLI, watch loop, TUI |
+| `cli.py`, `watcher.py`, `scaffold.py` | CLI, watch loop, notebook templates |
+| `tui/` (`app.py`, `runs.py`, `panes.py`, `catalog_view.py`, `previews.py`, `screens.py`), `sheet.py` | the TUI: layout and keys, runs, sheet surfaces, the catalog browser; `sheet.py` holds the pure sheet operations |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |

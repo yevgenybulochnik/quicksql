@@ -68,8 +68,19 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   their sqlglot `dialect` and, optionally, a catalog; `catalog.py` and the LSP name no
   engine; the conduit owns extension loading and previews; import-linter's ignore lists
   are empty and no module imports another's private names.
-- Next — Phase 7. The agent-facing CLI beyond `run --json` is planned in
-  `docs/agent-cli-plan.md`.
+- Postponed — Phase 7 (2026-11-01): no notebook in the repo or its demos has a
+  `quicksqlrc.py` yet, so trust waits until notebooks carrying one get shared.
+- Done — Phase 9 (2026-11-01, branch `refactor/phase9-tui`): the TUI is a package, and
+  `QsqlApp` keeps layout, key routing and the notebook's lifecycle; the run controller,
+  the sheet surfaces and the catalog view are their own modules. One run at a time uses a
+  session, and a replaced run stops between cells (`run_project(cancel=)`). The Data
+  sheet follows a rerun, says when it holds a preview's first rows only, and keeps its
+  dive across tabs; a catalog load from the previous notebook lands nowhere.
+- Done — Phase 10 (2026-11-01, branch `refactor/phase10-deps`): a run's preview is plain
+  columns and rows (`models.Preview`), so the runner imports no polars; `textual` is the
+  `tui` extra. The sources demo compiles, runs and reports with both blocked from import.
+- Next — Phase 7 when notebooks with rc files get shared; Phase 5 is optional. The
+  agent-facing CLI beyond `run --json` is planned in `docs/agent-cli-plan.md`.
 
 ## Context
 
@@ -120,8 +131,9 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | CLI commands auto-import `quicksqlrc.py`; the LSP never loads it | read | 7 |
 | Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 (fixed) |
 | A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
-| `tui.py` is 1,304 lines, one class with 82 methods | `wc` | 9 |
-| `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 |
+| `tui.py` is 1,304 lines, one class with 82 methods | `wc` | 9 (fixed) |
+| A catalog load running across a notebook switch also cached its frame under the root's key, where the new notebook's own root load read it (2026-11-01) | reproduced by the Phase 9 test | 9 (fixed) |
+| `textual` and `polars` are core dependencies | `pyproject.toml`, `runner.py` | 10 (fixed) |
 
 ## Target
 
@@ -481,7 +493,50 @@ As planned:
   state file.
 - Docs: drop the "config-only edits don't rerun" limitation from the README and CLAUDE.md.
 
-**Phase 9 — split the TUI (L).** Best after Phases 2 and 8.
+**Phase 9 — split the TUI (L; done).** As built, where it differs from the plan below:
+- Done: `tui.py` is the package `tui/`: `app.py` (`QsqlApp`: layout, key routing, the
+  notebook's lifecycle, the cell list and detail tabs, the watch loop), `screens.py` (the
+  picker and help), `runs.py` (`RunController`), `panes.py` (`SheetTable`, `Surface`,
+  `DataPanes`), `catalog_view.py` (`CatalogView`) and `previews.py`. `QsqlApp` went from
+  1,213 lines and 91 methods to 816 and 76, of which 14 are read-through properties and
+  the run hooks the controller repaints through.
+- Done: `RunController` owns the session, the results, the pending cells and the
+  generation. One run at a time uses a session: a new run, a notebook switch or quitting
+  cancels the run under way, which stops after its current cell (`run_project` takes a
+  `cancel` check, asked between cells), and the next run's thread waits on a run lock; a
+  run replaced while it waited does nothing. `RunController.connect` is the DuckDB handle
+  that reads what the session landed (catalog, previews); the app's compile seam is
+  public, `compile_notebook`.
+- Done: the sheet verbs (move, mutate, filter, yank, the viewport reconcile) live on
+  `Surface`, shared by the Data panes and the catalog view; a live filter remembers the
+  surface it filters. `SheetTable` renders one Sheet into one DataTable, identity-cached
+  per table, replacing the app's `_data_shown` slots.
+- Done: the subtitle is one function of who has the keys, `QsqlApp.refresh_subtitle`;
+  the surfaces keep their own and ask for a repaint.
+- Done: the Data panes know whose preview they hold (`DataPanes.cell`). When that cell
+  finishes in the current run, each pane's root is swapped for the fresh preview, cursor
+  and hidden columns kept; derived sheets (freq, describe, a committed filter) stay
+  snapshots. Browsing the Data tab already followed reruns, through the cell table's
+  repaint re-highlighting the row; a test guards it.
+- Differs: the 100-row preview is said, not lifted. A full preview makes a
+  `Sheet(sample=100)`, which sort/filter/freq/describe carry, and its subtitle ends
+  `first 100 rows only`; computing on the whole output stays out of scope.
+- Done: leaving the Data tab keeps its dive, like the catalog's: it shows again while the
+  same cell is selected, and Enter resumes it. Four tests that pinned the drop changed
+  with the fix.
+- Done: `CatalogView` bumps a generation and starts a fresh cache per notebook; a load
+  carries both, and an older generation's push, refetch or error is dropped. Found on the
+  way: such a load had also cached the old listing under the root's key. The run and
+  catalog workers no longer use Textual's `exclusive`, which only flagged the old thread
+  cancelled (and made `wait_for_complete` raise on it).
+- Done: a failure's full message is logged only when it runs past one line.
+- Differs: the pilot tests' assertions passed unchanged after each extraction, but 16
+  call sites that drove moved privates (`_on_run_event`, `_run_gen`, `_apply_results`,
+  `_catalog_cache`, `_refresh_data`) and 4 module patches now name their new homes. The
+  app keeps `session`, `results`, `running`, `sheet_stack`, `panes`, `active_pane`,
+  `split` and `catalog_stack` as read-through properties.
+
+As planned:
 - Extract from `QsqlApp` a pane/sheet controller (stacks, split, search, filter, yank), a
   run controller (one worker owns the `RunSession`; generation tags; cancellation between
   cells) and a catalog view. `QsqlApp` keeps layout and key routing.
@@ -500,7 +555,30 @@ As planned:
 - Tests first: the existing pilot tests pass unchanged after each extraction; one new
   test per fixed issue; `/verify` in tmux after each step.
 
-**Phase 10 — dependencies (S).** Last.
+**Phase 10 — dependencies (S; done).** As built, where it differs from the plan below:
+- Done: `RunResult.preview` is a `models.Preview` (`columns`, `rows`, `height`,
+  `column(name)`), what `conduit.preview` fetches from DuckDB; an effect-only cell's is
+  empty. The runner imports no polars. The TUI builds its frame in `tui.previews.frame_of`
+  from the same fetched rows the runner's frame was built from, and `run --json` reads the
+  rows as they are.
+- Done: `textual` is the `tui` extra; the dev group keeps it, as it keeps pygls, so the
+  TUI tests run by default. `quicksql tui` without it prints "the TUI needs the 'tui'
+  extra: pip install 'quicksql[tui]'" and exits 1; an ImportError of anything else still
+  raises.
+- Differs: the SQLite and Postgres executors already imported polars lazily
+  (`DbApiSession.fetch`, the catalog builders), so nothing changed there. Polars stays a
+  dependency, imported where frames are built: the TUI and `sheet.py`, `catalog.py` and
+  `lsp/schema.py`, extraction (`DbApiSession.fetch`, `register_frame`) and the executors'
+  catalog builders.
+- Done: `tests/test_demos.py` runs the sources demo's compile, list, explain,
+  `run --json --rows 2` and status in a subprocess with polars and textual blocked;
+  `tests/test_cli.py` checks the install hint.
+- Measured: `quicksql run` of a one-cell DuckDB notebook, median of 7, went from 482 ms
+  to 377 ms with polars no longer loaded.
+- Breaking: `RunResult.preview` is a `Preview`, not a Polars frame; `quicksql tui` needs
+  `quicksql[tui]`.
+
+As planned:
 - Previews leave the core as columns plus rows; the TUI builds its own Polars frames.
 - `textual` moves to a `tui` extra; `quicksql tui` prints an install hint without it.
 - Polars remains only where frames are built (the TUI, and SQLite/Postgres extraction)

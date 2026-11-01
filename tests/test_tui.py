@@ -276,7 +276,7 @@ async def test_activating_data_tab_loads_current_cell_sheet(notebook) -> None:
         tabs.active = "tab_sql"
         await pilot.pause()
         assert app.mode == "cells"
-        assert not app.sheet_stack
+        assert [s.title for s in app.panes[0]] == ["users"]  # kept for the Data tab
 
 
 async def test_h_l_cycle_tabs_and_data_follows_selection(notebook) -> None:
@@ -588,7 +588,7 @@ async def test_wide_frames_render_a_column_window(tmp_path) -> None:
         assert len(table.columns) == app.MAX_DATA_COLS
         assert f"cols 1-{app.MAX_DATA_COLS}/60" in app.sub_title
         app.sheet_stack[-1] = app.sheet_stack[-1].move(0, 59)  # jump to last column
-        app._refresh_data()
+        app.data.refresh()
         assert f"cols {60 - app.MAX_DATA_COLS + 1}-60/60" in app.sub_title
 
 
@@ -692,17 +692,17 @@ async def test_run_and_notebook_switch_clear_the_catalog_cache(notebook) -> None
         await pilot.press("S")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) > 0
+        assert len(app.catalog.cache) > 0
         await pilot.press("q", "R")  # back to cells, rerun: outputs changed
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) == 0
+        assert len(app.catalog.cache) == 0
         await pilot.press("S")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) > 0
+        assert len(app.catalog.cache) > 0
         app._load_notebook(notebook)  # switching notebooks resets everything
-        assert len(app._catalog_cache) == 0
+        assert len(app.catalog.cache) == 0
 
 
 async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
@@ -718,6 +718,88 @@ async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
         await pilot.pause()
         assert len(app.sheet_stack) == 1  # nothing was pushed
         assert not app.sub_title.startswith("loading")
+
+
+async def test_sheets_from_a_partial_preview_say_so(tmp_path) -> None:
+    """The Data tab holds an output's first 100 rows; its sheet and what's
+    derived from it (sort, freq, describe, a filter) say so, a whole one doesn't."""
+    path = tmp_path / "base.qsql"
+    path.write_text(
+        "-- @cell big\nSELECT range % 3 AS n FROM range(500);\n\n-- @cell small\nSELECT 1 AS n;\n"
+    )
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter")
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("]")  # sorting sorts those 100
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("F")
+        assert app.sheet_stack[-1].title == "freq(n)"
+        assert app.sub_title.endswith("first 100 rows only")
+        await pilot.press("q", "q", "j", "enter")  # small: its preview is all of it
+        assert app.sheet_stack[-1].title == "small"
+        assert "rows only" not in app.sub_title
+
+
+async def test_the_data_sheet_follows_a_rerun_of_its_cell(notebook) -> None:
+    """A watch rerun of the cell the Data tab shows refreshes its preview;
+    sheets derived from it (freq, a committed filter) stay as they were."""
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")  # runs all and arms watch reruns
+        await _settle(app, pilot)
+        await pilot.press("j", "enter")  # dive into events: 10 rows
+        assert app.sheet_stack[-1].frame.height == 10
+        await pilot.press("F")
+        freq = app.sheet_stack[-1]
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(4)"))
+        assert "events" in app._on_recompiled(compile_file(notebook))
+        await _settle(app, pilot)
+        assert app.sheet_stack[-1] is freq  # a derived sheet is a snapshot
+        assert app.sheet_stack[0].frame.height == 4
+        await pilot.press("q")
+        assert app.sheet_stack[-1].frame.height == 4
+        assert app.query_one("#data", DataTable).row_count == 4
+
+
+async def test_the_browsed_data_sheet_follows_a_rerun(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("j", "2")  # browse events on the Data tab
+        assert app.mode == "cells" and app.sheet_stack[-1].frame.height == 10
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(4)"))
+        app._on_recompiled(compile_file(notebook))
+        await _settle(app, pilot)
+        assert app.sheet_stack[-1].frame.height == 4
+
+
+async def test_a_run_leaves_a_dived_sheets_subtitle_alone(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter")  # dive into users' Data sheet
+        shown = app.sub_title
+        assert shown.startswith("users · 3x")
+        await pilot.press("r")  # rerun the cell under the dive
+        await _settle(app, pilot)
+        assert app.sub_title == shown
+
+
+async def test_a_recompile_leaves_a_catalog_dives_subtitle_alone(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("S")
+        await _settle(app, pilot)
+        shown = app.sub_title
+        assert shown.startswith("catalog · ")
+        app._on_recompiled(compile_file(notebook))  # a save with nothing to rerun
+        await pilot.pause()
+        assert app.sub_title == shown
 
 
 async def test_catalog_tab_browses_then_enter_dives(notebook) -> None:
@@ -767,6 +849,16 @@ def deep_catalog(tmp_path):
 
 async def _settle(app, pilot) -> None:
     await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def _drain(app, pilot) -> None:
+    """Wait out every worker, one Textual flagged cancelled included (an
+    exclusive group's replaced worker), which wait_for_complete raises on."""
+    for _ in range(200):
+        if not any(w.is_running for w in app.workers):
+            break
+        await pilot.pause(0.05)
     await pilot.pause()
 
 
@@ -877,8 +969,7 @@ async def test_5_without_a_dive_loads_and_dives_into_the_root(notebook) -> None:
 
 async def test_digit_keys_leave_a_data_dive(notebook) -> None:
     # 2 on the Data tab hands keys back to the cell list (the sheet then
-    # follows the selection); 1/3/4 leave the tab, dropping the dive as
-    # leaving the Data tab always has
+    # follows the selection); 1/3/4 leave the tab, keeping the dive
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.press("R")
@@ -899,7 +990,32 @@ async def test_digit_keys_leave_a_data_dive(notebook) -> None:
         await _settle(app, pilot)
         assert tabs.active == "tab_log"
         assert app.mode == "cells"
-        assert not app.panes[0]  # the data dive was dropped with the tab
+        assert [s.title for s in app.panes[0]] == ["events"]  # kept with the tab
+
+
+async def test_leaving_the_data_tab_keeps_the_dive(notebook) -> None:
+    """Like the catalog's: another tab hands keys back to the cell list but
+    keeps the Data stack. Back on the Data tab with the same cell selected
+    it shows again and Enter resumes it; another cell's preview starts afresh."""
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter", "j", "F")  # dive, cursor to row 1, freq on top
+        kept = list(app.sheet_stack)
+        assert [s.title for s in kept] == ["users", "freq(user_id)"]
+        await pilot.press("4")
+        await _settle(app, pilot)
+        assert app.mode == "cells" and _same_sheets(app.panes[0], kept)
+        await pilot.press("2")
+        await _settle(app, pilot)
+        assert app.mode == "cells" and _same_sheets(app.sheet_stack, kept)
+        assert app.query_one("#data", DataTable).row_count == kept[-1].frame.height
+        await pilot.press("enter")
+        assert app.mode == "data" and _same_sheets(app.sheet_stack, kept)
+        await pilot.press("4", "j", "2")  # another cell selected while away
+        await _settle(app, pilot)
+        assert [s.title for s in app.sheet_stack] == ["events"]
 
 
 async def test_digits_typed_into_search_or_filter_dont_switch_tabs(deep_catalog) -> None:
@@ -1031,17 +1147,19 @@ async def test_ctrl_h_l_step_through_tabs_from_any_mode(notebook) -> None:
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_config", "cells")
         assert not app.split
-        assert not app.panes[0]  # the data dive was dropped with the tab
-        await pilot.press("ctrl+h")  # back on Data: browsing, the sheet follows
+        dive = ["users", "freq(user_id)"]
+        assert [s.title for s in app.panes[0]] == dive  # kept with the tab
+        await pilot.press("ctrl+h")  # back on Data: browsing the kept dive
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_data", "cells")
-        assert [s.title for s in app.sheet_stack] == ["users"]
-        await pilot.press("enter", "F")
+        assert [s.title for s in app.sheet_stack] == dive
+        await pilot.press("enter")  # resumes it
         assert app.mode == "data"
+        assert [s.title for s in app.sheet_stack] == dive
         await pilot.press("ctrl+h")
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_sql", "cells")
-        assert not app.panes[0]
+        assert [s.title for s in app.panes[0]] == dive
 
 
 async def test_ctrl_h_l_leave_and_resume_a_deep_catalog_dive(deep_catalog) -> None:
@@ -1362,7 +1480,7 @@ async def test_5_on_an_empty_catalog_tab_loads_the_root_itself(deep_catalog) -> 
 async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeypatch) -> None:
     # S starts the root load itself *and* activates the tab, whose handler
     # also wants the root: only one load may start, or two roots get pushed
-    import quicksql.tui as tui
+    from quicksql.tui import catalog_view as tui
 
     calls = []
     real = tui.project_root_node
@@ -1382,10 +1500,54 @@ async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeyp
         assert app.mode == "catalog"
 
 
+async def test_a_catalog_load_from_the_previous_notebook_lands_nowhere(tmp_path, monkeypatch) -> None:
+    """A root load still running when the notebook switches must not push the
+    old notebook's listing onto the new one's stack, nor cache it there."""
+    import dataclasses
+    import threading
+
+    from quicksql.tui import catalog_view
+
+    one = tmp_path / "one.qsql"
+    one.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell c\nSELECT 2 AS y;\n")
+    gate, reached = threading.Event(), threading.Event()
+    real = catalog_view.project_root_node
+
+    def gated(project, **kwargs):
+        node = real(project, **kwargs)
+        if project.path.name != "one.qsql":
+            return node
+
+        def load():
+            reached.set()
+            assert gate.wait(timeout=10)
+            return node.load()
+
+        return dataclasses.replace(node, load=load)
+
+    monkeypatch.setattr(catalog_view, "project_root_node", gated)
+    app = QsqlApp(path=one, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("S")  # notebook one's root starts loading, and blocks
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            app._load_notebook(two)  # still on the Catalog tab: two's root loads
+        finally:
+            gate.set()
+        await _drain(app, pilot)
+        assert [s.frame["name"].to_list() for s in app.catalog_stack] == [["duckdb::memory:", "c"]]
+        await pilot.press("S", "q", "S")  # dive, pop the root, reload it from the cache
+        await _drain(app, pilot)
+        assert [s.frame["name"].to_list() for s in app.catalog_stack] == [["duckdb::memory:", "c"]]
+
+
 async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
-    # S while dived in the Data sheet lands in a clean catalog dive: the
-    # data-pane dive is dropped and keys route to the catalog listing, never
-    # a stale invisible stack
+    # S while dived in the Data sheet lands in a clean catalog dive: keys
+    # route to the catalog listing, never the data dive the Data tab keeps
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.press("R")
@@ -1398,7 +1560,7 @@ async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
         await pilot.pause()
         assert app.query_one(TabbedContent).active == "tab_catalog"
         assert app.mode == "catalog"
-        assert not app.panes[0]  # the data dive was dropped with the tab
+        assert [s.title for s in app.panes[0]] == ["users"]  # kept, not routed to
         assert app.catalog_stack[-1].title == "catalog"
         await pilot.press("q")  # pops the catalog root, not a data sheet
         assert app.mode == "cells"
@@ -1801,7 +1963,7 @@ async def test_a_save_with_nothing_to_rerun_says_so(notebook) -> None:
 
 
 async def test_a_save_compiles_the_notebook_once(notebook, monkeypatch) -> None:
-    from quicksql import tui
+    from quicksql.tui import app as tui
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
@@ -1836,13 +1998,13 @@ async def test_run_events_drive_per_cell_status(notebook) -> None:
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         names = tuple(app.project.order)
-        gen = app._run_gen
-        app._on_run_event(gen, RunEvent("run_started", cells=names))
+        gen = app.runs.gen
+        app.runs.on_event(gen, RunEvent("run_started", cells=names))
         await pilot.pause()
         assert app.running == set(names)
         assert all(_row(app, n)[3] == "…" for n in names)
         done = RunResult(cell=names[0], status="ok", rows=3, elapsed=0.25)
-        app._on_run_event(gen, RunEvent("cell_finished", names[0], result=done))
+        app.runs.on_event(gen, RunEvent("cell_finished", names[0], result=done))
         await pilot.pause()
         assert names[0] not in app.running and names[1] in app.running
         assert _row(app, names[0])[3] == "✔" and _row(app, names[0])[4] == "3"
@@ -1857,13 +2019,13 @@ async def test_stale_generation_events_do_not_touch_state(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test() as pilot:
         await pilot.pause()
-        stale = app._run_gen - 1
-        app._on_run_event(stale, RunEvent("run_started", cells=("users",)))
+        stale = app.runs.gen - 1
+        app.runs.on_event(stale, RunEvent("run_started", cells=("users",)))
         assert app.running == set()
         done = RunResult(cell="users", status="ok", rows=1, elapsed=0.1)
-        app._on_run_event(stale, RunEvent("cell_finished", "users", result=done))
+        app.runs.on_event(stale, RunEvent("cell_finished", "users", result=done))
         assert "users" not in app.results
-        app._apply_results(stale, [done])
+        app.runs.apply(stale, [done])
         assert "users" not in app.results
 
 
@@ -1876,17 +2038,17 @@ async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         old = RunResult(cell="users", status="ok", rows=42, elapsed=1.234)
-        app._apply_results(app._run_gen, [old])
+        app.runs.apply(app.runs.gen, [old])
         await pilot.pause()
         assert _row(app, "users")[4] == "42"
-        app._on_run_event(app._run_gen, RunEvent("run_started", cells=("users",)))
+        app.runs.on_event(app.runs.gen, RunEvent("run_started", cells=("users",)))
         await pilot.pause()
         row = _row(app, "users")
         assert row[3] == "…" and row[4] == "" and row[5] == ""
 
 
 async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypatch) -> None:
-    from quicksql import tui as tui_mod
+    from quicksql.tui import runs as tui_mod
 
     def boom(*args, **kwargs):
         raise RuntimeError("executor exploded")
@@ -1996,6 +2158,25 @@ async def test_failed_cell_detail_log_shows_the_message_not_a_traceback(tmp_path
         assert "Traceback" not in text
 
 
+async def test_a_single_line_failure_is_logged_once(tmp_path) -> None:
+    """The FAILED line already holds a one-line message; only a longer one
+    gets the full block after it."""
+    from textual.widgets import RichLog
+
+    path = tmp_path / "base.qsql"
+    path.write_text("-- @cell a\n-- @input: { sqlite: ':memory:' }\nSELECT * FROM nope;\n")
+    app = QsqlApp(path=path, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one(TabbedContent).active = "tab_log"
+        await pilot.pause()
+        await pilot.press("R")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = "\n".join(s.text for s in app.query_one("#log", RichLog).lines)
+        assert "a: FAILED — sqlite: no such table: nope" in text
+        assert text.count("no such table: nope") == 1
+
+
 async def test_failed_cell_message_is_logged_once_not_per_cursor_move(tmp_path) -> None:
     from textual.widgets import RichLog
 
@@ -2051,7 +2232,7 @@ async def test_notebook_switch_gets_its_own_run_session(tmp_path) -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         # b read notebook two's a (2), not notebook one's live temp (1)
-        assert app.results["b"].preview["x"].to_list() == [20]
+        assert app.results["b"].preview.column("x") == [20]
         assert app.session is not first
 
 
@@ -2125,6 +2306,94 @@ async def test_switch_mid_run_closes_the_old_session_only_after_the_run(
         assert old.conn is None  # the run's own exit closed it
 
 
+def _counting_engine(registries):
+    """A `gated` engine whose fetches block until `gate` is set, counting how
+    many run at once; returns (gate, reached, fetched, peak())."""
+    import threading
+
+    from quicksql.executors.base import EngineSession, Executor
+    from quicksql.registry import executor
+
+    gate, reached, lock = threading.Event(), threading.Event(), threading.Lock()
+    fetched: list[str] = []
+    active = [0, 0]  # now, peak
+
+    class GatedSession(EngineSession):
+        def execute(self, sql, *, scoped=True):
+            pass
+
+        def fetch(self, sql, *, scoped=True):
+            with lock:
+                fetched.append(sql)
+                active[0] += 1
+                active[1] = max(active)
+            try:
+                reached.set()
+                assert gate.wait(timeout=10)
+                return pl.DataFrame({"x": [1]})
+            finally:
+                with lock:
+                    active[0] -= 1
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def open_session(self, config, ctx):
+            return GatedSession()
+
+    registries.add(GatedExecutor)
+    return gate, reached, fetched, lambda: active[1]
+
+
+GATED_TWO = "-- @engine: gated\n\n-- @cell a\nSELECT 1;\n\n-- @cell b\nSELECT 2;\n"
+
+
+async def test_a_new_run_waits_for_the_one_it_replaces_to_stop(tmp_path, registries) -> None:
+    """Two runs on one session at once share its connections across threads:
+    R while a run is under way cancels it after its current cell, and the
+    new run starts only once it has stopped."""
+    gate, reached, fetched, peak = _counting_engine(registries)
+    path = tmp_path / "base.qsql"
+    path.write_text(GATED_TWO)
+    app = QsqlApp(path=path, watch=False, registries=registries)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            await pilot.press("R")  # replace the run while its cell a is under way
+            await pilot.pause(0.3)  # time enough for a concurrent run to show itself
+        finally:
+            gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert peak() == 1
+        assert fetched == ["SELECT 1", "SELECT 1", "SELECT 2"]  # the first run stopped after a
+        assert app.results["a"].ok and app.results["b"].ok
+        assert app.running == set()
+
+
+async def test_a_notebook_switch_stops_the_old_notebooks_run(tmp_path, registries) -> None:
+    gate, reached, fetched, _ = _counting_engine(registries)
+    one = tmp_path / "one.qsql"
+    one.write_text(GATED_TWO)
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell a\nSELECT 2 AS x;\n")
+    app = QsqlApp(path=one, watch=False, registries=registries)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            app._load_notebook(two)
+        finally:
+            gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fetched == ["SELECT 1"]  # notebook one's b never ran
+
+
 async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
     tmp_path, monkeypatch
 ) -> None:
@@ -2132,7 +2401,7 @@ async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
     adopt its project, pend its cells or store its results in the new one."""
     import threading
 
-    from quicksql import tui as tui_mod
+    from quicksql.tui import app as tui_mod
 
     one = tmp_path / "one.qsql"
     one.write_text("-- @cell a\nSELECT 1 AS x;\n")

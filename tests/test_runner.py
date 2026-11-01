@@ -5,6 +5,7 @@ import pytest
 
 from quicksql.bootstrap import compile_text
 from quicksql.plugins.base import Plugin
+from quicksql.models import Preview
 from quicksql.runner import RunSession, run_project
 
 
@@ -20,7 +21,7 @@ def test_run_lands_parquet_and_previews(tmp_path) -> None:
     assert (tmp_path / "data" / "users.parquet").exists()
     assert (tmp_path / "data" / "active.parquet").exists()
     assert results[0].rows == 3 and results[1].rows == 2
-    assert isinstance(results[1].preview, pl.DataFrame)
+    assert results[1].preview == Preview(("user_id",), ((1,), (2,)))
     assert results[1].elapsed > 0
 
 
@@ -37,7 +38,7 @@ def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_
     results = {r.cell: r for r in project.run()}
     assert results["load"].ok, results["load"].error
     assert (results["load"].rows, results["load"].target) == (0, "discarded")
-    assert results["counted"].preview["c"].to_list() == [3]
+    assert results["counted"].preview.column("c") == [3]
 
 
 def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> None:
@@ -53,7 +54,7 @@ def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> No
     assert results["load"].rows == 0 and results["load"].target == "none"
     # the effect-only cell actually ran its statements: a downstream cell sees the rows
     assert results["counted"].ok, results["counted"].error
-    assert results["counted"].preview["c"].to_list() == [3]
+    assert results["counted"].preview.column("c") == [3]
     # nothing landed for the effect-only cell
     assert not (tmp_path / "data" / "load.parquet").exists()
 
@@ -636,6 +637,39 @@ def test_on_event_reports_failures_and_run_continues(tmp_path) -> None:
     assert finished["bad"].ok is False and finished["good"].ok is True
     assert [r.cell for r in results] == ["bad", "good"]
     assert "1 ok, 1 failed" in [e for e in events if e.kind == "run_finished"][-1].detail
+
+
+def test_a_cancelled_run_stops_between_cells(tmp_path) -> None:
+    """The cell under way finishes; the rest never start, and the run still
+    finishes (state, run_finished) so its session stays usable."""
+    from quicksql.bootstrap import compile_file
+    from quicksql.models import RunEvent
+    from quicksql.state import read_state
+
+    path = tmp_path / "base.qsql"
+    path.write_text("-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT 2 AS x;\n-- @cell c\nSELECT 3 AS x;")
+    project = compile_file(path)
+    events: list[RunEvent] = []
+    stop = False
+
+    def on_event(event: RunEvent) -> None:
+        nonlocal stop
+        events.append(event)
+        stop = stop or event.kind == "cell_finished"  # cancelled while a lands
+
+    results = run_project(project, on_event=on_event, cancel=lambda: stop)
+    assert [r.cell for r in results] == ["a"]
+    assert not any(e.cell in ("b", "c") for e in events)
+    assert not (tmp_path / "data" / "b.parquet").exists()
+    assert "cancelled — 2 cell(s) not run: b, c" in [e.detail for e in events if e.kind == "note"]
+    assert events[-1].kind == "run_finished" and "cancelled" in events[-1].detail
+    assert set(read_state(project)) == {"a"}
+
+
+def test_a_run_cancelled_before_it_starts_runs_nothing(tmp_path) -> None:
+    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
+    assert run_project(project, cancel=lambda: True) == []
+    assert not (tmp_path / "data" / "a.parquet").exists()
 
 
 def test_broken_event_callback_never_kills_the_run(tmp_path) -> None:
