@@ -10,6 +10,7 @@ vertical split shows two side by side. The Catalog tab's is
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from textual.coordinate import Coordinate
@@ -228,6 +229,7 @@ class DataPanes(Surface):
         super().__init__(app)
         self.panes: list[list[Sheet]] = [[]]
         self.active = 0
+        self.cell: str | None = None  # whose preview the stacks start from
         self.subtitle = ""  # the focused pane's top sheet's
         self._tables: list[SheetTable] = []
 
@@ -252,10 +254,28 @@ class DataPanes(Surface):
     def focused(self) -> SheetTable:
         return self.tables[self.active]
 
+    def show(self, cell: str, preview: Sheet) -> None:
+        """Start the focused pane's stack afresh from ``cell``'s preview."""
+        self.cell = cell
+        self.stack = [preview]
+
+    def renew(self, preview: Sheet) -> None:
+        """The cell reran: each pane's root becomes its fresh ``preview``,
+        keeping the cursor and the hidden columns that still exist. Sheets
+        derived from the old one (freq, a committed filter) stay as they were;
+        q pops back to the fresh data."""
+        for stack in self.panes:
+            if stack:
+                old = stack[0]
+                hidden = tuple(c for c in old.hidden if c in preview.frame.columns)
+                stack[0] = replace(preview, hidden=hidden).move(*old.cursor)
+        self.refresh()
+
     def reset(self) -> None:
         """One empty pane, for a fresh notebook."""
         self.panes = [[]]
         self.active = 0
+        self.cell = None
         for table in self.tables:
             table.shown = None
         self.sync_layout()

@@ -393,9 +393,15 @@ class QsqlApp(App):
         if self.mode == "catalog":
             self.catalog.refresh()
             return
+        self._dive_into_data()
+
+    def _dive_into_data(self) -> None:
         self.mode = "data"
         self.query_one(TabbedContent).active = "tab_data"
         self.data.refresh()
+
+    def _preview_sheet(self, name: str) -> Sheet:
+        return Sheet(self._preview_frame(name), title=name)
 
     def _preview_frame(self, name: str) -> pl.DataFrame:
         return preview_frame(self.project, self.results.get(name), name, self._catalog_connect)
@@ -780,7 +786,7 @@ class QsqlApp(App):
     def _show_current_data(self) -> None:
         name = self.current_cell
         if name:
-            self.data.stack = [Sheet(self._preview_frame(name), title=name)]
+            self.data.show(name, self._preview_sheet(name))
             self.data.refresh()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -806,8 +812,8 @@ class QsqlApp(App):
         name = self.current_cell
         if not name:
             return
-        self.sheet_stack = []
-        self._push_sheet(Sheet(self._preview_frame(name), title=name))
+        self.data.show(name, self._preview_sheet(name))
+        self._dive_into_data()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id != "cells" or self.mode != "cells":
@@ -868,9 +874,11 @@ class QsqlApp(App):
         self.project = project
         self._refresh_cells()
 
-    def run_progressed(self) -> None:
-        """The current run started, or one of its cells finished."""
+    def run_progressed(self, finished: str | None = None) -> None:
+        """The current run started, or its cell ``finished`` did."""
         self._refresh_cells()
+        if finished is not None and finished == self.data.cell and self.data.stack:
+            self.data.renew(self._preview_sheet(finished))  # never a stale sheet
 
     def run_landed(self) -> None:
         """A run ended, the current one or a replaced one: outputs changed."""

@@ -141,7 +141,7 @@ class RunController:
             self.running.discard(event.cell)
             if event.result is not None:
                 self.results[event.cell] = event.result
-            self.app.run_progressed()
+            self.app.run_progressed(event.cell)
 
     def apply(self, gen: int, results: list[RunResult]) -> None:
         self.app.run_landed()  # outputs and warehouses just changed
