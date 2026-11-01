@@ -115,6 +115,8 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Engine names hard-coded in `catalog.py` (12), `lsp/schema.py` (7), the LSP dialect map | grep | 6 (fixed) |
 | Plugins, catalog, LSP and TUI import runner privates; 32 function-level imports | grep | 6 (fixed) |
 | The CLI imports the runner's `_message`, and the catalog the Postgres executor's `_dsn` (2026-11-01) | AST scan | 6 (fixed) |
+| Browsing a duckdb context whose input is `':memory:'` created a database file named `:memory:` in the notebook's directory (2026-11-01) | reproduced | 6 (fixed) |
+| A Postgres `@catalog` target showed its password, left `$VAR`s unexpanded, and repeated a cell's own context as a second row (2026-11-01) | reproduced | 6 (fixed) |
 | CLI commands auto-import `quicksqlrc.py`; the LSP never loads it | read | 7 |
 | Config-only edits never rerun (documented limitation) | README, CLAUDE.md | 8 (fixed) |
 | A TUI notebook switch (`o`) kept the previous notebook's `RunSession`: a rerun of `b` read the old notebook's temp `a` (2026-10-30) | reproduced | 9 (fixed) |
@@ -384,6 +386,10 @@ plan below:
   LSP's vocabulary and googlesql branches, which key on sqlglot dialect names.
 - Kept: compiling imports no polars (the conduit and the duckdb executor import it
   lazily), and kitchen-sink compiles in 5.8 ms.
+- Done, found on the way: a duckdb `':memory:'` context isn't browsable instead of
+  creating that file (`f504874`), and a Postgres `@catalog` target reads like an input
+  DSN: env vars expanded, shown as its context key, password hidden, one row with a
+  cell's context (`b55faa5`).
 - Tests: `tests/conftest.py`'s `tsql_engine`, an `mssql` engine written in T-SQL, is the
   scratch executor; its tests sit in the modules they exercise.
 
