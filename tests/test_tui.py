@@ -2433,3 +2433,48 @@ async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
         assert list(app.project.cells) == ["a", "c"]  # still notebook two
         assert app.results == {} and app.running == set()
         assert _row(app, "a")[3] == "·" and _row(app, "c")[3] == "·"
+
+
+# ---------- the live host (an agent alongside the TUI) ----------
+
+
+async def test_the_keys_set_the_live_hosts_controls(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("p")
+        assert app.host.armed is True
+        changed = [e for e in app.host.since(0) if e["kind"] == "controls_changed"]
+        assert changed[-1]["by"] == "keys" and changed[-1]["armed"] is True
+        await pilot.press("a")
+        assert app.host.since(0)[-1]["autorun_off"] == ["users"]
+
+
+async def test_an_agent_control_change_repaints_the_tui(notebook) -> None:
+    from textual.widgets import RichLog
+
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one(TabbedContent).active = "tab_log"
+        await pilot.pause()
+        app.host.set_autorun(["users"], False, by="agent")
+        app.host.set_armed(True, by="agent")
+        await pilot.pause()
+        assert app.query_one("#cells", DataTable).get_row_at(0)[2] == "☐"
+        assert "▶ live" in app.title
+        lines = [s.text for s in app.query_one("#log", RichLog).lines]
+        assert "agent: autorun users off" in lines and "agent: arm" in lines
+
+
+async def test_a_saves_rerun_settles_in_the_live_host(notebook) -> None:
+    app = QsqlApp(path=notebook, watch=False)
+    async with app.run_test() as pilot:
+        await pilot.press("p")
+        notebook.write_text(notebook.read_text().replace("range(10)", "range(5)"))
+        project = compile_file(notebook)
+        assert "events" in app._on_recompiled(project)
+        assert project.source_hash not in app.host.outcomes  # its rerun settles it
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        outcome = app.host.outcomes[project.source_hash]
+        assert outcome["state"] == "ran" and outcome["summary"]["failed"] == 0
+        assert "events" in [r["cell"] for r in outcome["results"]]

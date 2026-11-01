@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 
 import pytest
 
@@ -163,3 +164,55 @@ def tsql_engine(registries):
 
     registries.add(MsSql)
     return ran
+
+
+class FakeDriver:
+    """What the TUI does for the host, recorded."""
+
+    def __init__(self) -> None:
+        self.host = None  # the LiveHost it drives
+        self.gen = 0
+        self.started: list[tuple[list[str] | None, bool]] = []
+        self.cancelled = 0
+        self.logged: list[str] = []
+        self.repaints = 0
+        self.focused: list[tuple[str, str | None]] = []
+        self.toasts: list[tuple[str, str]] = []
+
+    def start_run(self, select, closure):
+        self.gen = max(self.gen, self.host.latest_run) + 1  # monotonic, like the TUI's
+        self.started.append((select, closure))
+        self.host.run_requested(self.gen, None)
+        return self.gen
+
+    def cancel_run(self) -> None:
+        self.cancelled += 1
+
+    @contextmanager
+    def reading(self):
+        import duckdb
+
+        conn = duckdb.connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def controls_changed(self) -> None:
+        self.repaints += 1
+
+    def log_line(self, text: str) -> None:
+        self.logged.append(text)
+
+    def focus_cell(self, cell: str, tab: str | None) -> None:
+        self.focused.append((cell, tab))
+
+    def toast(self, message: str, severity: str) -> None:
+        self.toasts.append((message, severity))
+
+
+@pytest.fixture
+def fake_driver():
+    """A live host's driver that records what it's asked (no TUI): set its
+    ``host`` once the host exists."""
+    return FakeDriver()
