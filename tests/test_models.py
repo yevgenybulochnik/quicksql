@@ -91,3 +91,27 @@ def test_a_preview_is_plain_columns_and_rows() -> None:
     head = Preview(("id", "name"), ((1, "a"), (2, "b")))
     assert head.height == 2
     assert head.column("name") == ["a", "b"]
+
+
+def test_a_run_event_to_dict_is_json_safe_and_carries_its_result() -> None:
+    from quicksql.models import RunEvent
+
+    started = RunEvent("run_started", detail="2 cell(s): a, b", cells=("a", "b"))
+    assert started.to_dict() == {
+        "kind": "run_started", "cell": None, "detail": "2 cell(s): a, b",
+        "cells": ["a", "b"], "result": None,
+    }
+    result = RunResult(cell="a", status="ok", rows=1, preview=Preview(("x",), ((1,),)))
+    finished = RunEvent("cell_finished", "a", result=result).to_dict(rows=1)
+    assert finished["cells"] is None
+    assert finished["result"]["status"] == "ok"
+    assert finished["result"]["preview"] == {"columns": ["x"], "rows": [[1]]}
+    json.dumps(finished)
+
+
+def test_source_hash_is_a_short_stable_digest_of_the_text() -> None:
+    from quicksql.models import source_hash
+
+    assert source_hash("-- @cell a\nSELECT 1;\n") == source_hash("-- @cell a\nSELECT 1;\n")
+    assert source_hash("SELECT 1;") != source_hash("SELECT 2;")
+    assert len(source_hash("")) == 16

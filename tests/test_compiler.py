@@ -221,3 +221,13 @@ def test_global_config_reaches_cells_and_overrides_apply(tmp_path) -> None:
     )
     assert project.cells["a"].config.autorun is True
     assert project.config.autorun is True
+
+
+def test_a_project_records_the_hash_of_the_text_it_compiled(tmp_path, registries) -> None:
+    from quicksql.compiler import compile_file
+    from quicksql.models import source_hash
+
+    nb = tmp_path / "nb.qsql"
+    nb.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    project = compile_file(nb, registries=registries)
+    assert project.source_hash == source_hash(nb.read_text())
