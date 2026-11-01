@@ -42,6 +42,11 @@ def _redacted(dsn: str) -> str:
     return urlunsplit(parts._replace(netloc=netloc, query=query))
 
 
+def _context_key(dsn: str | None) -> str:
+    """The DSN, password hidden: DSNs that differ only in it share a context."""
+    return f"postgres:{_redacted(dsn) if dsn else ''}"
+
+
 class PostgresSession(DbApiSession):
     engine = "postgres"
     temp_schema = "pg_temp"
@@ -61,9 +66,7 @@ class PostgresExecutor(Executor):
     input_shorthand = "dsn"
 
     def context_key(self, config: Any) -> str:
-        """The DSN, password hidden: DSNs that differ only in it share a context."""
-        dsn = _dsn(config)
-        return f"postgres:{_redacted(dsn) if dsn else ''}"
+        return _context_key(_dsn(config))
 
     def make_connection(self, dsn: str) -> Any:
         """Split out so tests can substitute a fake connection."""
@@ -88,7 +91,9 @@ class PostgresExecutor(Executor):
         return self.context_node(dsn) if dsn else None
 
     def catalog_target(self, target: str, root: Path) -> tuple[str, CatalogNode]:
-        return f"postgres:{target}", self.context_node(target)
+        """A DSN, read like an input's: env vars expanded, shown password hidden."""
+        dsn = os.path.expandvars(target)
+        return _context_key(dsn), self.context_node(dsn)
 
     def catalog_table(self, config: Any, root: Path, parts: list[str]) -> CatalogNode | None:
         node = self.catalog(config, root)
