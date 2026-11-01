@@ -41,7 +41,7 @@ class DuckDBExecutor(Executor):
         Connecting by path shares the in-process instance with a conduit that
         targets the same file, so no handle conflict arises here.
         """
-        if not path:
+        if not path or path == ":memory:":  # as the conduit reads it; not a file name
             return info_node("duckdb::memory:", "in-memory duckdb context — not browsable")
         db = str(root / path)
 
