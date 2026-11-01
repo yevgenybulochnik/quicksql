@@ -368,7 +368,7 @@ def test_completion_alias_scopes_to_a_fake_bigquery_table(tmp_path, monkeypatch)
         )
 
     class FakeClient:
-        def list_tables(self, dataset_id):
+        def list_tables(self, dataset_id, page_size=None):
             return [SimpleNamespace(table_id="events", table_type="TABLE")]
 
         def get_table(self, path):
@@ -396,14 +396,14 @@ def _relation_fake_client(monkeypatch, projects_seen):
 
     def make(self, spec):
         class FakeClient:
-            def list_datasets(self):
+            def list_datasets(self, page_size=None):
                 projects_seen.append(("datasets", spec.get("project")))
                 return [
                     SimpleNamespace(dataset_id=d)
                     for d in datasets.get(spec.get("project"), [])
                 ]
 
-            def list_tables(self, ds):
+            def list_tables(self, ds, page_size=None):
                 projects_seen.append(("tables", spec.get("project")))
                 if spec.get("project") != "p" or ds != "analytics":
                     raise RuntimeError(f"unknown dataset {ds}")

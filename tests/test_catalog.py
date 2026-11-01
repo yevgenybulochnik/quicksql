@@ -1,11 +1,24 @@
 import sqlite3
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
 import polars as pl
 import pytest
 
-from quicksql.catalog import CatalogCache, CatalogNode, project_root_node, sink_output_node
+from quicksql.catalog import (
+    CatalogCache,
+    CatalogNode,
+    CatalogPathError,
+    narrow,
+    page,
+    project_root_node,
+    redact,
+    resolve,
+    sink_output_node,
+)
 from quicksql import config
 from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.conduit import duckdb_field_paths
@@ -149,10 +162,10 @@ def test_catalog_directive_declares_extra_browse_targets(tmp_path, monkeypatch) 
     created: list[dict] = []
 
     class FakeClient:
-        def list_datasets(self):
+        def list_datasets(self, page_size=None):
             return [SimpleNamespace(dataset_id="ds1")]
 
-        def list_tables(self, dataset_id):
+        def list_tables(self, dataset_id, page_size=None):
             assert dataset_id == "analytics"
             return [SimpleNamespace(table_id="events", table_type="TABLE")]
 
@@ -377,10 +390,10 @@ def test_bigquery_catalog_chain(monkeypatch) -> None:
     created: list[dict] = []
 
     class FakeClient:
-        def list_datasets(self):
+        def list_datasets(self, page_size=None):
             return [SimpleNamespace(dataset_id="analytics"), SimpleNamespace(dataset_id="raw")]
 
-        def list_tables(self, dataset_id):
+        def list_tables(self, dataset_id, page_size=None):
             assert dataset_id == "analytics"
             return [SimpleNamespace(table_id="events", table_type="TABLE")]
 
@@ -576,10 +589,10 @@ def test_node_cache_keys_disambiguate_connections(monkeypatch) -> None:
     assert pg_leaf("postgresql://one").cache_key != pg_leaf("postgresql://two").cache_key
 
     class FakeClient:
-        def list_datasets(self):
+        def list_datasets(self, page_size=None):
             return [SimpleNamespace(dataset_id="ds")]
 
-        def list_tables(self, dataset_id):
+        def list_tables(self, dataset_id, page_size=None):
             return [SimpleNamespace(table_id="t", table_type="TABLE")]
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
@@ -607,3 +620,418 @@ def test_sink_output_node_duckdb_sink_needs_the_conduit_cursor(tmp_path) -> None
         assert node.load()["field_path"].to_list() == ["s", "s.a"]
     finally:
         conduit.close()
+
+
+# ---------- walking by name (docs/catalog-plan.md, Phase 1) ----------
+
+
+def _duckdb_project(tmp_path):
+    con = duckdb.connect(str(tmp_path / "wh.db"))
+    con.execute("CREATE TABLE orders AS SELECT 1 AS id, {'a': 1} AS s")
+    con.execute("CREATE SCHEMA sales")
+    con.execute("CREATE TABLE sales.orders_2024 AS SELECT 1 AS id")
+    con.close()
+    return compile_text("/*@ input: { duckdb: wh.db } */\n-- @cell a\nSELECT 1 AS x;\n", root=tmp_path)
+
+
+def test_a_rows_name_is_its_name_columns_else_name_else_its_first_column() -> None:
+    frame = pl.DataFrame()
+    plain = CatalogNode(title="t", load=lambda: frame)
+    assert plain.row_name({"kind": "context", "name": "duckdb:wh.db"}) == "duckdb:wh.db"
+    assert plain.row_name({"dataset": "analytics"}) == "analytics"
+    dotted = CatalogNode(title="t", load=lambda: frame, name_columns=("schema", "table"))
+    assert dotted.row_name({"schema": "main", "table": "orders"}) == "main.orders"
+
+
+def test_each_engines_levels_declare_the_columns_that_name_their_rows(tmp_path, monkeypatch) -> None:
+    """Declared names let a walk build the next level from a path segment
+    without listing the level first."""
+    assert DuckDBExecutor().context_node("wh.db", tmp_path).name_columns == ("schema", "table")
+    assert SQLiteExecutor().context_node("nums.db", tmp_path).name_columns == ("table",)
+    pg = PostgresExecutor().context_node("postgresql://x")
+    assert pg.name_columns == ("schema",)
+    assert pg.child({"schema": "public"}).name_columns == ("table",)
+    monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: None)
+    bq = BigQueryExecutor().context_node({"project": "p"})
+    assert bq.name_columns == ("dataset",)
+    assert bq.child({"dataset": "analytics"}).name_columns == ("table",)
+
+
+def test_resolve_walks_a_duckdb_file_by_names(tmp_path) -> None:
+    project = _duckdb_project(tmp_path)
+    got = resolve(project_root_node(project), ["duckdb:wh.db", "main.orders"], CatalogCache())
+    assert got.node.child is None
+    assert got.frame["field_path"].to_list() == ["id", "s", "s.a"]
+    assert got.path == ("duckdb:wh.db", "main.orders")
+    level = resolve(project_root_node(project), ["duckdb:wh.db"], CatalogCache())
+    assert [level.node.row_name(r) for r in level.frame.iter_rows(named=True)] == [
+        "main.orders", "sales.orders_2024",
+    ]
+
+
+def test_resolve_walks_sqlite_by_names(tmp_path) -> None:
+    db = sqlite3.connect(tmp_path / "nums.db")
+    db.execute("CREATE TABLE nums (n INTEGER NOT NULL, label TEXT)")
+    db.commit()
+    db.close()
+    project = compile_text(
+        "-- @cell a\n-- @engine: sqlite\n/*@ input: { sqlite: nums.db } */\nSELECT 1 AS x;\n",
+        root=tmp_path,
+    )
+    got = resolve(project_root_node(project), ["sqlite:nums.db", "nums"], CatalogCache())
+    assert got.frame["field_path"].to_list() == ["n", "label"]
+
+
+def test_resolve_reads_a_cells_landed_output(tmp_path) -> None:
+    from quicksql.runner import run_project
+
+    project = compile_text(
+        "/*@ output: { type: parquet, dir: data/ } */\n-- @cell a\nSELECT 1 AS x, {'k': 2} AS s;\n",
+        root=tmp_path,
+    )
+    assert all(r.ok for r in run_project(project))
+    got = resolve(project_root_node(project), ["a"], CatalogCache())
+    assert got.frame["field_path"].to_list() == ["x", "s", "s.k"]
+
+
+def test_resolve_names_an_unknown_segment_and_the_names_close_to_it(tmp_path) -> None:
+    project = _duckdb_project(tmp_path)
+    root = project_root_node(project)
+    with pytest.raises(CatalogPathError) as err:
+        resolve(root, ["duckdb:wh.db", "main.ordrs"], CatalogCache())
+    assert (err.value.depth, err.value.segment, err.value.reason) == (1, "main.ordrs", "unknown")
+    assert "main.orders" in err.value.candidates
+    assert "main.ordrs" in str(err.value)
+    with pytest.raises(CatalogPathError) as err:
+        resolve(root, ["duckdb:nope.db"], CatalogCache())
+    assert err.value.depth == 0 and "duckdb:wh.db" in err.value.candidates
+
+
+def test_resolve_refuses_a_step_past_a_leaf(tmp_path) -> None:
+    project = _duckdb_project(tmp_path)
+    with pytest.raises(CatalogPathError) as err:
+        resolve(project_root_node(project), ["duckdb:wh.db", "main.orders", "id"], CatalogCache())
+    assert (err.value.depth, err.value.reason) == (2, "leaf")
+    memory = compile_text("-- @cell a\nSELECT 1 AS x;\n", root=tmp_path)
+    with pytest.raises(CatalogPathError) as err:  # an in-memory context can't be browsed
+        resolve(project_root_node(memory), ["duckdb::memory:", "main.t"], CatalogCache())
+    assert (err.value.depth, err.value.reason) == (1, "leaf")
+
+
+class CountingBigQuery:
+    """analytics.events only; every call recorded."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def list_datasets(self, page_size=None):
+        self.calls.append(("list_datasets",))
+        return [SimpleNamespace(dataset_id="analytics")]
+
+    def list_tables(self, dataset_id, page_size=None):
+        self.calls.append(("list_tables", dataset_id))
+        if dataset_id != "analytics":
+            raise LookupError(f"Not found: Dataset {dataset_id}")
+        return [SimpleNamespace(table_id="events", table_type="TABLE")]
+
+    def get_table(self, ref):
+        self.calls.append(("get_table", ref))
+        if ref != "analytics.events":
+            raise LookupError(f"Not found: Table {ref}")
+        return SimpleNamespace(schema=[_sf("id", "INTEGER")])
+
+
+@pytest.fixture
+def bq_project(tmp_path, monkeypatch):
+    client = CountingBigQuery()
+    monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: client)
+    project = compile_text(
+        "-- @cell a\n-- @engine: bigquery\n/*@ input: { bigquery: p } */\nSELECT 1 AS x;\n",
+        root=tmp_path,
+    )
+    return project, client
+
+
+def test_a_cold_exact_path_loads_only_its_leaf(bq_project) -> None:
+    project, client = bq_project
+    got = resolve(project_root_node(project), ["bigquery:p", "analytics", "events"], CatalogCache())
+    assert got.frame["field_path"].to_list() == ["id"]
+    assert client.calls == [("get_table", "analytics.events")]
+
+
+def test_a_wrong_guess_is_checked_against_the_level_above(bq_project) -> None:
+    project, client = bq_project
+    with pytest.raises(CatalogPathError) as err:
+        resolve(project_root_node(project), ["bigquery:p", "analytcs", "events"], CatalogCache())
+    assert (err.value.depth, err.value.segment, err.value.candidates) == (1, "analytcs", ["analytics"])
+    assert client.calls == [("get_table", "analytcs.events"), ("list_datasets",)]
+
+
+def test_a_cached_level_checks_a_segment_without_a_round_trip(bq_project) -> None:
+    project, client = bq_project
+    cache = CatalogCache()
+    resolve(project_root_node(project), ["bigquery:p", "analytics"], cache)  # lists its tables
+    calls = list(client.calls)
+    with pytest.raises(CatalogPathError) as err:
+        resolve(project_root_node(project), ["bigquery:p", "analytics", "evnts"], cache)
+    assert err.value.candidates == ["events"]
+    assert client.calls == calls
+
+
+class PgByName:
+    """public.users only: unknown schemas and tables list nothing, as
+    information_schema does."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+
+    def execute(self, sql, params=None):
+        if "schemata" in sql:
+            self.log.append("schemata")
+            return FakeCatalogPgCursor([("public",)])
+        if "information_schema.tables" in sql:
+            self.log.append("tables")
+            return FakeCatalogPgCursor([("users",)] if params == ("public",) else [])
+        self.log.append("columns")
+        rows = [("id", "integer", "NO", None)] if params == ("public", "users") else []
+        return FakeCatalogPgCursor(rows)
+
+    def close(self):
+        pass
+
+
+def test_an_empty_leaf_after_a_guess_checks_the_path(tmp_path, monkeypatch) -> None:
+    """Postgres answers an unknown table with no columns, not an error."""
+    log: list[str] = []
+    monkeypatch.setattr(PostgresExecutor, "make_connection", lambda self, dsn: PgByName(log))
+    project = compile_text(
+        "-- @cell a\n-- @engine: postgres\n/*@ input: { postgres: 'postgresql://x' } */\nSELECT 1;\n",
+        root=tmp_path,
+    )
+    root = project_root_node(project)
+    got = resolve(root, ["postgres:postgresql://x", "public", "users"], CatalogCache())
+    assert got.frame["field_path"].to_list() == ["id"] and log == ["columns"]
+    with pytest.raises(CatalogPathError) as err:
+        resolve(root, ["postgres:postgresql://x", "nope", "users"], CatalogCache())
+    assert (err.value.depth, err.value.segment) == (1, "nope")
+
+
+# ---------- pages and filters ----------
+
+
+def _tables_level(n: int) -> tuple[CatalogNode, pl.DataFrame]:
+    frame = pl.DataFrame({"schema": ["main"] * n, "table": [f"t{i:04d}" for i in range(n)]})
+    node = CatalogNode(title="duckdb:wh.db", load=lambda: frame, child=lambda row: None,
+                       name_columns=("schema", "table"))
+    return node, frame
+
+
+def test_page_slices_rows_names_them_and_says_where_the_next_starts() -> None:
+    node, frame = _tables_level(2500)
+    first = page(node, frame, offset=0, rows=1000)
+    assert (len(first["rows"]), first["total"], first["next_offset"]) == (1000, 2500, 1000)
+    assert first["columns"] == ["schema", "table"]
+    assert first["rows"][0] == ["main", "t0000"]
+    assert first["names"][:2] == ["main.t0000", "main.t0001"]
+    assert first["leaf"] is False and first["title"] == "duckdb:wh.db"
+    last = page(node, frame, offset=2000, rows=1000)
+    assert (len(last["rows"]), last["next_offset"]) == (500, None)
+
+
+def test_a_leafs_page_has_no_names() -> None:
+    from quicksql.executors.base import field_path_frame
+
+    fields = field_path_frame([("id", "id", "INT64", "", "")])
+    leaf = CatalogNode(title="t", load=lambda: fields)
+    assert page(leaf, fields, offset=0, rows=10)["names"] is None
+
+
+def test_narrow_matches_row_names_case_insensitively() -> None:
+    node, frame = _tables_level(2500)
+    got = narrow(node, frame, match="T000")
+    assert got["table"].to_list() == [f"t000{i}" for i in range(10)]
+
+
+def test_narrow_at_a_leaf_matches_field_paths_keeps_top_level_and_picks_columns() -> None:
+    from quicksql.executors.base import field_path_frame
+
+    fields = field_path_frame([
+        ("id", "id", "INT64", "", ""),
+        ("rec", "rec", "RECORD", "REPEATED", ""),
+        ("rec", "rec.Customer_id", "INT64", "", "the customer"),
+    ])
+    leaf = CatalogNode(title="t", load=lambda: fields)
+    assert narrow(leaf, fields, match="customer")["field_path"].to_list() == ["rec.Customer_id"]
+    assert narrow(leaf, fields, top_level=True)["field_path"].to_list() == ["id", "rec"]
+    assert narrow(leaf, fields, columns=["field_path", "type"]).columns == ["field_path", "type"]
+    with pytest.raises(ValueError, match="description"):  # names what there is
+        narrow(leaf, fields, columns=["nope"])
+
+
+# ---------- the cache: shared loads, scopes, a cap ----------
+
+
+def _gated_node(key: str, gate: threading.Event, calls: list[str], fail: bool = False) -> CatalogNode:
+    def load() -> pl.DataFrame:
+        calls.append(key)
+        gate.wait(5)
+        if fail:
+            raise RuntimeError("offline")
+        return pl.DataFrame({"n": [1]})
+
+    return CatalogNode(title=key, load=load)
+
+
+def _ask_twice(cache: CatalogCache, node: CatalogNode, gate: threading.Event, calls: list[str]):
+    """Two askers, the second arriving while the first loads."""
+    out: list = []
+
+    def ask() -> None:
+        try:
+            out.append(cache.load(node))
+        except Exception as exc:
+            out.append(exc)
+
+    first, second = threading.Thread(target=ask), threading.Thread(target=ask)
+    first.start()
+    for _ in range(500):
+        if calls:
+            break
+        time.sleep(0.01)
+    second.start()
+    time.sleep(0.1)  # the second is waiting by now
+    gate.set()
+    first.join(5)
+    second.join(5)
+    return out
+
+
+def test_two_askers_share_one_load() -> None:
+    gate, calls, cache = threading.Event(), [], CatalogCache()
+    out = _ask_twice(cache, _gated_node("a", gate, calls), gate, calls)
+    assert calls == ["a"]
+    assert [frame["n"].to_list() for frame, _ in out] == [[1], [1]]
+
+
+def test_a_shared_load_failure_reaches_every_asker() -> None:
+    gate, calls, cache = threading.Event(), [], CatalogCache()
+    out = _ask_twice(cache, _gated_node("a", gate, calls, fail=True), gate, calls)
+    assert calls == ["a"]
+    assert [type(o) for o in out] == [RuntimeError, RuntimeError]
+    assert len(cache) == 0
+
+
+def test_a_load_that_straddles_a_clear_answers_but_isnt_kept() -> None:
+    gate, calls, cache, out = threading.Event(), [], CatalogCache(), []
+    node = _gated_node("a", gate, calls)
+    thread = threading.Thread(target=lambda: out.append(cache.load(node)))
+    thread.start()
+    for _ in range(500):
+        if calls:
+            break
+        time.sleep(0.01)
+    cache.invalidate()  # a run ended while it loaded: what it read may be stale
+    gate.set()
+    thread.join(5)
+    assert out[0][0]["n"].to_list() == [1]
+    assert len(cache) == 0
+
+
+def test_invalidating_scopes_drops_only_their_levels() -> None:
+    frame = pl.DataFrame({"n": [1]})
+    a = CatalogNode(title="a", load=lambda: frame, scope="duckdb:wh.db")
+    b = CatalogNode(title="b", load=lambda: frame, scope="bigquery:p")
+    cache = CatalogCache()
+    cache.load(a)
+    cache.load(b)
+    cache.invalidate(scopes={"duckdb:wh.db"})
+    assert cache.peek(a) is None and cache.peek(b) is not None
+
+
+def test_project_root_node_stamps_each_subtree_with_its_rows_name(tmp_path) -> None:
+    project = _duckdb_project(tmp_path)
+    root = project_root_node(project)
+    rows = {row["name"]: row for row in root.load().iter_rows(named=True)}
+    context = root.child(rows["duckdb:wh.db"])
+    assert context.scope == "duckdb:wh.db"
+    assert context.child({"schema": "main", "table": "orders"}).scope == "duckdb:wh.db"
+    assert root.child(rows["a"]).scope == "a"
+    assert root.scope is None
+
+
+def test_the_cache_keeps_the_most_recently_used_within_its_cap() -> None:
+    frame = pl.DataFrame({"s": ["x" * 1000] * 100})
+    nodes = {k: CatalogNode(title=k, load=lambda: frame) for k in "abc"}
+    cache = CatalogCache(max_bytes=int(frame.estimated_size() * 2.5))
+    cache.load(nodes["a"])
+    cache.load(nodes["b"])
+    cache.load(nodes["a"])  # a is now the most recently used
+    cache.load(nodes["c"])
+    assert cache.peek(nodes["b"]) is None
+    assert cache.peek(nodes["a"]) is not None and cache.peek(nodes["c"]) is not None
+    assert cache.size_bytes <= cache.max_bytes
+
+
+def test_a_level_bigger_than_the_cap_is_still_kept_alone() -> None:
+    frame = pl.DataFrame({"n": list(range(100))})
+    cache = CatalogCache(max_bytes=10)
+    cache.load(CatalogNode(title="a", load=lambda: frame))
+    cache.load(CatalogNode(title="b", load=lambda: frame))
+    assert len(cache) == 1 and cache.peek(CatalogNode(title="b", load=lambda: frame)) is not None
+
+
+# ---------- redaction and BigQuery pages ----------
+
+
+def test_a_keyword_dsns_password_is_hidden_even_without_an_equals_sign() -> None:
+    name, _ = PostgresExecutor().catalog_target("host=h password s3cret dbname=d", Path("."))
+    assert "s3cret" not in name and name.startswith("postgres:host=h password ")
+
+
+def test_postgres_redacts_passwords_in_free_text() -> None:
+    pg = PostgresExecutor()
+    text = "could not connect to postgresql://u:s3cret@h/db (password=other sslpassword='x y')"
+    out = pg.redact(text)
+    assert "s3cret" not in out and "other" not in out and "x y" not in out
+    assert "postgresql://u:***@h/db" in out
+    assert pg.redact('password authentication failed for user "u"') == (
+        'password authentication failed for user "u"'
+    )
+
+
+def test_catalog_redact_asks_every_engine(registries) -> None:
+    from quicksql.executors.base import Executor
+    from quicksql.registry import executor
+
+    @executor("vault")
+    class Vault(Executor):
+        def open_session(self, config, ctx):
+            raise NotImplementedError
+
+        def redact(self, text):
+            return text.replace("TOPSECRET", "***")
+
+    registries.add(Vault)
+    assert redact("TOPSECRET and postgresql://u:pw@h/db", registries) == (
+        "*** and postgresql://u:***@h/db"
+    )
+
+
+def test_bigquery_listings_ask_for_full_pages(monkeypatch) -> None:
+    asked: list[tuple] = []
+
+    class FakeClient:
+        def list_datasets(self, page_size=None):
+            asked.append(("datasets", page_size))
+            return []
+
+        def list_tables(self, dataset_id, page_size=None):
+            asked.append(("tables", page_size))
+            return []
+
+    monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
+    node = BigQueryExecutor().context_node({"project": "p"})
+    node.load()
+    node.child({"dataset": "d"}).load()
+    assert BigQueryExecutor.page_size == 1000
+    assert asked == [("datasets", 1000), ("tables", 1000)]

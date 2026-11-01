@@ -43,7 +43,7 @@ from typing import Any, Callable, Iterator
 import pytest
 
 from quicksql.bootstrap import compile_file
-from quicksql.catalog import CatalogCache, CatalogNode, project_root_node
+from quicksql.catalog import CatalogCache, CatalogNode, project_root_node, redact, resolve
 from quicksql.compiler import Project
 from quicksql.executors.bigquery_exec import BigQueryExecutor
 from quicksql.executors.postgres_exec import PostgresExecutor
@@ -236,6 +236,11 @@ class Shape:
     cell: str  # a cell in that context, for the LSP
     wide_relation: str  # the wide table as that cell names it
     named: tuple[str, ...]  # 30 tables a notebook names (S12)
+
+    @property
+    def segments(self) -> tuple[str, ...]:
+        """The wide leaf's path beneath the context, a row name per level."""
+        return tuple(next(iter(p.values())) for p in self.wide)
 
 
 BQ = Shape(
@@ -460,29 +465,34 @@ def test_s1_cold_browse(engine, request, stress_project) -> None:
     if engine == "pg":
         assert m["calls"] == {"pg.connect": loaded, "pg.query": loaded}
     else:
-        pages = sum(math.ceil(max(lvl["rows"], 1) / int(engine[4:])) for lvl in m["levels"][:-1]) \
+        # the executor asks for full pages (Phase 1), whatever the API's default
+        size = getattr(BigQueryExecutor, "page_size", None) or int(engine[4:]) if engine.startswith("fake") else 0
+        pages = sum(math.ceil(max(lvl["rows"], 1) / size) for lvl in m["levels"][:-1]) \
             if engine.startswith("fake") else loaded - 1
         assert engine_trips(m, "bq.") == pages + 1  # every list page, and one tables.get
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 1: a cold exact path loads only its leaf")
 @pytest.mark.parametrize("engine", ["bq", "pg", "fake50", "fake1000"])
 def test_s2_cold_exact_path(engine, request, stress_project) -> None:
-    """Straight to the wide leaf by its names: only the leaf's load."""
+    """Straight to the wide leaf by its names (``catalog.resolve``): only the
+    leaf's load."""
     shape, meter = backend(request, engine)
     project = stress_project()
+    root = project_root_node(project)
+    context_row = pick(root.load(), {"kind": "context", "engine": shape.engine})
+    path = [context_row["name"], *shape.segments]
     with measuring(meter) as m:
-        _, frames, levels = walk_to_wide(CatalogCache(), project, shape)
-    m["levels"] = levels
+        got = resolve(root, path, CatalogCache())
+    m["path_depth"] = len(path)
     record("S2", engine, m)
-    # for reference, the LSP's direct lookup: what walking by name can reach
+    # for reference, the LSP's direct lookup, which name-first walking now matches
     cell = project.cells[shape.cell]
     executor = project.registries.executors.get(cell.engine)
     with measuring(meter) as direct:
         executor.catalog_table(cell.config, project.root, shape.wide_relation.split(".")).load()
     record("S2", f"{engine}/lsp-direct", direct)
-    if frames[-1].height != shape.wide_rows:
-        pytest.fail(f"wide leaf has {frames[-1].height} rows, not {shape.wide_rows}")
+    if got.frame.height != shape.wide_rows:
+        pytest.fail(f"wide leaf has {got.frame.height} rows, not {shape.wide_rows}")
     assert m["calls"] == ({"pg.connect": 1, "pg.query": 1} if engine == "pg" else {"bq.tables.get": 1})
 
 
@@ -554,7 +564,6 @@ def test_s5_runs_clear_only_their_contexts(bq_live, pg_live, stress_project) -> 
     assert engine_trips(bq, "bq.") == 3  # its context, the wide container, the leaf
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 1: a load in flight is shared")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
 def test_s6_one_load_for_two_askers(engine, request, stress_project) -> None:
     """The TUI and an agent ask for the same cold leaf at once: one load."""
@@ -676,10 +685,10 @@ BAD_TARGETS = {
 }
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 1: redaction covers names and error text")
 def test_s10b_no_secret_in_a_failing_targets_name_or_error(pg_live, stress_project) -> None:
     """``@catalog`` targets that fail to load: neither the row name nor the
-    error text carries the password."""
+    error text, as the catalog shows it (``catalog.redact``), carries the
+    password."""
     project = stress_project()
     executor = project.registries.executors.get("postgres")
     leaks: dict[str, list[str]] = {}
@@ -690,7 +699,8 @@ def test_s10b_no_secret_in_a_failing_targets_name_or_error(pg_live, stress_proje
             pytest.fail(f"{what}: the load should fail")
         except Exception as exc:
             message = str(exc)
-        leaks[what] = [part for part, text in (("name", name), ("error", message)) if SECRET in text]
+        shown = (("name", name), ("error", redact(message, project.registries)))
+        leaks[what] = [part for part, text in shown if SECRET in text]
     record("S10b", "postgres", {"leaks": leaks})
     assert not any(leaks.values())
 
@@ -698,7 +708,6 @@ def test_s10b_no_secret_in_a_failing_targets_name_or_error(pg_live, stress_proje
 # ---------- S11: memory ----------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 1: the cache has a size cap")
 def test_s11_cache_memory_is_capped(bq_fake, stress_project) -> None:
     """400 wide leaves (2050 field paths, 200-character descriptions) loaded:
     the cache holds at most CACHE_CAP_MB of them."""
