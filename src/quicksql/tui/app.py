@@ -105,6 +105,7 @@ class QsqlApp(App):
         self.catalog = CatalogView(self)  # the Catalog tab's own dive
         self._catalog_dive_pending = False  # S pressed while the root loads
         self._catalog_root_loading = False  # a root load is in flight
+        self._catalog_loading: str | None = None  # the title of a load in flight
         self._row_names: list[str] = []
         self._pending_g = False
         self._last_search = ""
@@ -347,15 +348,37 @@ class QsqlApp(App):
             return
         cell = self.project.cells[name]
         sql = cell.sql if self.show_rendered else (cell.source or cell.sql_raw)
-        label = "rendered" if self.show_rendered else "source"
         self.query_one("#sql_view", Static).update(
             Syntax(sql, "sql", line_numbers=True, word_wrap=True)
         )
         self.query_one("#config_view", Static).update(
             yaml.safe_dump(cell.config.model_dump(mode="json"), sort_keys=True)
         )
+        self.refresh_subtitle()
+
+    def refresh_subtitle(self) -> None:
+        """The one subtitle, from whatever has the keys: a catalog load in
+        flight, the catalog's top sheet in a catalog dive, the Data sheet when
+        dived or browsed on its tab, else the selected cell. Runs and
+        recompiles repaint through here, so they never overwrite a sheet's."""
+        if self._catalog_loading is not None:
+            self.sub_title = f"loading {self._catalog_loading}…"
+        elif self.mode == "catalog" and self.catalog.stack:
+            self.sub_title = self.catalog.subtitle
+        elif self.data.stack and (
+            self.mode == "data" or self.query_one(TabbedContent).active == "tab_data"
+        ):
+            self.sub_title = self.data.subtitle
+        else:
+            self.sub_title = self._cell_subtitle()
+
+    def _cell_subtitle(self) -> str:
+        name = self.current_cell
+        if not name or not self.project:
+            return ""
+        label = "rendered" if self.show_rendered else "source"
         stack = f" · sheets:{len(self.sheet_stack)}" if self.sheet_stack else ""
-        self.sub_title = f"{name} · sql:{label}{stack}"
+        return f"{name} · sql:{label}{stack}"
 
 
 
@@ -494,14 +517,6 @@ class QsqlApp(App):
         import duckdb
 
         return duckdb.connect()
-
-    def _restore_subtitle(self) -> None:
-        if self.mode == "catalog" and self.catalog_stack:
-            self.catalog.refresh()
-        elif self.mode == "data" and self.sheet_stack:
-            self.data.refresh()
-        else:
-            self._refresh_detail()
 
     def _drill_current(self) -> None:
         sheet = self.sheet_stack[-1]
@@ -805,7 +820,7 @@ class QsqlApp(App):
 
     @work(thread=True, exclusive=True, group="catalog")
     def _catalog_worker(self, node: CatalogNode, replace: bool = False) -> None:
-        self.call_from_thread(setattr, self, "sub_title", f"loading {node.title}…")
+        self.call_from_thread(self._catalog_load_started, node.title)
         try:
             frame, _ = self._catalog_cache.load(node)
         except Exception as exc:
@@ -813,13 +828,21 @@ class QsqlApp(App):
             self.call_from_thread(self.notify, f"catalog: {exc}", severity="error")
             self.call_from_thread(setattr, self, "_catalog_dive_pending", False)
             self.call_from_thread(setattr, self, "_catalog_root_loading", False)
-            self.call_from_thread(self._restore_subtitle)  # drop the loading… note
+            self.call_from_thread(self._catalog_load_ended)  # drop the loading… note
             return
         sheet = Sheet(frame, title=node.title, drill=node)
         if replace:  # refetch: swap the current sheet, keep the stack shape
             self.call_from_thread(self._replace_top_sheet, sheet)
         else:
             self.call_from_thread(self._push_catalog_sheet, sheet)
+
+    def _catalog_load_started(self, title: str) -> None:
+        self._catalog_loading = title
+        self.refresh_subtitle()
+
+    def _catalog_load_ended(self) -> None:
+        self._catalog_loading = None
+        self.refresh_subtitle()
 
     def _push_catalog_sheet(self, sheet: Sheet) -> None:
         self._catalog_root_loading = False  # a root push lands on an empty stack
@@ -828,13 +851,13 @@ class QsqlApp(App):
             self._catalog_dive_pending = False
             self.mode = "catalog"
         self.catalog.refresh()
-        if self.mode != "catalog":  # browse push: drop the loading… subtitle
-            self._restore_subtitle()
+        self._catalog_load_ended()
 
     def _replace_top_sheet(self, sheet: Sheet) -> None:
         if self.catalog_stack:
             self.catalog_stack[-1] = sheet
             self.catalog.refresh()
+            self._catalog_load_ended()
         else:
             self._push_catalog_sheet(sheet)
 

@@ -228,6 +228,7 @@ class DataPanes(Surface):
         super().__init__(app)
         self.panes: list[list[Sheet]] = [[]]
         self.active = 0
+        self.subtitle = ""  # the focused pane's top sheet's
         self._tables: list[SheetTable] = []
 
     @property
@@ -292,11 +293,12 @@ class DataPanes(Surface):
             return
         self.active ^= 1
         self.sync_layout()
-        self.refresh()  # moves the -active border and the active sub_title
+        self.refresh()  # moves the -active border and the subtitle
 
     def refresh(self) -> None:
         # render every pane; each SheetTable's cache keeps the unfocused pane
         # from rebuilding when only the focused one changed
+        self.subtitle = ""
         for idx, table in enumerate(self.tables):
             if idx >= len(self.panes) or not self.panes[idx]:
                 table.clear()
@@ -305,4 +307,5 @@ class DataPanes(Surface):
             subtitle = table.render(self.panes[idx][-1], self.filter_base if active else None)
             if active:
                 side = ("L / " if idx == 0 else "R / ") if self.split else ""
-                self.app.sub_title = side + subtitle
+                self.subtitle = side + subtitle
+        self.app.refresh_subtitle()

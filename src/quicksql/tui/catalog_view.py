@@ -20,6 +20,7 @@ class CatalogView(Surface):
     def __init__(self, app: QsqlApp) -> None:
         super().__init__(app)
         self.stack: list[Sheet] = []
+        self.subtitle = ""  # the top sheet's
         self._table: SheetTable | None = None
 
     def focused(self) -> SheetTable:
@@ -31,6 +32,7 @@ class CatalogView(Surface):
         table = self.focused()
         if not self.stack:
             table.clear()
+            self.subtitle = ""
             return
         active = self.app.mode == "catalog"
         if active and not table.table.size and not deferred:
@@ -41,6 +43,5 @@ class CatalogView(Surface):
             # has its size — once only, as a compact terminal never gives it one.
             self.app.call_after_refresh(self.refresh, deferred=True)
             return
-        subtitle = table.render(self.stack[-1], self.filter_base if active else None)
-        if active:
-            self.app.sub_title = subtitle
+        self.subtitle = table.render(self.stack[-1], self.filter_base if active else None)
+        self.app.refresh_subtitle()
