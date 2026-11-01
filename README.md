@@ -428,14 +428,17 @@ quicksql live events base.qsql --follow # NDJSON: compiles, cells, runs, control
 
 ### An agent skill: `quicksql skill`
 
-quicksql ships a [Claude Code skill](src/quicksql/skill/SKILL.md) that teaches an agent
-notebooks: the cell format, the offline loop, and this live loop. It's a folder: a lean
-`SKILL.md`, references the agent reads when it needs them (notebook format, directives,
-engines and sinks, the live session, JSON shapes) and example notebooks that run.
-`quicksql skill` prints `SKILL.md`, `quicksql skill --path` says where the folder is, and
-`quicksql skill --install` copies it to `.claude/skills/quicksql/` in the current project.
-Rerun it after upgrading quicksql: it updates the files you haven't edited and refuses to
-overwrite ones you have (`--force` replaces them). The skill always matches the CLI.
+quicksql ships an [agent skill](src/quicksql/skill/SKILL.md) (the
+[Agent Skills](https://agentskills.io) format) that teaches an agent notebooks: the cell
+format, the offline loop, and this live loop. It's a folder: a lean `SKILL.md`, references
+the agent reads when it needs them (notebook format, directives, engines and sinks, the
+live session, JSON shapes) and example notebooks that run. `quicksql skill` prints
+`SKILL.md`, `quicksql skill --path` says where the folder is, and `quicksql skill --install`
+copies it to `.agents/skills/quicksql/` in the current project (`--dir ~` for every
+project), the folder Codex, Gemini CLI and opencode read. Claude Code reads only
+`.claude/skills/`: link the folder there. Rerun `--install` after upgrading quicksql: it
+updates the files you haven't edited and refuses to overwrite ones you have (`--force`
+replaces them). The skill always matches the CLI.
 
 ## Editor integration
 

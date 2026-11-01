@@ -25,7 +25,7 @@ As built, where it differs from the plan below:
 - The skill ships in the package as a folder (`src/quicksql/skill/`: a lean `SKILL.md`,
   `references/` read on demand, runnable `examples/`), as `herdr --skill` ships its own:
   `quicksql skill` prints `SKILL.md`, `--path` locates the folder, `--install` copies it to
-  `.claude/skills/quicksql/`. Its `references/directives.md` is generated from the builtin
+  `.agents/skills/quicksql/` (the folder Codex, Gemini CLI and opencode share). Its `references/directives.md` is generated from the builtin
   registries (`quicksql directives --markdown`, every builtin `qfield` now has a
   `description`), and `quicksql directives NOTEBOOK` lists a notebook's own, rc plugins
   included. `tests/test_skill.py` keeps links, examples, `live` commands and the generated

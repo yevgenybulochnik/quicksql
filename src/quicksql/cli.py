@@ -484,18 +484,21 @@ def _cut(value: Any) -> str:
 @app.command()
 def skill(
     install: bool = typer.Option(
-        False, "--install", help="Copy the skill folder to DIR/.claude/skills/quicksql/"
+        False, "--install", help="Copy the skill folder to DIR/.agents/skills/quicksql/"
     ),
-    directory: Path = typer.Option(Path("."), "--dir", help="With --install: the project"),
+    directory: Path = typer.Option(
+        Path("."), "--dir", help="With --install: the project, or ~ for every project"
+    ),
     force: bool = typer.Option(False, "--force", help="With --install: overwrite edited files"),
     path: bool = typer.Option(False, "--path", help="Print where the packaged skill folder is"),
 ) -> None:
-    """The agent skill for quicksql notebooks (a Claude Code skill folder).
+    """The agent skill for quicksql notebooks (an Agent Skills folder).
 
     Prints its SKILL.md: the cell format, the offline loop, and working
     alongside an open TUI through `quicksql live`. Its references (directives,
     engines and sinks, the live session, JSON shapes) and runnable examples sit
-    next to it: --path says where, --install copies the folder into a project."""
+    next to it: --path says where, --install copies the folder into a project's
+    .agents/skills/, which Codex, Gemini CLI and opencode read."""
     from importlib.resources import files
 
     folder = files("quicksql").joinpath("skill")
@@ -506,7 +509,7 @@ def skill(
         typer.echo(folder.joinpath("SKILL.md").read_text(), nl=False)
         return
     shipped = dict(_skill_files(folder))
-    target = directory / ".claude" / "skills" / "quicksql"
+    target = directory.expanduser() / ".agents" / "skills" / "quicksql"
     manifest = target / ".installed.json"  # what the last install wrote, by hash
     try:
         installed = json.loads(manifest.read_text())
