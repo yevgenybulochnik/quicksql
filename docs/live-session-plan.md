@@ -1,8 +1,33 @@
 # Plan: an agent alongside the open TUI
 
-**Status:** proposed 2026-11-01. Builds on `docs/agent-cli-plan.md` and replaces its
-`status --wait` and `watch --json` (step 7) and its "no long-running daemon" exclusion.
-Needs no core-refactor phase; Phase 7's trust applies unchanged.
+**Status:** steps 1–8 done (2026-11-01, branch `feat/live-session`); step 9 open.
+Builds on `docs/agent-cli-plan.md` and replaces its `status --wait` and `watch --json`
+(step 7) and its "no long-running daemon" exclusion. Needs no core-refactor phase; Phase
+7's trust applies unchanged. All four decisions below went with their defaults.
+
+As built, where it differs from the plan below:
+- The save's hash rides on the project: `Project.source_hash` (`models.source_hash` of the
+  text compiled) instead of `bootstrap.compile_file(text=)`. Whatever compiled a project,
+  the host reads the hash of exactly that text.
+- `Preview.to_dict` and `errors.error_dicts` are public, so the host and the CLI share the
+  JSON shapes without importing private names.
+- Extra protocol: `run.wait` (what `live run --wait` calls), a `run_ended` event (a run
+  replaced before it started never emits the runner's events), and `events.since` without
+  a `seq` returns the whole ring.
+- `client.events()` subscribes on return, not on the first `next()`: a lazy generator
+  missed events that happened in between (found by the `events_lost` test hanging).
+- The agent marker is in the title (`▶ live · agent`), next to the armed state, not the
+  subtitle, which keeps its one writer.
+- A failing `live query` is `query_failed` (exit 1); a replaced or dropped `live run
+  --wait` exits 5.
+- Offline `head` never ATTACHes (the TUI's `read_landed` rule), so with no TUI open it
+  reads Parquet outputs; database outputs read through a live session.
+- The skill ships in the package: `quicksql skill` prints it and `quicksql skill
+  --install` writes `.claude/skills/quicksql/SKILL.md` (as `herdr --skill` does); a test
+  keeps it naming every `quicksql live` command and runs its example notebook.
+- Verified end to end in tmux: a duckdb-sink output the TUI holds locked reads through
+  `head` while an offline open fails on the lock; a broken cell's `live wait` names its
+  lines, statement and DuckDB's message; the fix's wait comes back ok.
 
 ## Context
 

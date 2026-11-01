@@ -102,6 +102,21 @@ first `@cell`) inherited by every cell.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
   The TUI runs one run at a time per session: a new run, `o` or quitting cancels the one
   under way, which stops between cells (`run_project(cancel=)`), and the next waits for it.
+- **The live session: an agent alongside the TUI** (`docs/live-session-plan.md`). The TUI's
+  controls (`armed`, autorun switches) live on `live.host.LiveHost`, not the app; keys set
+  them through it (`by="keys"`), and the run controller reports every run's life to it
+  (requested/adopted/events/ended/dropped). The host keeps the run mirror, each save's
+  outcome by `Project.source_hash` (`models.source_hash` of the compiled text: `paused`,
+  `nothing_to_rerun`, `ran`, `compile_failed`) and a bounded event ring with bounded
+  subscriber queues (`events_lost`, never unbounded growth). `quicksql tui` serves it on a
+  per-notebook 0600 Unix socket (`live.protocol.socket_path`: `$QSQL_HOME/run/`, or the
+  runtime dir when too long) from the TUI's own loop (`live/server.py`), so requests and
+  keys share one thread; DuckDB reads (`head`, `query`) run on a worker through
+  `RunController.reading()`, which holds the session open. `quicksql live …` is the
+  stdlib client (no Textual/Polars). Still reflect-only for the file: the socket never
+  writes it. `quicksql run`/`watch` refuse while a TUI hosts the notebook (one runner per
+  notebook); `QsqlApp(live=False)` by default, so tests opt in. `quicksql skill` prints the
+  packaged agent skill (`src/quicksql/skill.md`).
 
 ## Commands
 
@@ -124,7 +139,10 @@ first `@cell`) inherited by every cell.
   `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
   `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
-  `compile` — default file `base.qsql`; `--set key.path=value` repeatable. `quicksql tui`
+  `compile` | `status` | `head <cell>` | `skill` | `live …` (arm, disarm, autorun, run,
+  cancel, wait, events, query, focus, notify) — default file `base.qsql`;
+  `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile /
+  unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
   with a missing file opens a notebook picker: existing .qsql/.qsql.sql files plus
   starter templates (builtin `base` + user templates from `~/.quicksql/templates/*.qsql`);
   `o` in the TUI switches notebooks.
@@ -157,13 +175,17 @@ first `@cell`) inherited by every cell.
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
   opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
 - `scaffold.py`, `cli.py`, `watcher.py` — CLI, watch loop
+- `live/` — the live session: `protocol.py` (NDJSON wire format, error codes, socket path;
+  stdlib only), `host.py` (`LiveHost`: controls, run mirror, outcomes, events), `server.py`
+  (asyncio Unix server on the TUI's loop), `client.py` (the CLI's blocking client)
 - `tui/` — the TUI. `app.py` (`QsqlApp`: layout, key routing, the notebook's lifecycle
   and watch loop), `runs.py` (`RunController`: the session, one run at a time,
   generation-tagged; it repaints through the app's `run_*` hooks), `panes.py`
   (`SheetTable` renders a Sheet; `Surface` holds the sheet verbs; `DataPanes` is the Data
   tab's stacks and split), `catalog_view.py` (the Catalog tab's loads, cache and
   per-notebook generation), `previews.py`, `screens.py`; `sheet.py` holds the pure Sheet
-  ops. The subtitle has one writer, `QsqlApp.refresh_subtitle`. Textual is the `tui` extra
+  ops. The subtitle has one writer, `QsqlApp.refresh_subtitle`; `agent.py` is the live
+  host's driver (`AppDriver`). Textual is the `tui` extra
   (the dev group installs it); `quicksql tui` without it names the extra.
 - `lsp/` — `analysis.py` (diagnostics/completions on sqlglot in the cell's executor's
   dialect + length-preserving Jinja mask; tables and relations from its catalog), `server.py` (pygls stdio); bigquery cells prefer the googlesql

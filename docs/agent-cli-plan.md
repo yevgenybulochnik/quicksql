@@ -49,7 +49,8 @@ Every step below serves that loop. Schema discovery and state come after it work
 3. **`--json` on `list` and `compile`.** Per cell: name, engine, sink, context, line
    range, autorun, tags, `depends_on`, `context_refs`/`external_refs`, and rendered SQL
    (in `compile`). This lets an agent see the graph without parsing aligned text.
-4. **A notebook skill for Claude Code** (`.claude/skills/quicksql-notebook/SKILL.md`).
+4. **A notebook skill for Claude Code.** Done with the live session: it ships in the
+   package (`quicksql skill`, `quicksql skill --install`; `docs/live-session-plan.md`).
    It covers the cell format, the directive vocabulary, the check → run → read loop using
    steps 1–3, and the rules that bite: cross-context `ref()` runs on duckdb, effect-only
    cells can't be `ref()`'d, and skipped cells mean an upstream failed. It's written
