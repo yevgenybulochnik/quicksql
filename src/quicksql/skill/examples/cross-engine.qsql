@@ -1,0 +1,20 @@
+-- Two engines: cells on one SQLite file share a connection, and a duckdb cell
+-- joins across engines (only duckdb reads other engines' outputs).
+
+-- @cell people
+-- @input: { sqlite: people.db }
+WITH people(id, name, team) AS (VALUES (1, 'ada', 'core'), (2, 'bob', 'web'), (3, 'cyd', 'core'))
+SELECT * FROM people;
+
+-- @cell core_people
+-- @input: { sqlite: people.db }
+SELECT id, name FROM {{ ref('people') }} WHERE team = 'core';
+
+-- @cell commits
+SELECT range % 3 + 1 AS author_id, range AS commit_id FROM range(10);
+
+-- @cell commits_by_core
+SELECT p.name, count(*) AS commits
+FROM {{ ref('core_people') }} p
+JOIN {{ ref('commits') }} c ON c.author_id = p.id
+GROUP BY 1 ORDER BY 1;

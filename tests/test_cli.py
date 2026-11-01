@@ -552,3 +552,20 @@ def test_directives_without_a_notebook_lists_the_builtins(tmp_path) -> None:
     result = runner.invoke(app, ["directives", str(tmp_path / "missing.qsql"), "--markdown"])
     assert result.exit_code == 0
     assert "| `depends_on` |" in result.output
+
+
+def test_skill_install_updates_an_older_install_without_force(tmp_path) -> None:
+    import hashlib
+
+    assert runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)]).exit_code == 0
+    installed = tmp_path / ".claude" / "skills" / "quicksql"
+    manifest = installed / ".installed.json"
+    # what an older quicksql installed: different text, recorded as installed
+    old = "an older version of this reference\n"
+    (installed / "references" / "live.md").write_text(old)
+    recorded = json.loads(manifest.read_text())
+    recorded["references/live.md"] = hashlib.sha256(old.encode()).hexdigest()[:16]
+    manifest.write_text(json.dumps(recorded))
+    result = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert (installed / "references" / "live.md").read_text() != old

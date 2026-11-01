@@ -484,27 +484,117 @@ def _cut(value: Any) -> str:
 @app.command()
 def skill(
     install: bool = typer.Option(
-        False, "--install", help="Write it to DIR/.claude/skills/quicksql/SKILL.md"
+        False, "--install", help="Copy the skill folder to DIR/.claude/skills/quicksql/"
     ),
     directory: Path = typer.Option(Path("."), "--dir", help="With --install: the project"),
-    force: bool = typer.Option(False, "--force", help="With --install: overwrite an edited copy"),
+    force: bool = typer.Option(False, "--force", help="With --install: overwrite edited files"),
+    path: bool = typer.Option(False, "--path", help="Print where the packaged skill folder is"),
 ) -> None:
-    """The agent skill for quicksql notebooks (a Claude Code SKILL.md): the
-    cell format, the offline loop, and working alongside an open TUI through
-    `quicksql live`. Printed, or installed into a project."""
+    """The agent skill for quicksql notebooks (a Claude Code skill folder).
+
+    Prints its SKILL.md: the cell format, the offline loop, and working
+    alongside an open TUI through `quicksql live`. Its references (directives,
+    engines and sinks, the live session, JSON shapes) and runnable examples sit
+    next to it: --path says where, --install copies the folder into a project."""
     from importlib.resources import files
 
-    text = files("quicksql").joinpath("skill.md").read_text()
-    if not install:
-        typer.echo(text, nl=False)
+    folder = files("quicksql").joinpath("skill")
+    if path:
+        typer.echo(str(folder))
         return
-    target = directory / ".claude" / "skills" / "quicksql" / "SKILL.md"
-    if target.exists() and target.read_text() != text and not force:
-        typer.secho(f"{target} has edits of its own: pass --force to replace it", fg="red")
+    if not install:
+        typer.echo(folder.joinpath("SKILL.md").read_text(), nl=False)
+        return
+    shipped = dict(_skill_files(folder))
+    target = directory / ".claude" / "skills" / "quicksql"
+    manifest = target / ".installed.json"  # what the last install wrote, by hash
+    try:
+        installed = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        installed = {}
+    # edited: changed since it was installed, not merely older than this version
+    edited = sorted(
+        rel for rel, text in shipped.items()
+        if (target / rel).exists()
+        and (current := (target / rel).read_text()) != text
+        and _digest(current) != installed.get(rel)
+    )
+    if edited and not force:
+        typer.secho(
+            f"{target} has edits of its own ({', '.join(edited)}): pass --force to replace them",
+            fg="red",
+        )
         raise typer.Exit(EXIT_FAILED)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
-    typer.echo(f"installed {target}")
+    for rel, text in shipped.items():
+        (target / rel).parent.mkdir(parents=True, exist_ok=True)
+        (target / rel).write_text(text)
+    manifest.write_text(json.dumps({rel: _digest(t) for rel, t in shipped.items()}, indent=1))
+    typer.echo(f"installed {target} ({len(shipped)} files)")
+
+
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _skill_files(folder: Any, prefix: str = ""):
+    """(relative path, text) of every file in the packaged skill folder."""
+    for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+        rel = f"{prefix}{entry.name}"
+        if entry.is_dir():
+            if entry.name != "__pycache__":
+                yield from _skill_files(entry, f"{rel}/")
+        else:
+            yield rel, entry.read_text()
+
+
+@app.command("directives")
+def directives_cmd(
+    file: Path = FILE_ARG,
+    json_out: bool = typer.Option(False, "--json", help="Print one JSON document instead"),
+    markdown: bool = typer.Option(False, "--markdown", help="Print the Markdown reference"),
+    plugins: Optional[list[str]] = PLUGINS_OPT,
+) -> None:
+    """The directives a notebook can write, and the engines and sinks they name.
+
+    Read from the notebook's own registries: the builtins, its quicksqlrc.py
+    and --plugins. Each directive's scope (global, cell or both), type,
+    default, merge (override, deep, extend), whether editing it reruns the
+    cell, and what it does. Without the file, the builtins."""
+    from . import vocabulary
+    from .bootstrap import registries_for
+
+    try:
+        registries = registries_for(file if file.exists() else None, plugins or ())
+    except QsqlError as exc:
+        typer.secho(str(exc), fg="red")
+        raise typer.Exit(EXIT_COMPILE)
+    if markdown:
+        typer.echo(vocabulary.directives_markdown(registries), nl=False)
+        return
+    rows = vocabulary.directives(registries)
+    if json_out:
+        doc = {
+            "file": str(file),
+            "directives": [d.to_dict() for d in rows],
+            "engines": vocabulary.engines(registries),
+            "sinks": vocabulary.sinks(registries),
+        }
+        typer.echo(json.dumps(doc, default=str))
+        return
+    for d in rows:
+        reruns = "editing it reruns the cell" if d.reruns else "editing it reruns nothing"
+        origin = "" if d.source == "builtin" else f" · from {d.source}"
+        typer.secho(
+            f"{d.key}  ({d.scope} · {d.type} · default {vocabulary.yaml_flow(d.default)} · "
+            f"{d.merge} · {reruns}{origin})",
+            bold=True,
+        )
+        typer.echo(textwrap.fill(d.description, 88, initial_indent="    ", subsequent_indent="    "))
+    typer.echo("")
+    typer.echo("engines: " + ", ".join(e["name"] for e in vocabulary.engines(registries)))
+    typer.echo("sinks:   " + ", ".join(s["name"] for s in vocabulary.sinks(registries)))
 
 
 # ---------- quicksql live: an agent alongside the open TUI ----------

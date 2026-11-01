@@ -19,7 +19,11 @@ class EmitSql(Plugin):
     priority = -100  # outermost: emit even if inner behavior fails
 
     class Config(BaseModel):
-        render_dir: str | None = qfield(None, affects_results=False)
+        render_dir: str | None = qfield(
+            None,
+            affects_results=False,
+            description="Write each cell's rendered SQL into this directory before it runs.",
+        )
 
     def run(self, cell: RenderedCell, ctx: RunContext, inner: Inner) -> RunResult:
         render_dir = getattr(ctx.config, "render_dir", None)

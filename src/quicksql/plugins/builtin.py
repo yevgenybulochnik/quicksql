@@ -26,7 +26,11 @@ class Engine(Plugin):
     """The engine: directive; answers engine resolution for explicit settings."""
 
     class Config(BaseModel):
-        engine: str | None = qfield(None)
+        engine: str | None = qfield(
+            None,
+            description="Run the cell on this engine (duckdb, sqlite, postgres, bigquery);"
+            " usually inferred from `input`.",
+        )
 
         @field_validator("engine")
         @classmethod
@@ -46,7 +50,13 @@ class Input(Plugin):
     """The input: directive; infers the engine from its sole top-level key."""
 
     class Config(BaseModel):
-        input: dict[str, Any] = qfield({}, merge=Merge.DEEP)
+        input: dict[str, Any] = qfield(
+            {},
+            merge=Merge.DEEP,
+            description="Where the engine connects, keyed by engine (its one key picks the"
+            " engine): `{duckdb: path.db}`, `{sqlite: path.db}`, `{postgres: {dsn: $PG_DSN}}`,"
+            " `{bigquery: {project: ..., endpoint: ...}}`.",
+        )
 
     def resolve_engine(self, config: Any) -> str | None:
         inp = getattr(config, "input", None) or {}
@@ -64,7 +74,12 @@ class Sources(Plugin):
     """The sources: directive plus the source() template global that reads it."""
 
     class Config(BaseModel):
-        sources: dict[str, Any] = qfield({}, merge=Merge.DEEP)
+        sources: dict[str, Any] = qfield(
+            {},
+            merge=Merge.DEEP,
+            description="Named files that `source('name')` reads: `{name: path}`, or"
+            " `{name: {path: ..., type: csv, ...reader options}}` (csv, parquet, json, excel).",
+        )
 
         @field_validator("sources")
         @classmethod
@@ -104,7 +119,12 @@ class Extensions(Plugin):
     cell executes (config-declared ∪ render-collected)."""
 
     class Config(BaseModel):
-        extensions: list[str] = qfield([], merge=Merge.EXTEND)
+        extensions: list[str] = qfield(
+            [],
+            merge=Merge.EXTEND,
+            description="DuckDB extensions to load before the cell runs, e.g. `[httpfs, spatial]`"
+            " (the cell must run on duckdb).",
+        )
 
     def before_execute(self, cell: Any, ctx: Any) -> None:
         for ext in cell.extensions:
@@ -119,7 +139,14 @@ class Output(Plugin):
         return (config.output or {}).get("type")
 
     class Config(BaseModel):
-        output: dict[str, Any] = qfield({"type": "parquet", "dir": "data/"}, merge=Merge.DEEP)
+        output: dict[str, Any] = qfield(
+            {"type": "parquet", "dir": "data/"},
+            merge=Merge.DEEP,
+            description="Where the result lands (the sink): `{type: parquet, dir: data/}`,"
+            " `{type: duckdb, path: warehouse.db, table: ..., schema: ..., mode: append}`,"
+            " `{type: postgres, dsn: ..., table: schema.name}`, or `{type: none}` (effect-only:"
+            " lands nothing, can't be `ref()`'d).",
+        )
 
         @field_validator("output")
         @classmethod
@@ -137,7 +164,12 @@ class Autorun(Plugin):
     """The autorun: directive plus the watch-mode rerun filter it drives."""
 
     class Config(BaseModel):
-        autorun: bool = qfield(True, affects_results=False)
+        autorun: bool = qfield(
+            True,
+            affects_results=False,
+            description="Whether a save reruns the cell when it changed (watch, an armed TUI);"
+            " `false` leaves it to explicit runs.",
+        )
 
     def should_rerun(self, cell: Any) -> bool | None:
         return bool(cell.config.autorun)
@@ -148,7 +180,12 @@ class Vars(Plugin):
     """The vars: directive plus the var() template global that reads it."""
 
     class Config(BaseModel):
-        vars: dict[str, Any] = qfield({}, merge=Merge.DEEP)
+        vars: dict[str, Any] = qfield(
+            {},
+            merge=Merge.DEEP,
+            description="Values the SQL reads with `var('key')` (or `vars.key`); override one"
+            " with `--set vars.key=value`.",
+        )
 
     def render_context(self, rctx: Any) -> dict[str, Any]:
         values = rctx.config.vars or {}
@@ -193,7 +230,12 @@ class DependsOn(Plugin):
     scope = Scope.CELL
 
     class Config(BaseModel):
-        depends_on: list[str] = qfield([], merge=Merge.EXTEND)
+        depends_on: list[str] = qfield(
+            [],
+            merge=Merge.EXTEND,
+            description="Upstream cells to run first besides those `ref()` records, e.g. an"
+            " effect-only cell this one needs.",
+        )
 
     def collect_edges(self, name: str, config: Any) -> list[str] | None:
         return list(config.depends_on)
@@ -204,7 +246,11 @@ class Schema(Plugin):
     """The schema: directive plus injecting it into DB sink configs."""
 
     class Config(BaseModel):
-        schema_: str | None = qfield(None, alias="schema")
+        schema_: str | None = qfield(
+            None,
+            alias="schema",
+            description="The schema a database sink lands in, unless `output.schema` names one.",
+        )
 
     def sink_config(self, config: Any, cfg: dict[str, Any]) -> dict[str, Any] | None:
         if "schema" not in cfg and getattr(config, "schema_", None):
@@ -223,7 +269,13 @@ class Catalog(Plugin):
     scope = Scope.GLOBAL
 
     class Config(BaseModel):
-        catalog: dict[str, list[str]] = qfield({}, merge=Merge.DEEP, affects_results=False)
+        catalog: dict[str, list[str]] = qfield(
+            {},
+            merge=Merge.DEEP,
+            affects_results=False,
+            description="More targets for the TUI's schema browser, by engine:"
+            " `{postgres: [dsn], bigquery: [project.dataset], duckdb: [path.db]}`.",
+        )
 
         # nb: validator names must be unique across all composed plugin
         # Configs — a duplicate (e.g. Sources' _shape) is silently shadowed
@@ -246,4 +298,6 @@ class Catalog(Plugin):
 @plugin
 class Tags(Plugin):
     class Config(BaseModel):
-        tags: list[str] = qfield([], merge=Merge.EXTEND, affects_results=False)
+        tags: list[str] = qfield(
+            [], merge=Merge.EXTEND, affects_results=False, description="Free-form labels."
+        )
