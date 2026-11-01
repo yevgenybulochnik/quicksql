@@ -756,31 +756,35 @@ class QsqlApp(App):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Browsing onto a tab (click or h/l) shows content but stays in cells
         mode, so j/k keep moving the cell selection; Enter is what dives.
-        Leaving the Data tab drops its dive; leaving the Catalog tab only hands
-        keys back to the cell list and keeps its stack, so coming back (click,
-        h/l, S) shows the same sheet at the same row. Either way a direct jump
-        never leaves keys routed to an invisible stack."""
+        Leaving the Data or Catalog tab only hands keys back to the cell list
+        and keeps its stack, so coming back (click, h/l, 2, S) shows the same
+        sheet at the same row — on the Data tab, while the same cell is
+        selected. Either way a direct jump never leaves keys routed to an
+        invisible stack."""
         active = self.query_one(TabbedContent).active
         if active == "tab_data":
             # must not touch a "data" mode here: _push_sheet dives (sets the
             # mode) *before* activating the tab, and this handler fires after
             self._leave_catalog_dive()
-            if not self.sheet_stack:
+            if not self.data.stack or self.data.cell != self.current_cell:
                 self._show_current_data()
+            else:
+                self.data.refresh()  # the kept dive, as it was left
         elif active == "tab_catalog":
-            self._drop_data_dive()
+            self._leave_data_dive()
             self._load_catalog_root()
         else:
-            self._drop_data_dive()
+            self._leave_data_dive()
             self._leave_catalog_dive()
             self._refresh_detail()
 
-    def _drop_data_dive(self) -> None:
+    def _leave_data_dive(self) -> None:
+        # the stack stays, like the catalog's: back on the Data tab with the
+        # same cell selected it shows again, and Enter resumes it
         if self.mode == "data":
             self.mode = "cells"
         if self.split:  # the split is a data-mode concern; drop it on the way out
-            self.data.collapse(0)
-        self.data.stack = []
+            self.data.collapse(self.active_pane)
 
     def _leave_catalog_dive(self) -> None:
         # the stack stays: its Sheets keep cursor/sort/filter/hidden columns
@@ -816,6 +820,9 @@ class QsqlApp(App):
             return
         name = self.current_cell
         if not name:
+            return
+        if self.mode == "cells" and self.data.stack and self.data.cell == name:
+            self._dive_into_data()  # resume the kept dive
             return
         self.data.show(name, self._preview_sheet(name))
         self._dive_into_data()
