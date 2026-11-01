@@ -14,7 +14,7 @@ import typer
 
 from .bootstrap import compile_file
 from .compiler import Project
-from .errors import ConfigErrorGroup, QsqlError
+from .errors import QsqlError, error_dicts
 from .overrides import gather_overrides
 from .runner import error_message, run_project
 from .scaffold import write_scaffold
@@ -148,7 +148,7 @@ def _run_json(
     try:
         results = run_project(_compile(file, sets, plugins), select=select)
     except QsqlError as exc:  # before any cell ran: compile, or an unknown --select
-        status, errors = "compile_error", _error_dicts(exc)
+        status, errors = "compile_error", error_dicts(exc)
     except Exception as exc:  # before any cell ran: a plugin that won't import, a locked db
         status, errors = "error", [{"cell": None, "line": None, "message": error_message(exc)}]
     counts = Counter(r.status for r in results)
@@ -168,12 +168,6 @@ def _run_json(
     typer.echo(json.dumps(doc, indent=indent, default=str))
     if status != "ok":
         raise typer.Exit(EXIT_COMPILE if status == "compile_error" else EXIT_FAILED)
-
-
-def _error_dicts(exc: QsqlError) -> list[dict[str, Any]]:
-    if isinstance(exc, ConfigErrorGroup):
-        return [{"cell": e.cell, "line": e.line, "message": e.message} for e in exc.errors]
-    return [{"cell": None, "line": None, "message": str(exc)}]
 
 
 def _live_event(event) -> None:
@@ -324,7 +318,7 @@ def status(
                 vars(row) for row in statuses(_compile(file, set_, plugins))
             ]}
         except QsqlError as exc:
-            doc = {"file": str(file), "errors": _error_dicts(exc), "cells": []}
+            doc = {"file": str(file), "errors": error_dicts(exc), "cells": []}
         typer.echo(json.dumps(doc, indent=2 if sys.stdout.isatty() else None))
         if doc["errors"]:
             raise typer.Exit(EXIT_COMPILE)
