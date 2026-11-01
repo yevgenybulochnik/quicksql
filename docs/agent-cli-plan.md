@@ -58,18 +58,23 @@ Every step below serves that loop. Schema discovery and state come after it work
    its sink's `ref_expr` on a fresh conduit, without running anything. This covers outputs
    from earlier runs and every sink (parquet, duckdb, postgres), where an agent today
    would guess at `data/<cell>.parquet`. It reuses the runner's preview path, and the
-   TUI's preview fallback should move onto it too (a Phase 1 item).
+   TUI's preview fallback should move onto it too (a Phase 1 item). While a TUI is open,
+   a fresh conduit can't open the DuckDB files the TUI has attached (DuckDB's file lock),
+   so `head` reads through the TUI's session then: `docs/live-session-plan.md` step 6,
+   where this offline `head` lands as the fallback.
 6. **`catalog [--json] [--engine E]`.** Contexts → schemas → tables → columns, from
    `catalog.project_root_node`, for writing SQL against real names. It reaches remote
    engines, so it only runs when asked, and Phase 7's directory trust applies.
-7. **After core Phase 8:** `status [--json]` (ok / failed / skipped / stale per cell),
-   `status --wait` for an agent that started `watch` and wants the next settled state, and
-   `watch --json` streaming `RunEvent.to_dict()` as NDJSON.
+7. **After core Phase 8:** `status [--json]` (ok / failed / skipped / stale per cell)
+   landed with Phase 8. Superseded: `status --wait` and `watch --json` became
+   `quicksql live wait` and `quicksql live events`, served by the open TUI over a
+   socket (`docs/live-session-plan.md`).
 
 ## Out of scope
 
-- An MCP server, and a long-running daemon. The CLI plus a skill covers the loop, and
-  `watch --json` covers live use.
+- An MCP server, and a standalone daemon. The CLI plus a skill covers the loop; live
+  use alongside an open TUI goes through the TUI's own socket
+  (`docs/live-session-plan.md`).
 - Writing cells through the CLI. Agents edit the file directly; it's plain SQL.
 - Result caching (as in the core plan).
 
