@@ -25,6 +25,11 @@ def _dsn(config: Any) -> str | None:
 # password and sslpassword, as libpq keywords (host=h password=x) or URI params
 _KEYWORD_SECRET = re.compile(r"\b((?:ssl)?password)\s*=\s*(?:'(?:[^'\\]|\\.)*'|\S+)", re.I)
 _QUERY_SECRET = re.compile(r"(^|&)((?:ssl)?password)=[^&]*", re.I)
+# in a keyword DSN, a password missing its "=" (libpq refuses it, but the
+# notebook still says it): the word after the keyword is the secret
+_BARE_SECRET = re.compile(r"\b((?:ssl)?password)\s+(?!=)(?:'(?:[^'\\]|\\.)*'|\S+)", re.I)
+# a URI's user:password@ anywhere in free text
+_URI_SECRET = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+@", re.I)
 
 
 def _redacted(dsn: str) -> str:
@@ -32,7 +37,7 @@ def _redacted(dsn: str) -> str:
     explain, the catalog and the TUI's log, and an env var DSN's secret isn't
     in the notebook."""
     if "://" not in dsn:
-        return _KEYWORD_SECRET.sub(r"\1=***", dsn)
+        return _BARE_SECRET.sub(r"\1 ***", _KEYWORD_SECRET.sub(r"\1=***", dsn))
     parts = urlsplit(dsn)
     netloc = parts.netloc
     userinfo, at, host = netloc.rpartition("@")
@@ -67,6 +72,11 @@ class PostgresExecutor(Executor):
 
     def context_key(self, config: Any) -> str:
         return _context_key(_dsn(config))
+
+    def redact(self, text: str) -> str:
+        """Passwords in free text: ``password=…`` keywords and URIs'
+        ``user:password@`` (an error message that echoes a DSN)."""
+        return _URI_SECRET.sub(r"\1***@", _KEYWORD_SECRET.sub(r"\1=***", text))
 
     def make_connection(self, dsn: str) -> Any:
         """Split out so tests can substitute a fake connection."""
@@ -163,6 +173,9 @@ class PostgresExecutor(Executor):
                 load=tables_load,
                 child=tables_child,
                 key=f"postgres:{dsn}/{schema}",
+                name_columns=("table",),
             )
 
-        return CatalogNode(title="postgres", load=load, child=child, key=f"postgres:{dsn}")
+        return CatalogNode(
+            title="postgres", load=load, child=child, key=f"postgres:{dsn}", name_columns=("schema",)
+        )

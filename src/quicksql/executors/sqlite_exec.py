@@ -79,4 +79,4 @@ class SQLiteExecutor(Executor):
 
             return CatalogNode(title=f"sqlite:{path}/{table}", load=columns_load)
 
-        return CatalogNode(title=f"sqlite:{path}", load=load, child=child)
+        return CatalogNode(title=f"sqlite:{path}", load=load, child=child, name_columns=("table",))

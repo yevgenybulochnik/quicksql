@@ -233,6 +233,12 @@ class Executor(ABC):
         engine's defaults (a default schema). None when there's no such table."""
         return None
 
+    def redact(self, text: str) -> str:
+        """``text`` with this engine's secrets hidden (a DSN's password in an
+        error message, say), before the catalog shows it. Free text: hide only
+        what is certainly a secret."""
+        return text
+
     def catalog_relations(self, config: Any, root: Path, parts: list[str]) -> list[tuple[str, str]]:
         """(name, detail) candidates for the next segment of a partial dotted
         relation, ``parts`` being the segments typed so far, for the LSP's

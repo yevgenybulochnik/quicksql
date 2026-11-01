@@ -258,6 +258,12 @@ class CatalogNode:
     UI thread. ``child`` maps a named row of the loaded frame to the next level;
     None marks a leaf. A leaf describing a table's columns loads a field-path
     frame (``executors.base.field_path_frame``).
+
+    A row's *name* addresses it in a path (``catalog.resolve``): its
+    ``name_columns`` joined with dots, else its ``name`` column, else its
+    first. Declaring ``name_columns`` promises that ``child`` needs only those
+    columns, so a walk can build the next level from a path segment without
+    listing this one first (a round trip saved on a remote engine).
     """
 
     title: str
@@ -266,7 +272,28 @@ class CatalogNode:
     # stable cache identity across node re-creation (drilling rebuilds nodes);
     # set it wherever the display title isn't globally unique
     key: str | None = None
+    name_columns: tuple[str, ...] | None = None
+    # the top-level row this level sits under (a context key, an @catalog
+    # target, an output's cell), so a cache can drop one subtree
+    scope: str | None = None
 
     @property
     def cache_key(self) -> str:
         return self.key if self.key is not None else self.title
+
+    def row_name(self, row: dict[str, Any]) -> str:
+        """The name a path segment uses for ``row`` of this level's frame."""
+        if self.name_columns:
+            return ".".join(str(row[c]) for c in self.name_columns)
+        return str(row["name"] if "name" in row else next(iter(row.values())))
+
+    def row_for(self, name: str) -> dict[str, Any] | None:
+        """The row ``child`` needs for the row named ``name``, built from the
+        name alone; None when this level declares no ``name_columns`` (or the
+        name has too few parts), so the level must be listed to find it."""
+        if not self.name_columns:
+            return None
+        parts = name.split(".", len(self.name_columns) - 1)
+        if len(parts) != len(self.name_columns):
+            return None
+        return dict(zip(self.name_columns, parts))
