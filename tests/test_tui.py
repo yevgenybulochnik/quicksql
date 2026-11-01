@@ -276,7 +276,7 @@ async def test_activating_data_tab_loads_current_cell_sheet(notebook) -> None:
         tabs.active = "tab_sql"
         await pilot.pause()
         assert app.mode == "cells"
-        assert not app.sheet_stack
+        assert [s.title for s in app.panes[0]] == ["users"]  # kept for the Data tab
 
 
 async def test_h_l_cycle_tabs_and_data_follows_selection(notebook) -> None:
@@ -959,8 +959,7 @@ async def test_5_without_a_dive_loads_and_dives_into_the_root(notebook) -> None:
 
 async def test_digit_keys_leave_a_data_dive(notebook) -> None:
     # 2 on the Data tab hands keys back to the cell list (the sheet then
-    # follows the selection); 1/3/4 leave the tab, dropping the dive as
-    # leaving the Data tab always has
+    # follows the selection); 1/3/4 leave the tab, keeping the dive
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.press("R")
@@ -981,7 +980,32 @@ async def test_digit_keys_leave_a_data_dive(notebook) -> None:
         await _settle(app, pilot)
         assert tabs.active == "tab_log"
         assert app.mode == "cells"
-        assert not app.panes[0]  # the data dive was dropped with the tab
+        assert [s.title for s in app.panes[0]] == ["events"]  # kept with the tab
+
+
+async def test_leaving_the_data_tab_keeps_the_dive(notebook) -> None:
+    """Like the catalog's: another tab hands keys back to the cell list but
+    keeps the Data stack. Back on the Data tab with the same cell selected
+    it shows again and Enter resumes it; another cell's preview starts afresh."""
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("R")
+        await _settle(app, pilot)
+        await pilot.press("enter", "j", "F")  # dive, cursor to row 1, freq on top
+        kept = list(app.sheet_stack)
+        assert [s.title for s in kept] == ["users", "freq(user_id)"]
+        await pilot.press("4")
+        await _settle(app, pilot)
+        assert app.mode == "cells" and _same_sheets(app.panes[0], kept)
+        await pilot.press("2")
+        await _settle(app, pilot)
+        assert app.mode == "cells" and _same_sheets(app.sheet_stack, kept)
+        assert app.query_one("#data", DataTable).row_count == kept[-1].frame.height
+        await pilot.press("enter")
+        assert app.mode == "data" and _same_sheets(app.sheet_stack, kept)
+        await pilot.press("4", "j", "2")  # another cell selected while away
+        await _settle(app, pilot)
+        assert [s.title for s in app.sheet_stack] == ["events"]
 
 
 async def test_digits_typed_into_search_or_filter_dont_switch_tabs(deep_catalog) -> None:
@@ -1113,17 +1137,19 @@ async def test_ctrl_h_l_step_through_tabs_from_any_mode(notebook) -> None:
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_config", "cells")
         assert not app.split
-        assert not app.panes[0]  # the data dive was dropped with the tab
-        await pilot.press("ctrl+h")  # back on Data: browsing, the sheet follows
+        dive = ["users", "freq(user_id)"]
+        assert [s.title for s in app.panes[0]] == dive  # kept with the tab
+        await pilot.press("ctrl+h")  # back on Data: browsing the kept dive
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_data", "cells")
-        assert [s.title for s in app.sheet_stack] == ["users"]
-        await pilot.press("enter", "F")
+        assert [s.title for s in app.sheet_stack] == dive
+        await pilot.press("enter")  # resumes it
         assert app.mode == "data"
+        assert [s.title for s in app.sheet_stack] == dive
         await pilot.press("ctrl+h")
         await _settle(app, pilot)
         assert (tabs.active, app.mode) == ("tab_sql", "cells")
-        assert not app.panes[0]
+        assert [s.title for s in app.panes[0]] == dive
 
 
 async def test_ctrl_h_l_leave_and_resume_a_deep_catalog_dive(deep_catalog) -> None:
@@ -1465,9 +1491,8 @@ async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeyp
 
 
 async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
-    # S while dived in the Data sheet lands in a clean catalog dive: the
-    # data-pane dive is dropped and keys route to the catalog listing, never
-    # a stale invisible stack
+    # S while dived in the Data sheet lands in a clean catalog dive: keys
+    # route to the catalog listing, never the data dive the Data tab keeps
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.press("R")
@@ -1480,7 +1505,7 @@ async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
         await pilot.pause()
         assert app.query_one(TabbedContent).active == "tab_catalog"
         assert app.mode == "catalog"
-        assert not app.panes[0]  # the data dive was dropped with the tab
+        assert [s.title for s in app.panes[0]] == ["users"]  # kept, not routed to
         assert app.catalog_stack[-1].title == "catalog"
         await pilot.press("q")  # pops the catalog root, not a data sheet
         assert app.mode == "cells"
