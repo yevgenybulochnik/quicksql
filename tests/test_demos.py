@@ -6,9 +6,12 @@ demo/**/*.qsql is collected by glob, so a new demo is covered with no edit here.
 
 from __future__ import annotations
 
+import json
 import shutil
 import socket
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import duckdb
@@ -98,3 +101,27 @@ def test_sources_demo_runs_offline(tmp_path: Path, monkeypatch) -> None:
         (rows,) = con.execute("SELECT count(*) FROM sales_by_segment").fetchone()
     assert rows == results["sales_by_segment"].rows
     assert not list(cwd.iterdir())
+
+
+# a None entry in sys.modules makes `import name` raise ImportError
+WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"
+
+
+def test_sources_demo_compiles_and_runs_without_polars_or_textual(tmp_path: Path) -> None:
+    """The core path needs neither: a pure-DuckDB notebook compiles, runs and
+    reports `run --json` previews with both blocked from import."""
+    copy = tmp_path / "sources"
+    shutil.copytree(DEMO / "sources", copy, ignore=shutil.ignore_patterns(*SOURCES_OUTPUTS))
+
+    def cli(*args: str) -> subprocess.CompletedProcess:
+        done = subprocess.run(
+            [sys.executable, "-c", WITHOUT, *args], cwd=copy, capture_output=True, text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+        return done
+
+    cli("compile", "sources.qsql")
+    report = json.loads(cli("run", "sources.qsql", "--json", "--rows", "2").stdout)
+    assert [c["status"] for c in report["cells"]] == ["ok"] * len(report["cells"])
+    assert all(c["preview"]["rows"] for c in report["cells"])
