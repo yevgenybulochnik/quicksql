@@ -1,0 +1,28 @@
+-- Catalog stress notebook (stress/catalog/README.md): browse big warehouses
+-- with S in the TUI. BigQuery (the stress emulator, :9052) holds 100 datasets,
+-- a 400-table date-sharded dataset and a 2050-field-path table; Postgres holds
+-- 300 schemas, a 3000-table schema and 1500/1590-column tables.
+--
+--   uv run python stress/catalog/stack.py up
+--   QSQL_STRESS_PG_DSN=postgresql://stress_reader:hunter2-stress-secret@localhost:5432/quicksql \
+--     uv run --extra postgres --extra bigquery quicksql tui stress/catalog/catalog.qsql
+--
+-- tests/test_stress_catalog.py compiles this file for every scenario.
+
+-- @cell local_numbers
+SELECT range AS n FROM range(10);
+
+-- @cell bq_wide_sample
+-- @engine: bigquery
+/*@ input: { bigquery: { project: quicksql-stress, endpoint: http://localhost:9052 } } */
+SELECT col_0000, col_0001 FROM wide.wide_table LIMIT 5;
+
+-- @cell bq_shard
+-- @engine: bigquery
+/*@ input: { bigquery: { project: quicksql-stress, endpoint: http://localhost:9052 } } */
+SELECT count(*) AS n FROM sharded.events_20240101;
+
+-- @cell pg_wide_sample
+-- @engine: postgres
+/*@ input: { postgres: { dsn: $QSQL_STRESS_PG_DSN } } */
+SELECT col_0000, col_0001 FROM stress_wide.wide_1500 LIMIT 5;

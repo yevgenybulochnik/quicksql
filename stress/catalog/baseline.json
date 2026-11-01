@@ -1,0 +1,759 @@
+{
+  "projection": {
+    "latencies_ms": [
+      50,
+      150,
+      400
+    ],
+    "pg_connect_rtt": 3
+  },
+  "records": [
+    {
+      "scenario": "S1",
+      "engine": "bq",
+      "at": "2026-11-01T23:07:36+00:00",
+      "calls": {
+        "bq.datasets.list": 1,
+        "bq.tables.get": 1,
+        "bq.tables.list": 2
+      },
+      "round_trips": 4,
+      "local_ms": 647.5,
+      "projected_ms": {
+        "50": 847,
+        "150": 1247,
+        "400": 2247
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 104,
+          "bytes": 1254,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/sharded",
+          "rows": 400,
+          "bytes": 11256,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 2050,
+          "bytes": 396841,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S1",
+      "engine": "fake1000",
+      "at": "2026-11-01T23:07:37+00:00",
+      "calls": {
+        "bq.datasets.list": 3,
+        "bq.tables.get": 1,
+        "bq.tables.list": 11
+      },
+      "round_trips": 15,
+      "local_ms": 152.2,
+      "projected_ms": {
+        "50": 902,
+        "150": 2402,
+        "400": 6152
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 2002,
+          "bytes": 24072,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/sharded",
+          "rows": 10000,
+          "bytes": 280056,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 9950,
+          "bytes": 10093741,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S1",
+      "engine": "fake50",
+      "at": "2026-11-01T23:07:37+00:00",
+      "calls": {
+        "bq.datasets.list": 41,
+        "bq.tables.get": 1,
+        "bq.tables.list": 201
+      },
+      "round_trips": 243,
+      "local_ms": 159.1,
+      "projected_ms": {
+        "50": 12309,
+        "150": 36609,
+        "400": 97359
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 2002,
+          "bytes": 24072,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/sharded",
+          "rows": 10000,
+          "bytes": 280056,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 9950,
+          "bytes": 10093741,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S1",
+      "engine": "pg",
+      "at": "2026-11-01T23:07:36+00:00",
+      "calls": {
+        "pg.connect": 4,
+        "pg.query": 4
+      },
+      "round_trips": 16,
+      "local_ms": 322.7,
+      "projected_ms": {
+        "50": 1123,
+        "150": 2723,
+        "400": 6723
+      },
+      "levels": [
+        {
+          "title": "postgres",
+          "rows": 303,
+          "bytes": 4893,
+          "cached": false
+        },
+        {
+          "title": "postgres/stress_many",
+          "rows": 3000,
+          "bytes": 60049,
+          "cached": false
+        },
+        {
+          "title": "postgres/stress_wide",
+          "rows": 2,
+          "bytes": 77,
+          "cached": false
+        },
+        {
+          "title": "stress_wide.wide_1500",
+          "rows": 1500,
+          "bytes": 355591,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S2",
+      "engine": "bq",
+      "at": "2026-11-01T23:07:37+00:00",
+      "calls": {
+        "bq.datasets.list": 1,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1
+      },
+      "round_trips": 3,
+      "local_ms": 451.7,
+      "projected_ms": {
+        "50": 602,
+        "150": 902,
+        "400": 1652
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 104,
+          "bytes": 1254,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 2050,
+          "bytes": 396841,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S2",
+      "engine": "bq/lsp-direct",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "bq.tables.get": 1
+      },
+      "round_trips": 1,
+      "local_ms": 206.6,
+      "projected_ms": {
+        "50": 257,
+        "150": 357,
+        "400": 607
+      }
+    },
+    {
+      "scenario": "S2",
+      "engine": "fake1000",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "bq.datasets.list": 3,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1
+      },
+      "round_trips": 5,
+      "local_ms": 96.1,
+      "projected_ms": {
+        "50": 346,
+        "150": 846,
+        "400": 2096
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 2002,
+          "bytes": 24072,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 9950,
+          "bytes": 10093741,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S2",
+      "engine": "fake1000/lsp-direct",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "bq.tables.get": 1
+      },
+      "round_trips": 1,
+      "local_ms": 17.3,
+      "projected_ms": {
+        "50": 67,
+        "150": 167,
+        "400": 417
+      }
+    },
+    {
+      "scenario": "S2",
+      "engine": "fake50",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "bq.datasets.list": 41,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1
+      },
+      "round_trips": 43,
+      "local_ms": 137.0,
+      "projected_ms": {
+        "50": 2287,
+        "150": 6587,
+        "400": 17337
+      },
+      "levels": [
+        {
+          "title": "bigquery:quicksql-stress",
+          "rows": 2002,
+          "bytes": 24072,
+          "cached": false
+        },
+        {
+          "title": "bigquery:quicksql-stress/wide",
+          "rows": 1,
+          "bytes": 79,
+          "cached": false
+        },
+        {
+          "title": "wide.wide_table",
+          "rows": 9950,
+          "bytes": 10093741,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S2",
+      "engine": "fake50/lsp-direct",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "bq.tables.get": 1
+      },
+      "round_trips": 1,
+      "local_ms": 18.9,
+      "projected_ms": {
+        "50": 69,
+        "150": 169,
+        "400": 419
+      }
+    },
+    {
+      "scenario": "S2",
+      "engine": "pg",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "pg.connect": 3,
+        "pg.query": 3
+      },
+      "round_trips": 12,
+      "local_ms": 207.6,
+      "projected_ms": {
+        "50": 808,
+        "150": 2008,
+        "400": 5008
+      },
+      "levels": [
+        {
+          "title": "postgres",
+          "rows": 303,
+          "bytes": 4893,
+          "cached": false
+        },
+        {
+          "title": "postgres/stress_wide",
+          "rows": 2,
+          "bytes": 77,
+          "cached": false
+        },
+        {
+          "title": "stress_wide.wide_1500",
+          "rows": 1500,
+          "bytes": 355591,
+          "cached": false
+        }
+      ]
+    },
+    {
+      "scenario": "S2",
+      "engine": "pg/lsp-direct",
+      "at": "2026-11-01T23:07:38+00:00",
+      "calls": {
+        "pg.connect": 1,
+        "pg.query": 1
+      },
+      "round_trips": 4,
+      "local_ms": 112.0,
+      "projected_ms": {
+        "50": 312,
+        "150": 712,
+        "400": 1712
+      }
+    },
+    {
+      "scenario": "S3",
+      "engine": "bq",
+      "at": "2026-11-01T23:07:39+00:00",
+      "calls": {},
+      "round_trips": 0,
+      "local_ms": 4.2,
+      "projected_ms": {
+        "50": 4,
+        "150": 4,
+        "400": 4
+      }
+    },
+    {
+      "scenario": "S3",
+      "engine": "pg",
+      "at": "2026-11-01T23:07:39+00:00",
+      "calls": {},
+      "round_trips": 0,
+      "local_ms": 4.0,
+      "projected_ms": {
+        "50": 4,
+        "150": 4,
+        "400": 4
+      }
+    },
+    {
+      "scenario": "S4",
+      "engine": "bq",
+      "at": "2026-11-01T23:07:49+00:00",
+      "calls": {
+        "bq.datasets.list": 20,
+        "bq.tables.get": 20,
+        "bq.tables.list": 20
+      },
+      "round_trips": 60,
+      "local_ms": 9551.9,
+      "projected_ms": {
+        "50": 12552,
+        "150": 18552,
+        "400": 33552
+      },
+      "saves": 20
+    },
+    {
+      "scenario": "S4",
+      "engine": "pg",
+      "at": "2026-11-01T23:07:54+00:00",
+      "calls": {
+        "pg.connect": 60,
+        "pg.query": 60
+      },
+      "round_trips": 240,
+      "local_ms": 4458.0,
+      "projected_ms": {
+        "50": 16458,
+        "150": 40458,
+        "400": 100458
+      },
+      "saves": 20
+    },
+    {
+      "scenario": "S5",
+      "engine": "after a bigquery run",
+      "at": "2026-11-01T23:07:57+00:00",
+      "calls": {
+        "bq.datasets.list": 1,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1,
+        "pg.connect": 3,
+        "pg.query": 3
+      },
+      "round_trips": 15,
+      "local_ms": 746.1,
+      "projected_ms": {
+        "50": 1496,
+        "150": 2996,
+        "400": 6746
+      }
+    },
+    {
+      "scenario": "S5",
+      "engine": "after a duckdb run",
+      "at": "2026-11-01T23:07:56+00:00",
+      "calls": {
+        "bq.datasets.list": 1,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1,
+        "pg.connect": 3,
+        "pg.query": 3
+      },
+      "round_trips": 15,
+      "local_ms": 715.1,
+      "projected_ms": {
+        "50": 1465,
+        "150": 2965,
+        "400": 6715
+      }
+    },
+    {
+      "scenario": "S6",
+      "engine": "bq",
+      "at": "2026-11-01T23:07:58+00:00",
+      "calls": {
+        "bq.tables.get": 2
+      },
+      "round_trips": 2,
+      "local_ms": 568.6,
+      "projected_ms": {
+        "50": 669,
+        "150": 869,
+        "400": 1369
+      }
+    },
+    {
+      "scenario": "S6",
+      "engine": "pg",
+      "at": "2026-11-01T23:07:59+00:00",
+      "calls": {
+        "pg.connect": 2,
+        "pg.query": 2
+      },
+      "round_trips": 8,
+      "local_ms": 915.9,
+      "projected_ms": {
+        "50": 1316,
+        "150": 2116,
+        "400": 4116
+      }
+    },
+    {
+      "scenario": "S7",
+      "engine": "bq",
+      "at": "2026-11-01T23:08:00+00:00",
+      "rows": 2050,
+      "bytes": 396841,
+      "pages_at_max_rows": 3,
+      "first_page_bytes": 247091,
+      "no_description_bytes": 90677,
+      "top_level_rows": 1550,
+      "match_col_01_rows": 100,
+      "match_col_01_bytes": 24791,
+      "max_line": 4194304
+    },
+    {
+      "scenario": "S7",
+      "engine": "fake1000",
+      "at": "2026-11-01T23:08:00+00:00",
+      "rows": 9950,
+      "bytes": 10093741,
+      "pages_at_max_rows": 10,
+      "first_page_bytes": 1071091,
+      "no_description_bytes": 438277,
+      "top_level_rows": 9450,
+      "match_col_01_rows": 100,
+      "match_col_01_bytes": 107191,
+      "max_line": 4194304
+    },
+    {
+      "scenario": "S7",
+      "engine": "pg",
+      "at": "2026-11-01T23:08:00+00:00",
+      "rows": 1500,
+      "bytes": 355591,
+      "pages_at_max_rows": 2,
+      "first_page_bytes": 237091,
+      "no_description_bytes": 51077,
+      "top_level_rows": 1500,
+      "match_col_01_rows": 100,
+      "match_col_01_bytes": 23791,
+      "max_line": 4194304
+    },
+    {
+      "scenario": "S8",
+      "engine": "bq",
+      "at": "2026-11-01T23:08:02+00:00",
+      "calls": {
+        "bq.datasets.list": 1,
+        "bq.tables.get": 1,
+        "bq.tables.list": 1
+      },
+      "round_trips": 3,
+      "local_ms": 514.0,
+      "projected_ms": {
+        "50": 664,
+        "150": 964,
+        "400": 1714
+      }
+    },
+    {
+      "scenario": "S8",
+      "engine": "pg",
+      "at": "2026-11-01T23:08:02+00:00",
+      "calls": {
+        "pg.connect": 3,
+        "pg.query": 3
+      },
+      "round_trips": 12,
+      "local_ms": 219.0,
+      "projected_ms": {
+        "50": 819,
+        "150": 2019,
+        "400": 5019
+      }
+    },
+    {
+      "scenario": "S9",
+      "engine": "bq/after restart",
+      "at": "2026-11-01T23:08:02+00:00",
+      "calls": {
+        "bq.tables.get": 1
+      },
+      "round_trips": 1,
+      "local_ms": 212.3,
+      "projected_ms": {
+        "50": 262,
+        "150": 362,
+        "400": 612
+      }
+    },
+    {
+      "scenario": "S9",
+      "engine": "bq/first",
+      "at": "2026-11-01T23:08:02+00:00",
+      "calls": {
+        "bq.tables.get": 1
+      },
+      "round_trips": 1,
+      "local_ms": 229.2,
+      "projected_ms": {
+        "50": 279,
+        "150": 379,
+        "400": 629
+      }
+    },
+    {
+      "scenario": "S9",
+      "engine": "pg/after restart",
+      "at": "2026-11-01T23:08:03+00:00",
+      "calls": {
+        "pg.connect": 1,
+        "pg.query": 1
+      },
+      "round_trips": 4,
+      "local_ms": 103.5,
+      "projected_ms": {
+        "50": 303,
+        "150": 703,
+        "400": 1703
+      }
+    },
+    {
+      "scenario": "S9",
+      "engine": "pg/first",
+      "at": "2026-11-01T23:08:03+00:00",
+      "calls": {
+        "pg.connect": 1,
+        "pg.query": 1
+      },
+      "round_trips": 4,
+      "local_ms": 102.0,
+      "projected_ms": {
+        "50": 302,
+        "150": 702,
+        "400": 1702
+      }
+    },
+    {
+      "scenario": "S10a",
+      "engine": "postgres",
+      "at": "2026-11-01T23:08:03+00:00",
+      "strings_checked": 7837,
+      "leaked": 0,
+      "secret_in_cache_keys": true
+    },
+    {
+      "scenario": "S10b",
+      "engine": "postgres",
+      "at": "2026-11-01T23:08:03+00:00",
+      "leaks": {
+        "malformed keyword DSN": [
+          "name"
+        ],
+        "unreachable host": [],
+        "wrong password": []
+      }
+    },
+    {
+      "scenario": "S11",
+      "engine": "fake",
+      "at": "2026-11-01T23:08:04+00:00",
+      "calls": {
+        "bq.tables.get": 400
+      },
+      "round_trips": 400,
+      "local_ms": 1100.0,
+      "projected_ms": {
+        "50": 21100,
+        "150": 61100,
+        "400": 161100
+      },
+      "entries": 403,
+      "loaded_mb": 138.1,
+      "held_mb": 138.1,
+      "rss_delta_mb": 202.0
+    },
+    {
+      "scenario": "S12",
+      "engine": "bq/first open",
+      "at": "2026-11-01T23:08:12+00:00",
+      "calls": {
+        "bq.tables.get": 30
+      },
+      "round_trips": 30,
+      "local_ms": 4099.8,
+      "projected_ms": {
+        "50": 5600,
+        "150": 8600,
+        "400": 16100
+      }
+    },
+    {
+      "scenario": "S12",
+      "engine": "bq/second open",
+      "at": "2026-11-01T23:08:12+00:00",
+      "calls": {
+        "bq.tables.get": 30
+      },
+      "round_trips": 30,
+      "local_ms": 4235.2,
+      "projected_ms": {
+        "50": 5735,
+        "150": 8735,
+        "400": 16235
+      }
+    },
+    {
+      "scenario": "S12",
+      "engine": "pg/first open",
+      "at": "2026-11-01T23:08:14+00:00",
+      "calls": {
+        "pg.connect": 30,
+        "pg.query": 30
+      },
+      "round_trips": 120,
+      "local_ms": 663.8,
+      "projected_ms": {
+        "50": 6664,
+        "150": 18664,
+        "400": 48664
+      }
+    },
+    {
+      "scenario": "S12",
+      "engine": "pg/second open",
+      "at": "2026-11-01T23:08:14+00:00",
+      "calls": {
+        "pg.connect": 30,
+        "pg.query": 30
+      },
+      "round_trips": 120,
+      "local_ms": 668.6,
+      "projected_ms": {
+        "50": 6669,
+        "150": 18669,
+        "400": 48669
+      }
+    }
+  ]
+}

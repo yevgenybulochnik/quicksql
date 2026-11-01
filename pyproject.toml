@@ -43,12 +43,13 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers -m \"not (network or bigquery or postgres or terminal)\""
+addopts = "-q --strict-markers -m \"not (network or bigquery or postgres or terminal or stress)\""
 markers = [
     "network: needs network access (deselected by default)",
     "bigquery: needs the compose bigquery-emulator (deselected by default)",
     "postgres: needs a Postgres server (deselected by default)",
     "terminal: drives the TUI in a real tmux terminal (deselected by default)",
+    "stress: needs the catalog stress stack, stress/catalog/README.md (deselected by default)",
 ]
 
 # Layering contracts: the Target in docs/core-refactor-plan.md, on the current module layout.

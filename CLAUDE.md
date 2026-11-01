@@ -141,6 +141,12 @@ first `@cell`) inherited by every cell.
   — an explicit `-m` overrides the default deselection. The standalone demo stack
   `demo/kitchen-sink/docker-compose.yml` runs on offset ports (5433/9051) and can
   stay up alongside this one.
+- Catalog stress (`stress/catalog/README.md`): `uv run python stress/catalog/stack.py up`
+  (a second emulator, compose profile `stress` on :9052, plus `stress_*` schemas in
+  Postgres's `quicksql`), then `uv run --extra postgres --extra bigquery pytest -m stress`
+  under the MemoryMax scope below. Budgets are round trips; a budget not met yet is
+  `xfail(strict=True)` naming its phase in `docs/catalog-plan.md`. Never delete a big
+  dataset on the emulator (it panics): `stack.py up` recreates it instead.
 - `uv run lint-imports` — the layering gate, which `tests/test_layering.py` runs in every
   `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
   `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
