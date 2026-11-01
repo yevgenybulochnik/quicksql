@@ -22,9 +22,14 @@ As built, where it differs from the plan below:
   --wait` exits 5.
 - Offline `head` never ATTACHes (the TUI's `read_landed` rule), so with no TUI open it
   reads Parquet outputs; database outputs read through a live session.
-- The skill ships in the package: `quicksql skill` prints it and `quicksql skill
-  --install` writes `.claude/skills/quicksql/SKILL.md` (as `herdr --skill` does); a test
-  keeps it naming every `quicksql live` command and runs its example notebook.
+- The skill ships in the package as a folder (`src/quicksql/skill/`: a lean `SKILL.md`,
+  `references/` read on demand, runnable `examples/`), as `herdr --skill` ships its own:
+  `quicksql skill` prints `SKILL.md`, `--path` locates the folder, `--install` copies it to
+  `.claude/skills/quicksql/`. Its `references/directives.md` is generated from the builtin
+  registries (`quicksql directives --markdown`, every builtin `qfield` now has a
+  `description`), and `quicksql directives NOTEBOOK` lists a notebook's own, rc plugins
+  included. `tests/test_skill.py` keeps links, examples, `live` commands and the generated
+  reference true to the code.
 - Verified end to end in tmux: a duckdb-sink output the TUI holds locked reads through
   `head` while an offline open fails on the lock; a broken cell's `live wait` names its
   lines, statement and DuckDB's message; the fix's wait comes back ok.

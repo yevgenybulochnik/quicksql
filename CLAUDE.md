@@ -115,8 +115,14 @@ first `@cell`) inherited by every cell.
   `RunController.reading()`, which holds the session open. `quicksql live …` is the
   stdlib client (no Textual/Polars). Still reflect-only for the file: the socket never
   writes it. `quicksql run`/`watch` refuse while a TUI hosts the notebook (one runner per
-  notebook); `QsqlApp(live=False)` by default, so tests opt in. `quicksql skill` prints the
-  packaged agent skill (`src/quicksql/skill.md`).
+  notebook); `QsqlApp(live=False)` by default, so tests opt in.
+- **The agent skill is a folder in the package** (`src/quicksql/skill/`: `SKILL.md`,
+  `references/`, `examples/`), so it ships in the wheel and matches the installed CLI;
+  `quicksql skill [--path | --install]`. `tests/test_skill.py` keeps it true: every link
+  resolves and every file is linked, every example runs, every `quicksql live` command is
+  named, and `references/directives.md` equals `vocabulary.directives_markdown` of the
+  builtins — after changing a directive (give every `qfield` a `description=`), regenerate
+  it: `uv run quicksql directives --markdown > src/quicksql/skill/references/directives.md`.
 
 ## Commands
 
@@ -139,7 +145,7 @@ first `@cell`) inherited by every cell.
   `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
   `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
-  `compile` | `status` | `head <cell>` | `skill` | `live …` (arm, disarm, autorun, run,
+  `compile` | `status` | `head <cell>` | `directives` | `skill` | `live …` (arm, disarm, autorun, run,
   cancel, wait, events, query, focus, notify) — default file `base.qsql`;
   `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile /
   unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
@@ -175,6 +181,8 @@ first `@cell`) inherited by every cell.
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
   opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
 - `scaffold.py`, `cli.py`, `watcher.py` — CLI, watch loop
+- `vocabulary.py` — a notebook's directives, engines and sinks from its registries
+  (`quicksql directives`, the skill's generated `references/directives.md`)
 - `live/` — the live session: `protocol.py` (NDJSON wire format, error codes, socket path;
   stdlib only), `host.py` (`LiveHost`: controls, run mirror, outcomes, events), `server.py`
   (asyncio Unix server on the TUI's loop), `client.py` (the CLI's blocking client)

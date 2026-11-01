@@ -232,7 +232,10 @@ land); a BigQuery cell that is `ref()`'d in-context must be a single statement.
 ## Directive vocabulary
 
 Every directive below is a plugin's config field; adding a plugin adds directives. Scope is
-where it may appear (global header, per-cell, or both).
+where it may appear (global header, per-cell, or both). `quicksql directives [NOTEBOOK]`
+lists exactly what a notebook can write, its `quicksqlrc.py` plugins included: each
+directive's scope, type, default, merge strategy, whether editing it reruns the cell, and
+what it does (`--json`, or `--markdown`).
 
 | Directive | Scope | What it does |
 |---|---|---|
@@ -423,9 +426,16 @@ quicksql live events base.qsql --follow # NDJSON: compiles, cells, runs, control
   cell as a view.
 - One runner per notebook: `quicksql run` and `watch` are refused while a TUI has it open.
 
-`quicksql skill` prints a [Claude Code skill](src/quicksql/skill.md) that teaches an agent
-the cell format and this loop; `quicksql skill --install` writes it to
-`.claude/skills/quicksql/SKILL.md` in the current project.
+### An agent skill: `quicksql skill`
+
+quicksql ships a [Claude Code skill](src/quicksql/skill/SKILL.md) that teaches an agent
+notebooks: the cell format, the offline loop, and this live loop. It's a folder: a lean
+`SKILL.md`, references the agent reads when it needs them (notebook format, directives,
+engines and sinks, the live session, JSON shapes) and example notebooks that run.
+`quicksql skill` prints `SKILL.md`, `quicksql skill --path` says where the folder is, and
+`quicksql skill --install` copies it to `.claude/skills/quicksql/` in the current project.
+Rerun it after upgrading quicksql: it updates the files you haven't edited and refuses to
+overwrite ones you have (`--force` replaces them). The skill always matches the CLI.
 
 ## Editor integration
 
