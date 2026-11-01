@@ -100,6 +100,8 @@ first `@cell`) inherited by every cell.
   `quicksql status`; it never skips a run. `$QSQL_HOME` moves `~/.quicksql` (state and user
   templates); an autouse fixture gives every test its own, so tests never touch the real one.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
+  The TUI runs one run at a time per session: a new run, `o` or quitting cancels the one
+  under way, which stops between cells (`run_project(cancel=)`), and the next waits for it.
 
 ## Commands
 
@@ -154,7 +156,14 @@ first `@cell`) inherited by every cell.
   `@catalog` targets, landed outputs read back through DuckDB
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
   opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
-- `scaffold.py`, `cli.py`, `watcher.py`, `sheet.py` + `tui.py` — CLI, watch loop, TUI
+- `scaffold.py`, `cli.py`, `watcher.py` — CLI, watch loop
+- `tui/` — the TUI. `app.py` (`QsqlApp`: layout, key routing, the notebook's lifecycle
+  and watch loop), `runs.py` (`RunController`: the session, one run at a time,
+  generation-tagged; it repaints through the app's `run_*` hooks), `panes.py`
+  (`SheetTable` renders a Sheet; `Surface` holds the sheet verbs; `DataPanes` is the Data
+  tab's stacks and split), `catalog_view.py` (the Catalog tab's loads, cache and
+  per-notebook generation), `previews.py`, `screens.py`; `sheet.py` holds the pure Sheet
+  ops. The subtitle has one writer, `QsqlApp.refresh_subtitle`.
 - `lsp/` — `analysis.py` (diagnostics/completions on sqlglot in the cell's executor's
   dialect + length-preserving Jinja mask; tables and relations from its catalog), `server.py` (pygls stdio); bigquery cells prefer the googlesql
   `execute_query` binary when found (PATH or `QSQL_EXECUTE_QUERY` — deliberately

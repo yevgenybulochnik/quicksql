@@ -348,12 +348,21 @@ existing `.qsql` files plus starter templates.
 | `a` / `A` | toggle autorun (cell / global) | `V` | open the row set in real VisiData |
 | `/` | search | `o` | open another notebook |
 | `?` | help | `Ctrl+R` | refetch |
-| `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the catalog dive is kept) |
+| `1`–`5` | jump to SQL / Data / Config / Log / Catalog | `Esc` | leave a sheet for the cell list without popping (the dive is kept) |
 | `Ctrl+H` / `Ctrl+L` | previous / next tab, from any mode | `Ctrl+K` / `Ctrl+J` | up to the cell list (like `Esc`) / down into the sheet (like `Enter` on the cell list) |
 
 `Ctrl+H` needs a terminal with the kitty keyboard protocol (herdr, kitty, WezTerm, foot,
 ghostty…); under tmux's defaults it arrives as Backspace and does nothing, while `1`–`5`
 work everywhere.
+
+The Data tab shows the selected cell's preview: what its last run cached, at most its
+first 100 rows. When the preview holds only those, its subtitle ends `first 100 rows
+only`, and so do the subtitles of sheets sorted, filtered or counted from it. A rerun of
+the cell refreshes the preview; sheets derived from it stay as they were until you pop
+back. Leaving the Data or Catalog tab keeps its dive for when you come back (on the Data
+tab, while the same cell is selected). One run goes at a time: `R`, `r` or a save's rerun
+during a run stops the run under way after its current cell, and the new one starts once
+it has.
 
 ### What reruns, and what's stale
 
@@ -464,5 +473,6 @@ without Docker.
 | `catalog.py` | the TUI's schema catalog: each context's tree from its executor, `@catalog` targets, landed outputs |
 | `executors/`, `sinks/`, `sources.py` | strategy leaves for the engines (each opens an `EngineSession` per context and declares its dialect and catalog), sinks, and file readers |
 | `plugins/` | `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary), demonstrators |
-| `cli.py`, `watcher.py`, `tui.py`, `sheet.py`, `scaffold.py` | CLI, watch loop, TUI |
+| `cli.py`, `watcher.py`, `scaffold.py` | CLI, watch loop, notebook templates |
+| `tui/` (`app.py`, `runs.py`, `panes.py`, `catalog_view.py`, `previews.py`, `screens.py`), `sheet.py` | the TUI: layout and keys, runs, sheet surfaces, the catalog browser; `sheet.py` holds the pure sheet operations |
 | `lsp/` | diagnostics/completions over sqlglot; a pygls stdio server |
