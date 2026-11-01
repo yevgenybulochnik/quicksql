@@ -852,6 +852,16 @@ async def _settle(app, pilot) -> None:
     await pilot.pause()
 
 
+async def _drain(app, pilot) -> None:
+    """Wait out every worker, one Textual flagged cancelled included (an
+    exclusive group's replaced worker), which wait_for_complete raises on."""
+    for _ in range(200):
+        if not any(w.is_running for w in app.workers):
+            break
+        await pilot.pause(0.05)
+    await pilot.pause()
+
+
 async def _dive_three_levels(app, pilot) -> None:
     """S, drill root → sqlite context → `wide`, then cursor to row 37."""
     await pilot.press("S")
@@ -1488,6 +1498,51 @@ async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeyp
         assert len(calls) == 1
         assert len(app.catalog_stack) == 1
         assert app.mode == "catalog"
+
+
+async def test_a_catalog_load_from_the_previous_notebook_lands_nowhere(tmp_path, monkeypatch) -> None:
+    """A root load still running when the notebook switches must not push the
+    old notebook's listing onto the new one's stack, nor cache it there."""
+    import dataclasses
+    import threading
+
+    from quicksql.tui import catalog_view
+
+    one = tmp_path / "one.qsql"
+    one.write_text("-- @cell a\nSELECT 1 AS x;\n")
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell c\nSELECT 2 AS y;\n")
+    gate, reached = threading.Event(), threading.Event()
+    real = catalog_view.project_root_node
+
+    def gated(project, **kwargs):
+        node = real(project, **kwargs)
+        if project.path.name != "one.qsql":
+            return node
+
+        def load():
+            reached.set()
+            assert gate.wait(timeout=10)
+            return node.load()
+
+        return dataclasses.replace(node, load=load)
+
+    monkeypatch.setattr(catalog_view, "project_root_node", gated)
+    app = QsqlApp(path=one, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("S")  # notebook one's root starts loading, and blocks
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            app._load_notebook(two)  # still on the Catalog tab: two's root loads
+        finally:
+            gate.set()
+        await _drain(app, pilot)
+        assert [s.frame["name"].to_list() for s in app.catalog_stack] == [["duckdb::memory:", "c"]]
+        await pilot.press("S", "q", "S")  # dive, pop the root, reload it from the cache
+        await _drain(app, pilot)
+        assert [s.frame["name"].to_list() for s in app.catalog_stack] == [["duckdb::memory:", "c"]]
 
 
 async def test_s_mid_data_dive_switches_surfaces_cleanly(notebook) -> None:
