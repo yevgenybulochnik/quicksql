@@ -1836,13 +1836,13 @@ async def test_run_events_drive_per_cell_status(notebook) -> None:
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         names = tuple(app.project.order)
-        gen = app._run_gen
-        app._on_run_event(gen, RunEvent("run_started", cells=names))
+        gen = app.runs.gen
+        app.runs.on_event(gen, RunEvent("run_started", cells=names))
         await pilot.pause()
         assert app.running == set(names)
         assert all(_row(app, n)[3] == "…" for n in names)
         done = RunResult(cell=names[0], status="ok", rows=3, elapsed=0.25)
-        app._on_run_event(gen, RunEvent("cell_finished", names[0], result=done))
+        app.runs.on_event(gen, RunEvent("cell_finished", names[0], result=done))
         await pilot.pause()
         assert names[0] not in app.running and names[1] in app.running
         assert _row(app, names[0])[3] == "✔" and _row(app, names[0])[4] == "3"
@@ -1857,13 +1857,13 @@ async def test_stale_generation_events_do_not_touch_state(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test() as pilot:
         await pilot.pause()
-        stale = app._run_gen - 1
-        app._on_run_event(stale, RunEvent("run_started", cells=("users",)))
+        stale = app.runs.gen - 1
+        app.runs.on_event(stale, RunEvent("run_started", cells=("users",)))
         assert app.running == set()
         done = RunResult(cell="users", status="ok", rows=1, elapsed=0.1)
-        app._on_run_event(stale, RunEvent("cell_finished", "users", result=done))
+        app.runs.on_event(stale, RunEvent("cell_finished", "users", result=done))
         assert "users" not in app.results
-        app._apply_results(stale, [done])
+        app.runs.apply(stale, [done])
         assert "users" not in app.results
 
 
@@ -1876,17 +1876,17 @@ async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         old = RunResult(cell="users", status="ok", rows=42, elapsed=1.234)
-        app._apply_results(app._run_gen, [old])
+        app.runs.apply(app.runs.gen, [old])
         await pilot.pause()
         assert _row(app, "users")[4] == "42"
-        app._on_run_event(app._run_gen, RunEvent("run_started", cells=("users",)))
+        app.runs.on_event(app.runs.gen, RunEvent("run_started", cells=("users",)))
         await pilot.pause()
         row = _row(app, "users")
         assert row[3] == "…" and row[4] == "" and row[5] == ""
 
 
 async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypatch) -> None:
-    from quicksql.tui import app as tui_mod
+    from quicksql.tui import runs as tui_mod
 
     def boom(*args, **kwargs):
         raise RuntimeError("executor exploded")

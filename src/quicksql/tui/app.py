@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import threading
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 import polars as pl
 import yaml
@@ -26,11 +24,12 @@ from ..compiler import Project
 from ..conduit import preview
 from ..config import make_sink
 from ..errors import QsqlError
-from ..models import RunEvent, RunResult
+from ..models import RunResult
 from ..registry import Registries
-from ..runner import RunSession, run_project
+from ..runner import RunSession
 from ..sheet import Sheet
 from ..watcher import plan_rerun
+from .runs import RunController
 from .screens import HelpScreen, NotebookPicker
 
 
@@ -96,18 +95,7 @@ class QsqlApp(App):
         self.auto_run = auto_run
         self.armed = False  # watch reruns stay dormant until the first run-all
         self.project: Project | None = None
-        self.session = RunSession()  # per notebook, reused across its reruns
-        # runs in flight per session: a replaced session is closed by whoever
-        # leaves it last — the switch if it's idle, else that run's finally.
-        # Closing a DuckDB connection under another thread's query risks a crash.
-        self._session_lock = threading.Lock()
-        self._session_runs: dict[RunSession, int] = {}
-        self.results: dict[str, RunResult] = {}
-        self.running: set[str] = set()
-        # bumped on the UI thread per run; events/results tagged with an older
-        # generation come from a replaced (still-draining) worker and are
-        # logged but never allowed to touch table state
-        self._run_gen = 0
+        self.runs = RunController(self)  # the session, results and pending cells
         self.autorun_off: set[str] = set()
         self.autorun_global = True
         self.show_rendered = True
@@ -130,6 +118,18 @@ class QsqlApp(App):
         # slot 2 = the catalog table); holding the frame reference keeps
         # identity comparison sound
         self._data_shown: list[tuple[Any, tuple[str, ...], frozenset[int], int] | None] = [None] * 3
+
+    @property
+    def session(self) -> RunSession:
+        return self.runs.session
+
+    @property
+    def results(self) -> dict[str, RunResult]:
+        return self.runs.results
+
+    @property
+    def running(self) -> set[str]:
+        return self.runs.running
 
     # ---------- panes (vertical split) ----------
 
@@ -246,10 +246,7 @@ class QsqlApp(App):
         self.path = Path(path)
         # the old session's temps/statuses describe the old notebook, and an
         # in-flight run of it must not paint this one
-        self._replace_session()
-        self._run_gen += 1
-        self.results = {}
-        self.running = set()
+        self.runs.reset()
         self.panes = [[]]
         self.active_pane = 0
         self.catalog_stack = []
@@ -330,29 +327,7 @@ class QsqlApp(App):
         body.set_class(event.size.height < self.COMPACT_HEIGHT, "-compact")
 
     def on_unmount(self) -> None:
-        self.session.close()
-
-    def _replace_session(self) -> None:
-        with self._session_lock:
-            old, self.session = self.session, RunSession()
-            idle = old not in self._session_runs
-        if idle:
-            old.close()
-
-    @contextmanager
-    def _session_in_use(self, session: RunSession):
-        with self._session_lock:
-            self._session_runs[session] = self._session_runs.get(session, 0) + 1
-        try:
-            yield
-        finally:
-            with self._session_lock:
-                left = self._session_runs.pop(session) - 1
-                if left:
-                    self._session_runs[session] = left
-                retired = not left and session is not self.session
-            if retired:  # its notebook was switched away mid-run
-                session.close()
+        self.runs.close()
 
     # ---------- state helpers ----------
 
@@ -671,12 +646,12 @@ class QsqlApp(App):
 
     def action_run_cell(self) -> None:
         if self.current_cell:
-            self._run_worker([self.current_cell], closure=True)
+            self.runs.start([self.current_cell], closure=True, path=self.path)
 
     def action_run_all(self) -> None:
         self.armed = True
         self._refresh_armed_indicator()
-        self._run_worker(None, closure=True)
+        self.runs.start(None, closure=True, path=self.path)
 
     def action_toggle_armed(self) -> None:
         """Arm/disarm watch reruns *without* running anything — the light-weight
@@ -1121,88 +1096,23 @@ class QsqlApp(App):
         else:
             self._push_catalog_sheet(sheet)
 
-    def _run_worker(
-        self, select: Optional[list[str]], closure: bool = True, project: Project | None = None
-    ) -> None:
-        """Bump the run generation (on the UI thread) and hand off to the
-        thread worker. `exclusive` only *flags* the old worker cancelled — a
-        blocking run_project keeps draining events, so the generation tag is
-        what keeps a replaced run from repainting the table. A save passes the
-        project it just compiled, so the run doesn't compile it again."""
-        self._run_gen += 1
-        # bound now: a notebook switch before the thread starts must not
-        # redirect this run to the new notebook or its session
-        self._run_thread(select, closure, self._run_gen, self.path, self.session, project)
+    # ---------- run hooks (RunController, on the UI thread) ----------
 
-    @work(thread=True, exclusive=True, group="run")
-    def _run_thread(
-        self,
-        select: Optional[list[str]],
-        closure: bool,
-        gen: int,
-        path: Path,
-        session: RunSession,
-        project: Project | None = None,
-    ) -> None:
-        with self._session_in_use(session):
-            if project is None:
-                try:
-                    project = self._compile(path)
-                except QsqlError as exc:
-                    self.call_from_thread(self.log_line, f"compile error: {exc}")
-                    return
-            self.call_from_thread(self._adopt_project, gen, project)
-            results: list[RunResult] = []
-            try:
-                results = run_project(
-                    project,
-                    select=select,
-                    closure=closure,
-                    session=session,
-                    on_event=lambda e: self.call_from_thread(self._on_run_event, gen, e),
-                )
-            except Exception:  # never leave cells stuck at "…" on a runner crash
-                import traceback
-
-                self.call_from_thread(self.log_line, f"run failed:\n{traceback.format_exc()}")
-            finally:
-                self.call_from_thread(self._apply_results, gen, results)
-
-    def _adopt_project(self, gen: int, project: Project) -> None:
-        if gen != self._run_gen:
-            return  # a replaced run's compile may be older, or another notebook's
+    def run_adopted(self, project: Project) -> None:
+        """The current run compiled the notebook afresh."""
         self.project = project
         self._refresh_cells()
 
-    def _on_run_event(self, gen: int, event: RunEvent) -> None:
-        """Route the runner's live events: everything is logged; run_started
-        seeds the pending set from the *post-expansion* cell list (closure,
-        missing-temp and not-ok upstreams included — the select list undercounts those),
-        and each cell_finished retires its cell so status flips one at a time."""
-        self.log_line(event.line())
-        result = event.result if event.kind == "cell_finished" else None
-        if result is not None and result.status == "failed" and result.error:
-            # the full message, once per result: the line above keeps only its
-            # first line (a skipped cell's line already says it all)
-            self.log_line(f"{event.cell} failed:\n{result.error}")
-        if gen != self._run_gen:
-            return  # a replaced run may still be draining: log it, never show it
-        if event.kind == "run_started":
-            self.running = set(event.cells or ())
-            self._refresh_cells()
-        elif event.kind == "cell_finished" and event.cell is not None:
-            self.running.discard(event.cell)
-            if event.result is not None:
-                self.results[event.cell] = event.result
-            self._refresh_cells()
+    def run_progressed(self) -> None:
+        """The current run started, or one of its cells finished."""
+        self._refresh_cells()
 
-    def _apply_results(self, gen: int, results: list[RunResult]) -> None:
-        self._catalog_cache.invalidate()  # outputs and warehouses just changed
-        if gen != self._run_gen:
-            return  # a newer run owns the table; its own events paint it
-        for result in results:  # normally a no-op: cell_finished stored each
-            self.results[result.cell] = result
-        self.running.clear()
+    def run_landed(self) -> None:
+        """A run ended, the current one or a replaced one: outputs changed."""
+        self._catalog_cache.invalidate()
+
+    def run_finished(self) -> None:
+        """The current run ended."""
         self._refresh_cells()
         self._refresh_detail()
 
@@ -1243,7 +1153,7 @@ class QsqlApp(App):
         to_run = [n for n in planned if self.cell_autorun(n)]
         if to_run:
             self.log_line(f"changed -> rerunning: {', '.join(to_run)}")
-            self._run_worker(to_run, closure=False, project=project)
+            self.runs.start(to_run, closure=False, path=self.path, project=project)
         else:
             self.log_line("nothing to rerun")
         return to_run
