@@ -14,21 +14,22 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from ..bootstrap import compile_file
 from ..catalog import CatalogCache, CatalogNode, project_root_node
 from ..compiler import Project
-from ..conduit import preview
-from ..config import make_sink
 from ..errors import QsqlError
 from ..models import RunResult
 from ..registry import Registries
 from ..runner import RunSession
 from ..sheet import Sheet
 from ..watcher import plan_rerun
+from . import previews
+from .catalog_view import CatalogView
+from .panes import DataPanes, SheetTable, Surface
+from .previews import preview_frame
 from .runs import RunController
 from .screens import HelpScreen, NotebookPicker
 
@@ -99,25 +100,17 @@ class QsqlApp(App):
         self.autorun_off: set[str] = set()
         self.autorun_global = True
         self.show_rendered = True
-        self.mode = "cells"  # or "data" / "catalog"
-        # one drilling stack per pane; a vertical split appends a second stack.
-        # sheet_stack (property, below) is the active surface's stack, so the
-        # rest of the app is oblivious to the split — and to the catalog.
-        self.panes: list[list[Sheet]] = [[]]
-        self.active_pane = 0
-        self.catalog_stack: list[Sheet] = []  # the Catalog tab's own dive
+        self.mode = "cells"  # or "data" / "catalog": whose keys these are
+        self.data = DataPanes(self)  # the Data tab's sheet stacks
+        self.catalog = CatalogView(self)  # the Catalog tab's own dive
         self._catalog_dive_pending = False  # S pressed while the root loads
         self._catalog_root_loading = False  # a root load is in flight
         self._row_names: list[str] = []
         self._pending_g = False
         self._last_search = ""
         self._input_mode = "search"  # what the bottom input edits: search | filter
-        self._filter_base: Sheet | None = None  # sheet being live-filtered
+        self._filtering: Surface | None = None  # the surface being live-filtered
         self._catalog_cache = CatalogCache()  # cleared on run/recompile/switch
-        # what each sheet table currently displays (slots 0/1 = panes,
-        # slot 2 = the catalog table); holding the frame reference keeps
-        # identity comparison sound
-        self._data_shown: list[tuple[Any, tuple[str, ...], frozenset[int], int] | None] = [None] * 3
 
     @property
     def session(self) -> RunSession:
@@ -131,76 +124,49 @@ class QsqlApp(App):
     def running(self) -> set[str]:
         return self.runs.running
 
-    # ---------- panes (vertical split) ----------
+    # ---------- surfaces ----------
 
     SHEET_MODES = ("data", "catalog")  # modes whose keys live in a sheet
+    MAX_DATA_ROWS = SheetTable.MAX_ROWS
+    MAX_DATA_COLS = SheetTable.MAX_COLS
+    PREVIEW_ROWS = previews.PREVIEW_ROWS
+
+    @property
+    def surface(self) -> Surface:
+        """The active drilling surface: the catalog's in catalog mode, else
+        the Data tab's. Routing by mode is what lets the sheet verbs
+        (filter/yank/search/freq/drill/pop) work unchanged on either."""
+        return self.catalog if self.mode == "catalog" else self.data
 
     @property
     def sheet_stack(self) -> list[Sheet]:
-        """The active surface's drilling stack: the catalog's own stack in
-        catalog mode, else the focused pane's. Reads and in-place mutations
-        (append/pop/insert/[-1]=) operate on that stack; assigning a new list
-        replaces it (see the setter). Routing by mode is what lets the sheet
-        verbs (filter/yank/search/freq/drill/pop) work unchanged on either
-        surface."""
-        if self.mode == "catalog":
-            return self.catalog_stack
-        return self.panes[self.active_pane]
+        """The active surface's stack (on the Data tab, the focused pane's).
+        Reads and in-place mutations operate on it; assigning replaces it."""
+        return self.surface.stack
 
     @sheet_stack.setter
     def sheet_stack(self, value: list[Sheet]) -> None:
-        if self.mode == "catalog":
-            self.catalog_stack = value
-        else:
-            self.panes[self.active_pane] = value
+        self.surface.stack = value
+
+    @property
+    def panes(self) -> list[list[Sheet]]:
+        return self.data.panes
+
+    @property
+    def active_pane(self) -> int:
+        return self.data.active
 
     @property
     def split(self) -> bool:
-        return len(self.panes) > 1
+        return self.data.split
 
-    PANE_TABLE_IDS = ("#data", "#data2")
-
-    def _pane_table(self, idx: int) -> DataTable:
-        return self.query_one(self.PANE_TABLE_IDS[idx], DataTable)
-
-    def _active_table(self) -> DataTable:
-        if self.mode == "catalog":
-            return self.query_one("#catalog", DataTable)
-        return self._pane_table(self.active_pane)
-
-    def _sync_split_layout(self) -> None:
-        self.query_one("#data_panes").set_class(self.split, "-split")
-        for i in (0, 1):
-            self._pane_table(i).set_class(self.split and i == self.active_pane, "-active")
-
-    def _collapse_panes(self, keep: int) -> None:
-        """Drop back to a single pane, keeping stack ``keep``."""
-        self.panes = [self.panes[keep]]
-        self.active_pane = 0
-        self._data_shown[:2] = [None, None]  # pane slots only; catalog keeps its cache
-        self._pane_table(1).clear(columns=True)
-        self._sync_split_layout()
+    @property
+    def catalog_stack(self) -> list[Sheet]:
+        return self.catalog.stack
 
     def _toggle_split(self) -> None:
-        if self.mode != "data" or not self.sheet_stack:
-            return
-        if self.split:
-            self._collapse_panes(self.active_pane)  # unsplit: keep what's focused
-        else:
-            # a shallow copy is an independent stack (Sheets are frozen), so the
-            # panes diverge as each is navigated; focus lands on the new pane
-            self.panes.append(list(self.panes[self.active_pane]))
-            self.active_pane = 1
-            self._data_shown[:2] = [None, None]  # pane slots only
-            self._sync_split_layout()
-        self._refresh_data()
-
-    def _switch_pane(self) -> None:
-        if not self.split:
-            return
-        self.active_pane ^= 1
-        self._sync_split_layout()
-        self._refresh_data()  # moves the -active border and the active sub_title
+        if self.mode == "data":
+            self.data.toggle_split()
 
     # ---------- layout ----------
 
@@ -247,15 +213,12 @@ class QsqlApp(App):
         # the old session's temps/statuses describe the old notebook, and an
         # in-flight run of it must not paint this one
         self.runs.reset()
-        self.panes = [[]]
-        self.active_pane = 0
-        self.catalog_stack = []
+        self.data.reset()
+        self.catalog.stack = []
         self._catalog_dive_pending = False
         self._catalog_root_loading = False
         self._catalog_cache.invalidate()
-        self._data_shown = [None] * 3
-        self._refresh_catalog()  # the old listing must not show under this notebook
-        self._sync_split_layout()
+        self.catalog.refresh()  # the old listing must not show under this notebook
         self.mode = "cells"
         self.armed = False
         self._refresh_armed_indicator()
@@ -394,221 +357,32 @@ class QsqlApp(App):
         stack = f" · sheets:{len(self.sheet_stack)}" if self.sheet_stack else ""
         self.sub_title = f"{name} · sql:{label}{stack}"
 
-    MAX_DATA_ROWS = 200
-    MAX_DATA_COLS = 40  # window rendered around the cursor; re-windows at the edges
 
-    def _row_cap(self, sheet: Sheet) -> int | None:
-        # catalog sheets list one row per column/table/dataset — never truncate
-        # them, or a wide table would hide fields. data previews stay capped so
-        # rebuilding a wide frame stays cheap on every cursor keypress.
-        return None if sheet.drill is not None else self.MAX_DATA_ROWS
-
-    def _refresh_data(self) -> None:
-        # render every pane; the identity-cached _data_shown[idx] keeps the
-        # unfocused pane from rebuilding when only the focused one changed
-        for idx in (0, 1):
-            table = self._pane_table(idx)
-            if idx >= len(self.panes) or not self.panes[idx]:
-                table.clear(columns=True)
-                self._data_shown[idx] = None
-                continue
-            self._render_pane(idx, table)
-
-    _SELECT_MARK = "▸"
-    CATALOG_SLOT = 2  # the catalog table's _data_shown slot
-
-    def _refresh_catalog(self, deferred: bool = False) -> None:
-        table = self.query_one("#catalog", DataTable)
-        if not self.catalog_stack:
-            table.clear(columns=True)
-            self._data_shown[self.CATALOG_SLOT] = None
-            return
-        if self.mode == "catalog" and not table.size and not deferred:
-            # S/5/ctrl+h/l just showed the tab (or a key came in the same frame)
-            # and it isn't laid out yet: a cursor placed now scrolls into a 0x0
-            # viewport, jumping the scroll, and a sizeless widget marks nothing
-            # to repaint, so the terminal keeps the old lines. Render once it
-            # has its size — once only, as a compact terminal never gives it one.
-            self.call_after_refresh(self._refresh_catalog, deferred=True)
-            return
-        self._render_sheet_table(
-            self.catalog_stack[-1],
-            table,
-            slot=self.CATALOG_SLOT,
-            active=self.mode == "catalog",
-        )
-
-    def _refresh_surface(self) -> None:
-        """Repaint the active drilling surface (catalog vs data panes)."""
-        if self.mode == "catalog":
-            self._refresh_catalog()
-        else:
-            self._refresh_data()
-
-    def _render_pane(self, idx: int, table: DataTable) -> None:
-        active = idx == self.active_pane
-        side = ("L / " if idx == 0 else "R / ") if self.split else ""
-        self._render_sheet_table(self.panes[idx][-1], table, slot=idx, active=active, side=side)
-
-    def _render_sheet_table(
-        self, sheet: Sheet, table: DataTable, slot: int, active: bool, side: str = ""
-    ) -> None:
-        """Render a sheet into a DataTable, identity-cached per ``slot`` so
-        cursor moves reuse the built table (rebuilds only on content/window
-        changes, selection flips restyle in place). Shared by the data panes
-        (slots 0/1); ``side`` prefixes the sub_title when the pane is split."""
-        cap = self._row_cap(sheet)
-        cols = sheet.columns
-        cursor_col = min(sheet.cursor[1], max(len(cols) - 1, 0))
-        start = 0
-        if len(cols) > self.MAX_DATA_COLS:
-            start = max(0, min(cursor_col - self.MAX_DATA_COLS // 2, len(cols) - self.MAX_DATA_COLS))
-        window = cols[start : start + self.MAX_DATA_COLS]
-        shown = (sheet.frame, sheet.hidden, sheet.selected, start)
-        prev = self._data_shown[slot]
-        selection_only = (
-            prev is not None
-            and window
-            and prev[0] is shown[0]
-            and prev[1] == shown[1]
-            and prev[3] == shown[3]
-            and prev[2] != shown[2]
-        )
-        if selection_only:
-            # same content and columns, only the marked rows differ: flip just
-            # those cells' markers. A clear()+rebuild would set Textual's
-            # _require_update_dimensions, which defers the cursor re-scroll a
-            # frame and makes a scrolled viewport visibly jump on select.
-            self._data_shown[slot] = shown
-            self._restyle_selection(table, sheet, prev[2], window[0], cap)
-        elif prev is None or prev[0] is not shown[0] or prev[1:] != shown[1:]:
-            # rebuild only when content or the column window changed; wide
-            # frames make rebuilds expensive and cursor moves happen per keypress
-            self._data_shown[slot] = shown
-            frame = sheet.frame.select(window)
-            if cap is not None:
-                frame = frame.head(cap)
-            rows = [
-                ((self._SELECT_MARK if i in sheet.selected else "") + str(row[0]), *map(str, row[1:]))
-                for i, row in enumerate(frame.rows())
-            ]
-            table.clear(columns=True)
-            for name, width in zip(window, self._column_widths(window, rows, active=active)):
-                table.add_column(str(name), width=width)
-            table.add_rows(rows)
-        height = sheet.frame.height if cap is None else min(sheet.frame.height, cap)
-        if height:
-            table.move_cursor(row=min(sheet.cursor[0], height - 1), column=cursor_col - start)
-        if active:
-            picked = f" · {len(sheet.selected)} selected" if sheet.selected else ""
-            span = ""
-            if len(cols) > self.MAX_DATA_COLS:
-                span = f" · cols {start + 1}-{start + len(window)}/{len(cols)}"
-            self.sub_title = f"{side}{sheet.title} · {sheet.frame.height}x{len(cols)}{picked}{span}"
-
-    def _restyle_selection(
-        self, table: DataTable, sheet: Sheet, prev_selected: frozenset[int], col0: str, cap: int | None
-    ) -> None:
-        """Repaint just the first-column cells whose selection flipped, marker
-        on or off — update_cell_at(update_width=False) touches only cell content,
-        so the table keeps its dimensions and scroll and the viewport holds still."""
-        limit = sheet.frame.height if cap is None else min(sheet.frame.height, cap)
-        values = sheet.frame[col0]
-        for i in sorted(prev_selected ^ sheet.selected):
-            if 0 <= i < limit:
-                mark = self._SELECT_MARK if i in sheet.selected else ""
-                table.update_cell_at(Coordinate(i, 0), mark + str(values[i]), update_width=False)
-
-    def _column_widths(
-        self, window: list[str], rows: list[tuple[str, ...]], active: bool = True
-    ) -> list[int]:
-        """Explicit column widths for the data table. While a filter is being
-        typed the shown rows are a shrinking subset — measure the captured
-        base sheet instead, so widths hold still keystroke to keystroke. Only
-        the focused pane is ever being filtered, so the base applies there."""
-        base = self._filter_base
-        if active and base is not None and all(c in base.frame.columns for c in window):
-            source = base.frame.select(window)
-            cap = self._row_cap(base)
-            if cap is not None:
-                source = source.head(cap)
-            rows = [tuple(map(str, row)) for row in source.rows()]
-        widths = [len(str(name)) for name in window]
-        for row in rows:
-            for i, cell in enumerate(row):
-                widths[i] = max(widths[i], len(cell))
-        return widths
 
     def _mutate_sheet(self, fn) -> None:
-        if self.mode not in self.SHEET_MODES or not self.sheet_stack:
-            return
-        self.sheet_stack[-1] = fn(self.sheet_stack[-1])
-        self._refresh_surface()
+        if self.mode in self.SHEET_MODES:
+            self.surface.mutate(fn)
 
     def _push_sheet(self, sheet: Sheet) -> None:
         """Push onto the active surface: derived sheets (freq/describe) stay
         on the catalog in catalog mode; otherwise dive into the Data tab."""
         self.sheet_stack.append(sheet)
         if self.mode == "catalog":
-            self._refresh_catalog()
+            self.catalog.refresh()
             return
         self.mode = "data"
         self.query_one(TabbedContent).active = "tab_data"
-        self._refresh_data()
-
-    PREVIEW_ROWS = 100
-
-    def _read_parquet_head(self, target: str) -> pl.DataFrame:
-        """Preview through duckdb's parquet reader, never polars' — the polars
-        reader panics on duckdb-written INTERVAL columns, and duckdb only reads
-        the head row groups for a LIMIT."""
-        import duckdb
-
-        con = duckdb.connect()
-        try:
-            return preview(con, f"read_parquet('{target}')", self.PREVIEW_ROWS)
-        finally:
-            con.close()
+        self.data.refresh()
 
     def _preview_frame(self, name: str) -> pl.DataFrame:
-        result = self.results.get(name)
-        if result is not None and isinstance(result.preview, pl.DataFrame):
-            return result.preview
-        if result is not None and result.ok and result.target and result.target.endswith(".parquet"):
-            return self._read_parquet_head(result.target)
-        if self.project and name in self.project.cells:
-            landed = self._read_landed(name)
-            if landed is not None:
-                return landed
-        return pl.DataFrame({"info": [f"no output for {name!r} yet — press r to run"]})
-
-    def _read_landed(self, name: str) -> pl.DataFrame | None:
-        """An earlier run's output, read back through the cell's own sink but
-        never its prepare(): previews follow the cursor, and an ATTACH creates a
-        missing database file or connects to a server. So a database sink
-        previews only once a run this session has attached it to the conduit."""
-        import duckdb
-
-        project = self.project
-        sink = make_sink(project.cells[name].config, project.root, project.registries)
-        if not sink.lands_output:
-            return pl.DataFrame(
-                {"info": [f"{name!r} is effect-only (output: {sink.name}): it lands nothing to preview"]}
-            )
-        con = self._catalog_connect()
-        try:
-            return preview(con, sink.ref_expr(name), self.PREVIEW_ROWS)
-        except (duckdb.Error, QsqlError):
-            return None  # never landed, or its database isn't attached this session
-        finally:
-            con.close()
+        return preview_frame(self.project, self.results.get(name), name, self._catalog_connect)
 
     # ---------- actions (footer bindings) ----------
 
     def action_pop_or_quit(self) -> None:
         if self.mode == "catalog" and self.catalog_stack:
             self.catalog_stack.pop()
-            self._refresh_catalog()  # an emptied stack clears the table
+            self.catalog.refresh()  # an emptied stack clears the table
             if self.catalog_stack:
                 return
             self.mode = "cells"  # popped the root: back out to the cell list
@@ -618,11 +392,11 @@ class QsqlApp(App):
         if self.mode == "data" and self.sheet_stack:
             self.sheet_stack.pop()
             if self.sheet_stack:
-                self._refresh_data()
+                self.data.refresh()
                 return
             if self.split:  # focused pane emptied: keep the other, full width
-                self._collapse_panes(1 - self.active_pane)
-                self._refresh_data()
+                self.data.collapse(1 - self.active_pane)
+                self.data.refresh()
                 return
             self.mode = "cells"
             self.query_one(TabbedContent).active = "tab_sql"
@@ -686,7 +460,7 @@ class QsqlApp(App):
             tabs.active = "tab_catalog"
         if self.catalog_stack:
             self.mode = "catalog"
-            self._refresh_catalog()
+            self.catalog.refresh()
         else:  # root loads on a threaded worker: dive when it lands
             self._catalog_dive_pending = True
             # started here, not left to the activation handler: when the tab
@@ -723,9 +497,9 @@ class QsqlApp(App):
 
     def _restore_subtitle(self) -> None:
         if self.mode == "catalog" and self.catalog_stack:
-            self._refresh_catalog()
+            self.catalog.refresh()
         elif self.mode == "data" and self.sheet_stack:
-            self._refresh_data()
+            self.data.refresh()
         else:
             self._refresh_detail()
 
@@ -750,38 +524,31 @@ class QsqlApp(App):
         search.focus()
 
     def _show_filter(self) -> None:
-        if self.mode not in self.SHEET_MODES or not self.sheet_stack:
+        if self.mode not in self.SHEET_MODES or not self.surface.begin_filter():
             return
         self._input_mode = "filter"
-        self._filter_base = self.sheet_stack[-1]
+        self._filtering = self.surface
         self._show_input("filter rows by regex...")
 
     def _cancel_filter(self) -> None:
-        if self._filter_base is not None and self.sheet_stack:
-            self.sheet_stack[-1] = self._filter_base
-            self._refresh_surface()
-        self._filter_base = None
+        if self._filtering is not None:
+            self._filtering.cancel_filter()
+        self._filtering = None
         self._input_mode = "search"
 
     def _yank(self) -> None:
-        if self.mode not in self.SHEET_MODES or not self.sheet_stack:
+        if self.mode not in self.SHEET_MODES:
             return
-        sheet = self.sheet_stack[-1]
-        if sheet.frame.height == 0:
+        got = self.surface.yank()
+        if got is None:
             return
-        col = sheet.current_column
-        if sheet.selected:
-            values = [str(sheet.frame[col][i]) for i in sorted(sheet.selected)]
-            text = ",\n".join(values)  # paste-ready as a SQL select list
-        else:
-            values = [str(sheet.frame[col][sheet.cursor[0]])]
-            text = values[0]
+        text, count, col = got
         self.copy_to_clipboard(text)
-        self.notify(f"copied {len(values)} value(s) from {col!r}")
+        self.notify(f"copied {count} value(s) from {col!r}")
 
     def action_page(self, direction: int) -> None:
         if self.mode in self.SHEET_MODES:
-            self._mutate_sheet(lambda s: self._reconcile_to_viewport(s).move(direction * 20, 0))
+            self._mutate_sheet(lambda s: self.surface.reconcile_to_viewport(s).move(direction * 20, 0))
         else:
             self.query_one("#cells", DataTable).move_cursor(
                 row=(self.query_one("#cells", DataTable).cursor_row or 0) + direction * 10
@@ -857,7 +624,7 @@ class QsqlApp(App):
         elif ch == "|":
             self._toggle_split()
         elif ch == "w":
-            self._switch_pane()
+            self.data.switch()
         elif ch in self.TAB_KEYS:
             self._jump_to_tab(self.TAB_KEYS[ch])
         # vim-style ctrl keys, the same from any mode: h/l step through the
@@ -898,34 +665,14 @@ class QsqlApp(App):
         if self.mode not in self.SHEET_MODES:
             return
         if self.split:  # the split is a data-mode concern; drop it on the way out
-            self._collapse_panes(self.active_pane)
-            self._refresh_data()
+            self.data.collapse(self.active_pane)
+            self.data.refresh()
         self.mode = "cells"
         self._refresh_detail()
 
-    def _reconcile_to_viewport(self, sheet: Sheet) -> Sheet:
-        """Snap the cursor row into the data table's visible window. The mouse
-        wheel scrolls the viewport but not the Sheet cursor, so without this a
-        keyboard move would resume from the stale (often top) cursor and snap
-        the view away from what the user is looking at. A no-op during normal
-        keyboard navigation, where the cursor is always already on screen."""
-        table = self._active_table()
-        height = table.scrollable_content_region.height
-        if not height:
-            return sheet
-        first = int(table.scroll_y)
-        last = min(first + height - 1, sheet.frame.height - 1)
-        row = min(max(sheet.cursor[0], first), last)
-        return sheet if row == sheet.cursor[0] else sheet.move(row - sheet.cursor[0], 0)
-
     def _move(self, d_row: int = 0, d_col: int = 0, top: bool = False, bottom: bool = False) -> None:
         if self.mode in self.SHEET_MODES:
-            if top:
-                self._mutate_sheet(lambda s: s.top())
-            elif bottom:
-                self._mutate_sheet(lambda s: s.bottom())
-            else:
-                self._mutate_sheet(lambda s: self._reconcile_to_viewport(s).move(d_row, d_col))
+            self.surface.move(d_row, d_col, top=top, bottom=bottom)
             return
         if d_col:
             self._cycle_tab(d_col)
@@ -949,22 +696,17 @@ class QsqlApp(App):
             self._mutate_sheet(lambda s: s.search(self._last_search, reverse=reverse))
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if self._input_mode != "filter" or self._filter_base is None or not self.sheet_stack:
-            return
-        # live: re-filter the captured base on every keystroke
-        self.sheet_stack[-1] = self._filter_base.filtered(event.value.strip())
-        self._refresh_surface()
+        if self._input_mode == "filter" and self._filtering is not None:
+            self._filtering.live_filter(event.value.strip())  # live, per keystroke
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._input_mode == "filter":
             event.input.value = ""
             self._hide_search()
-            base, self._filter_base = self._filter_base, None
+            filtering, self._filtering = self._filtering, None
             self._input_mode = "search"
-            if base is not None and self.sheet_stack and self.sheet_stack[-1] is not base:
-                # commit: keep the filtered sheet on top, base beneath (q restores)
-                self.sheet_stack.insert(len(self.sheet_stack) - 1, base)
-                self._refresh_surface()
+            if filtering is not None:
+                filtering.commit_filter()
             return
         needle = event.value.strip()
         self._last_search = needle
@@ -1011,8 +753,8 @@ class QsqlApp(App):
         if self.mode == "data":
             self.mode = "cells"
         if self.split:  # the split is a data-mode concern; drop it on the way out
-            self._collapse_panes(0)
-        self.panes[self.active_pane] = []
+            self.data.collapse(0)
+        self.data.stack = []
 
     def _leave_catalog_dive(self) -> None:
         # the stack stays: its Sheets keep cursor/sort/filter/hidden columns
@@ -1023,8 +765,8 @@ class QsqlApp(App):
     def _show_current_data(self) -> None:
         name = self.current_cell
         if name:
-            self.sheet_stack = [Sheet(self._preview_frame(name), title=name)]
-            self._refresh_data()
+            self.data.stack = [Sheet(self._preview_frame(name), title=name)]
+            self.data.refresh()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id != "cells":
@@ -1044,7 +786,7 @@ class QsqlApp(App):
             # mirror of the preview dive below) — never reset to a cell preview
             if self.catalog_stack:
                 self.mode = "catalog"
-                self._refresh_catalog()
+                self.catalog.refresh()
             return
         name = self.current_cell
         if not name:
@@ -1085,14 +827,14 @@ class QsqlApp(App):
         if self._catalog_dive_pending:  # S while the root was loading
             self._catalog_dive_pending = False
             self.mode = "catalog"
-        self._refresh_catalog()
+        self.catalog.refresh()
         if self.mode != "catalog":  # browse push: drop the loading… subtitle
             self._restore_subtitle()
 
     def _replace_top_sheet(self, sheet: Sheet) -> None:
         if self.catalog_stack:
             self.catalog_stack[-1] = sheet
-            self._refresh_catalog()
+            self.catalog.refresh()
         else:
             self._push_catalog_sheet(sheet)
 

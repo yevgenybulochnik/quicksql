@@ -588,7 +588,7 @@ async def test_wide_frames_render_a_column_window(tmp_path) -> None:
         assert len(table.columns) == app.MAX_DATA_COLS
         assert f"cols 1-{app.MAX_DATA_COLS}/60" in app.sub_title
         app.sheet_stack[-1] = app.sheet_stack[-1].move(0, 59)  # jump to last column
-        app._refresh_data()
+        app.data.refresh()
         assert f"cols {60 - app.MAX_DATA_COLS + 1}-60/60" in app.sub_title
 
 
