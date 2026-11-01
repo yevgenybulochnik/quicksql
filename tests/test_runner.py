@@ -638,6 +638,39 @@ def test_on_event_reports_failures_and_run_continues(tmp_path) -> None:
     assert "1 ok, 1 failed" in [e for e in events if e.kind == "run_finished"][-1].detail
 
 
+def test_a_cancelled_run_stops_between_cells(tmp_path) -> None:
+    """The cell under way finishes; the rest never start, and the run still
+    finishes (state, run_finished) so its session stays usable."""
+    from quicksql.bootstrap import compile_file
+    from quicksql.models import RunEvent
+    from quicksql.state import read_state
+
+    path = tmp_path / "base.qsql"
+    path.write_text("-- @cell a\nSELECT 1 AS x;\n-- @cell b\nSELECT 2 AS x;\n-- @cell c\nSELECT 3 AS x;")
+    project = compile_file(path)
+    events: list[RunEvent] = []
+    stop = False
+
+    def on_event(event: RunEvent) -> None:
+        nonlocal stop
+        events.append(event)
+        stop = stop or event.kind == "cell_finished"  # cancelled while a lands
+
+    results = run_project(project, on_event=on_event, cancel=lambda: stop)
+    assert [r.cell for r in results] == ["a"]
+    assert not any(e.cell in ("b", "c") for e in events)
+    assert not (tmp_path / "data" / "b.parquet").exists()
+    assert "cancelled — 2 cell(s) not run: b, c" in [e.detail for e in events if e.kind == "note"]
+    assert events[-1].kind == "run_finished" and "cancelled" in events[-1].detail
+    assert set(read_state(project)) == {"a"}
+
+
+def test_a_run_cancelled_before_it_starts_runs_nothing(tmp_path) -> None:
+    project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
+    assert run_project(project, cancel=lambda: True) == []
+    assert not (tmp_path / "data" / "a.parquet").exists()
+
+
 def test_broken_event_callback_never_kills_the_run(tmp_path) -> None:
     project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
 
