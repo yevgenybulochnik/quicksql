@@ -5,6 +5,7 @@ import pytest
 
 from quicksql.bootstrap import compile_text
 from quicksql.plugins.base import Plugin
+from quicksql.models import Preview
 from quicksql.runner import RunSession, run_project
 
 
@@ -20,7 +21,7 @@ def test_run_lands_parquet_and_previews(tmp_path) -> None:
     assert (tmp_path / "data" / "users.parquet").exists()
     assert (tmp_path / "data" / "active.parquet").exists()
     assert results[0].rows == 3 and results[1].rows == 2
-    assert isinstance(results[1].preview, pl.DataFrame)
+    assert results[1].preview == Preview(("user_id",), ((1,), (2,)))
     assert results[1].elapsed > 0
 
 
@@ -37,7 +38,7 @@ def test_a_cell_whose_sink_lands_nothing_runs_every_statement(tmp_path, discard_
     results = {r.cell: r for r in project.run()}
     assert results["load"].ok, results["load"].error
     assert (results["load"].rows, results["load"].target) == (0, "discarded")
-    assert results["counted"].preview["c"].to_list() == [3]
+    assert results["counted"].preview.column("c") == [3]
 
 
 def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> None:
@@ -53,7 +54,7 @@ def test_effect_only_cell_runs_for_side_effect_and_lands_nothing(tmp_path) -> No
     assert results["load"].rows == 0 and results["load"].target == "none"
     # the effect-only cell actually ran its statements: a downstream cell sees the rows
     assert results["counted"].ok, results["counted"].error
-    assert results["counted"].preview["c"].to_list() == [3]
+    assert results["counted"].preview.column("c") == [3]
     # nothing landed for the effect-only cell
     assert not (tmp_path / "data" / "load.parquet").exists()
 

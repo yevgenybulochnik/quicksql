@@ -2232,7 +2232,7 @@ async def test_notebook_switch_gets_its_own_run_session(tmp_path) -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         # b read notebook two's a (2), not notebook one's live temp (1)
-        assert app.results["b"].preview["x"].to_list() == [20]
+        assert app.results["b"].preview.column("x") == [20]
         assert app.session is not first
 
 
