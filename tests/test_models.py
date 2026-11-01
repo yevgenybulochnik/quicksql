@@ -115,3 +115,9 @@ def test_source_hash_is_a_short_stable_digest_of_the_text() -> None:
     assert source_hash("-- @cell a\nSELECT 1;\n") == source_hash("-- @cell a\nSELECT 1;\n")
     assert source_hash("SELECT 1;") != source_hash("SELECT 2;")
     assert len(source_hash("")) == 16
+
+
+def test_a_preview_to_dict_is_json_safe_and_bounded() -> None:
+    head = Preview(("d", "n"), ((date(2026, 1, 2), Decimal("1.50")), (None, Decimal("2"))))
+    assert head.to_dict(1) == {"columns": ["d", "n"], "rows": [["2026-01-02", "1.50"]]}
+    json.dumps(head.to_dict(10))

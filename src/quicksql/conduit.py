@@ -59,6 +59,30 @@ def preview(conn: Any, relation: str, limit: int = 100) -> Preview:
     return Preview(tuple(rel.columns), tuple(rel.fetchall()))
 
 
+def landed_relation(project: Any, name: str) -> str | None:
+    """What cell ``name``'s landed output reads back as through DuckDB (its
+    sink's ``ref_expr``), or None for an effect-only cell, which lands nothing.
+    ``project`` is a compiled Project (untyped: extensions import this module,
+    and they may not import the compiler)."""
+    from .config import make_sink
+
+    sink = make_sink(project.cells[name].config, project.root, project.registries)
+    return sink.ref_expr(name) if sink.lands_output else None
+
+
+def read_landed(conn: Any, relation: str | None, limit: int = 100) -> Preview | None:
+    """The head of a landed output on ``conn``, or None when it can't be read
+    there: never landed, or its database isn't attached on ``conn``. Never the
+    sink's ``prepare()``: an ATTACH creates a missing database file or connects
+    to a server, so a database output reads only where a run attached it."""
+    if relation is None:
+        return None
+    try:
+        return preview(conn, relation, limit)
+    except duckdb.Error:
+        return None
+
+
 def duckdb_field_paths(columns: Sequence[str], types: Sequence[Any]) -> pl.DataFrame:
     """A relation's columns as a field-path frame, from DuckDBPyTypes
     (.id/.children), depth-first.
