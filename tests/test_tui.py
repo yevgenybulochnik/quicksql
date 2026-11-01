@@ -2125,6 +2125,94 @@ async def test_switch_mid_run_closes_the_old_session_only_after_the_run(
         assert old.conn is None  # the run's own exit closed it
 
 
+def _counting_engine(registries):
+    """A `gated` engine whose fetches block until `gate` is set, counting how
+    many run at once; returns (gate, reached, fetched, peak())."""
+    import threading
+
+    from quicksql.executors.base import EngineSession, Executor
+    from quicksql.registry import executor
+
+    gate, reached, lock = threading.Event(), threading.Event(), threading.Lock()
+    fetched: list[str] = []
+    active = [0, 0]  # now, peak
+
+    class GatedSession(EngineSession):
+        def execute(self, sql, *, scoped=True):
+            pass
+
+        def fetch(self, sql, *, scoped=True):
+            with lock:
+                fetched.append(sql)
+                active[0] += 1
+                active[1] = max(active)
+            try:
+                reached.set()
+                assert gate.wait(timeout=10)
+                return pl.DataFrame({"x": [1]})
+            finally:
+                with lock:
+                    active[0] -= 1
+
+    @executor("gated")
+    class GatedExecutor(Executor):
+        def open_session(self, config, ctx):
+            return GatedSession()
+
+    registries.add(GatedExecutor)
+    return gate, reached, fetched, lambda: active[1]
+
+
+GATED_TWO = "-- @engine: gated\n\n-- @cell a\nSELECT 1;\n\n-- @cell b\nSELECT 2;\n"
+
+
+async def test_a_new_run_waits_for_the_one_it_replaces_to_stop(tmp_path, registries) -> None:
+    """Two runs on one session at once share its connections across threads:
+    R while a run is under way cancels it after its current cell, and the
+    new run starts only once it has stopped."""
+    gate, reached, fetched, peak = _counting_engine(registries)
+    path = tmp_path / "base.qsql"
+    path.write_text(GATED_TWO)
+    app = QsqlApp(path=path, watch=False, registries=registries)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            await pilot.press("R")  # replace the run while its cell a is under way
+            await pilot.pause(0.3)  # time enough for a concurrent run to show itself
+        finally:
+            gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert peak() == 1
+        assert fetched == ["SELECT 1", "SELECT 1", "SELECT 2"]  # the first run stopped after a
+        assert app.results["a"].ok and app.results["b"].ok
+        assert app.running == set()
+
+
+async def test_a_notebook_switch_stops_the_old_notebooks_run(tmp_path, registries) -> None:
+    gate, reached, fetched, _ = _counting_engine(registries)
+    one = tmp_path / "one.qsql"
+    one.write_text(GATED_TWO)
+    two = tmp_path / "two.qsql"
+    two.write_text("-- @cell a\nSELECT 2 AS x;\n")
+    app = QsqlApp(path=one, watch=False, registries=registries)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("R")
+        while not reached.is_set():
+            await pilot.pause(0.05)
+        try:
+            app._load_notebook(two)
+        finally:
+            gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fetched == ["SELECT 1"]  # notebook one's b never ran
+
+
 async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
     tmp_path, monkeypatch
 ) -> None:
