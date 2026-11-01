@@ -259,6 +259,43 @@ def test_an_engine_without_a_catalog_has_no_context_to_drill(tmp_path, registrie
     assert node.child(contexts.row(0, named=True)) is None
 
 
+def test_a_postgres_catalog_target_hides_its_password_and_dedupes(tmp_path) -> None:
+    project = compile_text(
+        "/*@ catalog: { postgres: ['postgresql://u:s3cret@db/x', 'host=h password=pw'] } */\n"
+        "-- @cell a\n/*@ input: { postgres: 'postgresql://u:s3cret@db/x' } */\nSELECT 1;\n",
+        root=tmp_path,
+    )
+    contexts = project_root_node(project).load().filter(pl.col("kind") == "context")
+    # the first target is the cell's own context: shown once, as its context key
+    assert contexts.select("name", "detail").rows() == [
+        ("postgres:postgresql://u:***@db/x", ""),
+        ("postgres:host=h password=***", "@catalog"),
+    ]
+
+
+def test_a_postgres_catalog_target_expands_env_vars_like_an_input_dsn(
+    tmp_path, monkeypatch
+) -> None:
+    connected: list[str] = []
+
+    def connect(self, dsn):
+        connected.append(dsn)
+        return FakeCatalogPg()
+
+    monkeypatch.setattr(PostgresExecutor, "make_connection", connect)
+    monkeypatch.setenv("WAREHOUSE_DSN", "postgresql://u:pw@wh/db")
+    project = compile_text(
+        "/*@ catalog: { postgres: [$WAREHOUSE_DSN] } */\n-- @cell a\nSELECT 1 AS x;\n",
+        root=tmp_path,
+    )
+    node = project_root_node(project)
+    contexts = node.load().filter(pl.col("kind") == "context")
+    row = next(r for r in contexts.iter_rows(named=True) if r["detail"] == "@catalog")
+    assert row["name"] == "postgres:postgresql://u:***@wh/db"
+    node.child(row).load()
+    assert connected == ["postgresql://u:pw@wh/db"]
+
+
 def test_catalog_directive_is_global_only(tmp_path) -> None:
     from quicksql.errors import QsqlError
 
@@ -322,6 +359,18 @@ def test_duckdb_memory_context_not_browsable(tmp_path) -> None:
     node = DuckDBExecutor().context_node(None, tmp_path)
     assert node.child is None
     assert "memory" in node.load()["info"][0]
+
+
+def test_a_duckdb_context_named_memory_is_not_browsable_and_creates_no_file(tmp_path) -> None:
+    project = compile_text(
+        "/*@ input: { duckdb: ':memory:' } */\n-- @cell a\nSELECT 1 AS x;\n", root=tmp_path
+    )
+    node = project_root_node(project)
+    [row] = node.load().filter(pl.col("kind") == "context").iter_rows(named=True)
+    context = node.child(row)
+    assert context.child is None
+    assert "memory" in context.load()["info"][0]
+    assert list(tmp_path.iterdir()) == []  # not a database file named ':memory:'
 
 
 def test_bigquery_catalog_chain(monkeypatch) -> None:
