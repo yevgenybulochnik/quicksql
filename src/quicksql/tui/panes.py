@@ -99,7 +99,8 @@ class SheetTable:
         span = ""
         if len(cols) > self.MAX_COLS:
             span = f" · cols {start + 1}-{start + len(window)}/{len(cols)}"
-        return f"{sheet.title} · {sheet.frame.height}x{len(cols)}{picked}{span}"
+        only = f" · first {sheet.sample} rows only" if sheet.sample else ""
+        return f"{sheet.title} · {sheet.frame.height}x{len(cols)}{picked}{span}{only}"
 
     def _restyle_selection(
         self, sheet: Sheet, prev_selected: frozenset[int], col0: str, cap: int | None

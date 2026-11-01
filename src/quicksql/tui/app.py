@@ -401,7 +401,12 @@ class QsqlApp(App):
         self.data.refresh()
 
     def _preview_sheet(self, name: str) -> Sheet:
-        return Sheet(self._preview_frame(name), title=name)
+        """A cell's preview as a sheet. A full one may be just the head of its
+        output, and says so, as does every sheet sorted, filtered or counted
+        from it."""
+        frame = self._preview_frame(name)
+        sample = frame.height if frame.height >= self.PREVIEW_ROWS else None
+        return Sheet(frame, title=name, sample=sample)
 
     def _preview_frame(self, name: str) -> pl.DataFrame:
         return preview_frame(self.project, self.results.get(name), name, self._catalog_connect)

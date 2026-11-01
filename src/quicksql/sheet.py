@@ -22,6 +22,9 @@ class Sheet:
     # opaque catalog payload (never invoked here): replace()-based ops carry
     # it, derived sheets (freq/describe) drop it
     drill: Any = None
+    # the frame is only the first `sample` rows of a larger output (the TUI's
+    # preview); every sheet computed from it carries that on
+    sample: int | None = None
 
     @property
     def columns(self) -> list[str]:
@@ -77,10 +80,10 @@ class Sheet:
             .with_columns((pl.col("count") / self.frame.height).alias("share"))
             .sort("count", descending=True)
         )
-        return Sheet(frame=frame, title=f"freq({col})")
+        return Sheet(frame=frame, title=f"freq({col})", sample=self.sample)
 
     def describe(self) -> Sheet:
-        return Sheet(frame=self.frame.describe(), title=f"describe({self.title})")
+        return Sheet(frame=self.frame.describe(), title=f"describe({self.title})", sample=self.sample)
 
     def filtered(self, pattern: str) -> Sheet:
         if not pattern:
