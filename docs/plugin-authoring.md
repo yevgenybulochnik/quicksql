@@ -36,9 +36,9 @@ class RowLimit(Plugin):
 
 ## Config fields
 
-- Field names (or their pydantic alias) become directive keys. Two plugins may not
-  claim the same key — registration fails fast rather than letting pydantic silently
-  shadow one of them.
+- Field names (or their pydantic alias) become directive keys. Two plugins in one
+  notebook's registries may not claim the same key — adding the second fails fast
+  rather than letting pydantic silently shadow one of them.
 - `qfield(default, merge=...)` sets how layers combine: `Merge.OVERRIDE` (default),
   `Merge.DEEP` (dict merge), `Merge.EXTEND` (list concat).
 - `qfield(..., affects_results=False)` keeps a field out of the cell's fingerprint, for a
@@ -47,6 +47,9 @@ class RowLimit(Plugin):
   alone. Fields default to `affects_results=True`, and so does a plain pydantic field.
 - Read your value from `cell.config.<field>` (cell scope) or `ctx.config.<field>`
   (global scope) — validators have already run.
+- A validator that needs the notebook's registries (to check an engine or sink name)
+  takes pydantic's `info: ValidationInfo` and reads `config.registries_of(info)`; see
+  the builtin `Engine`/`Output` validators.
 
 ## The run chain
 
@@ -136,7 +139,9 @@ the runtime order is registry state, and this makes it readable.
 
 - `@executor("name")` — run cells on a new backend (`executors/base.py`). An executor
   names its context with `context_key(config)` (engine + connection target) and
-  connects with `open_session(config, ctx) -> EngineSession`. The runner keeps one
+  connects with `open_session(config, ctx) -> EngineSession`. It reads its
+  `input.<name>` directive with `self.input_spec(config)`, which expands a bare string
+  to `{input_shorthand: value}` (`path` unless the executor says otherwise). The runner keeps one
   session per context, shared by its cells, and drives it through the cell protocol
   (`runner.execute_cell`), so an executor never sees a cell: setup statements go to
   `execute(sql)`, and the terminal statement to `fetch(sql)` (rows as a Polars frame or
@@ -158,5 +163,33 @@ the runtime order is registry state, and this makes it readable.
 
 ## Loading
 
+The decorators (`@plugin`, `@executor`, `@sink`, `@source_reader`) only mark a class;
+nothing registers by being imported. Each notebook gets its own registries
+(`quicksql.bootstrap.registries_for`): the builtins, then every decorated class its
+plugin modules *define*, in definition order:
+
+- a `quicksqlrc.py` next to the notebook file loads automatically;
 - `quicksql run --plugins my_plugins` (dotted module) or `--plugins ./my_plugins.py`
-- a `quicksqlrc.py` next to the notebook file loads automatically
+  adds a module, after the rc.
+
+So two notebooks in one process (the TUI, the LSP) never see each other's plugins,
+and two rc files may each define a plugin of the same name. A class a module imports
+(rather than defines) isn't registered from it, and a decorated class's undecorated
+subclass isn't either.
+
+A `.py` plugin file is keyed on its path and content: edit `quicksqlrc.py` and the
+TUI's next recompile (or `watch`'s next save) loads the new version, no restart. It
+runs from the file's current bytes, never a `__pycache__` entry. A file that fails to
+run isn't cached, so fixing it is enough. Each edited version stays in `sys.modules`
+for the life of the process.
+
+From Python, build registries with `quicksql.bootstrap` and pass them on:
+`bootstrap.compile_file(path)` compiles with the notebook's own registries, and
+`builtin_registries().add(MyPlugin, MySink)` gives you a set to pass as
+`registries=` to `compile_text`/`compile_file`. The compiled `Project` carries its
+registries, so running, watching and browsing it need nothing else. The core
+`quicksql.compiler.compile_text`/`compile_file` take `registries=` and have no default.
+
+`Project.overrides` holds the run overrides (`--set`, `QUICKSQL_*`) the project was
+compiled with, for an `after_compile` hook that wants them; quicksql itself doesn't
+read them back.
