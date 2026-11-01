@@ -1,11 +1,13 @@
 """The TUI's runs: a notebook's cells run off the UI thread on its RunSession.
 
 `RunController` owns the session, what the last runs left (``results``) and
-what's still pending (``running``). Each run is tagged with a generation,
-bumped on the UI thread when it starts: events and results from an older one
-come from a replaced run that is still draining, and are logged but never
-shown. Everything that touches the screen goes through the app's ``run_*``
-hooks, on the UI thread.
+what's still pending (``running``). One run at a time uses a session: a new
+run (or a notebook switch) cancels the one under way, which stops after its
+current cell, and the new run's thread waits for it. Each run is tagged with a
+generation, bumped on the UI thread when it starts: events and results from an
+older one come from a replaced run, and are logged but never shown.
+Everything that touches the screen goes through the app's ``run_*`` hooks, on
+the UI thread.
 """
 
 from __future__ import annotations
@@ -38,16 +40,20 @@ class RunController:
         # Closing a DuckDB connection under another thread's query risks a crash.
         self._session_lock = threading.Lock()
         self._session_runs: dict[RunSession, int] = {}
+        self._run_lock = threading.Lock()  # held by the one run using a session
+        self._cancel = threading.Event()  # the latest run's; set when it's replaced
 
     def reset(self) -> None:
         """A notebook switch: a fresh session, no results, and an in-flight run
-        of the old notebook must not paint the new one."""
+        of the old notebook stops after its current cell and paints nothing."""
+        self._cancel.set()
         self._replace_session()
         self.gen += 1
         self.results = {}
         self.running = set()
 
     def close(self) -> None:
+        self._cancel.set()
         self.session.close()
 
     def start(
@@ -57,16 +63,21 @@ class RunController:
         path: Path,
         project: Project | None = None,
     ) -> None:
-        """Bump the run generation (on the UI thread) and hand off to a thread
-        worker. `exclusive` only *flags* the old worker cancelled — a blocking
-        run_project keeps draining events, so the generation tag is what keeps
-        a replaced run from repainting the table. A save passes the project it
-        just compiled, so the run doesn't compile it again."""
+        """Bump the run generation (on the UI thread), cancel the run under way
+        and hand off to a thread worker, which starts once that run has
+        stopped. A save passes the project it just compiled, so the run
+        doesn't compile it again."""
         self.gen += 1
+        self._cancel.set()
+        self._cancel = threading.Event()
         # bound now: a notebook switch before the thread starts must not
         # redirect this run to the new notebook or its session
-        work = partial(self._run, select, closure, self.gen, path, self.session, project)
-        self.app.run_worker(work, thread=True, exclusive=True, group="run")
+        work = partial(
+            self._run, select, closure, self.gen, path, self.session, project, self._cancel
+        )
+        # not `exclusive`: Textual would only flag the old thread cancelled,
+        # and the run lock already keeps the runs apart
+        self.app.run_worker(work, thread=True, group="run")
 
     def _run(
         self,
@@ -76,9 +87,12 @@ class RunController:
         path: Path,
         session: RunSession,
         project: Project | None,
+        cancel: threading.Event,
     ) -> None:
         call = self.app.call_from_thread
-        with self._session_in_use(session):
+        with self._session_in_use(session), self._run_lock:
+            if cancel.is_set():
+                return  # replaced while it waited: the newer run does the work
             if project is None:
                 try:
                     project = self.app._compile(path)
@@ -94,6 +108,7 @@ class RunController:
                     closure=closure,
                     session=session,
                     on_event=lambda e: call(self.on_event, gen, e),
+                    cancel=cancel.is_set,
                 )
             except Exception:  # never leave cells stuck at "…" on a runner crash
                 call(self.app.log_line, f"run failed:\n{traceback.format_exc()}")
