@@ -10,15 +10,14 @@ import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from ..config import input_spec
 from ..errors import ExecutorError
 from ..models import RunContext
 from ..registry import executor
-from .base import DbApiSession, EngineSession, Executor
+from .base import DbApiSession, EngineSession, Executor, engine_input
 
 
 def _dsn(config: Any) -> str | None:
-    dsn = input_spec(config, "postgres").get("dsn")
+    dsn = engine_input(config, "postgres", PostgresExecutor.input_shorthand).get("dsn")
     return os.path.expandvars(dsn) if dsn else None
 
 

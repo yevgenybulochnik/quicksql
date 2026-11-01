@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from quicksql.compiler import compile_file
+from quicksql.bootstrap import compile_file
 from quicksql.runner import RunSession
 from quicksql.watcher import plan_rerun, run_changed, touches, watch_events
 

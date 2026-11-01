@@ -1,7 +1,15 @@
 import pytest
 
+from quicksql import sources
+from quicksql.bootstrap import builtin_registries
 from quicksql.errors import ConfigError
-from quicksql.sources import reader_for, sql_literal
+from quicksql.sources import sql_literal
+
+READERS = builtin_registries().readers
+
+
+def reader_for(path, type_=None):
+    return sources.reader_for(path, type_, READERS)
 
 
 def test_reader_inferred_from_extension() -> None:

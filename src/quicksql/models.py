@@ -187,6 +187,7 @@ class RunContext:
     ext_cache: set[str] = field(default_factory=set)
     session: Any = None
     on_event: Any = None  # Callable[[RunEvent], None] | None — set by run_project
+    registries: Any = None  # the project's Registries — set by run_project
 
     def emit(
         self,

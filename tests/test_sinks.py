@@ -3,7 +3,9 @@ import pytest
 
 from quicksql.errors import ConfigError, SinkError
 from quicksql.models import RenderedCell
-from quicksql.registry import SINKS
+from quicksql.bootstrap import builtin_registries
+
+SINKS = builtin_registries().sinks  # read-only here: the builtin sink classes
 
 
 def _cell(name: str) -> RenderedCell:
@@ -51,7 +53,7 @@ def test_parquet_sink_lands_hugeint_as_decimal_not_double(conn, tmp_path) -> Non
 
 
 def test_parquet_sink_hugeint_overflow_fails_loudly(tmp_path) -> None:
-    from quicksql.compiler import compile_text
+    from quicksql.bootstrap import compile_text
 
     project = compile_text(
         "-- @cell too_big\nSELECT 170141183460469231731687303715884105727::HUGEINT AS h;",

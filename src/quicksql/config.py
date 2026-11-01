@@ -4,7 +4,9 @@
 GlobalConfig / CellConfig via multi-inheritance ``create_model``, cached on the
 tuple of Config classes composed. Raw directive dicts merge highest-priority
 last (global -> cell -> run overrides), honoring each field's merge strategy,
-then validate against the composed model.
+then validate against the composed model. Everything takes the notebook's
+registries explicitly; validators reach them through pydantic's validation
+context (``info.context["registries"]``).
 """
 
 from __future__ import annotations
@@ -17,10 +19,10 @@ from pydantic import BaseModel, ValidationError, create_model
 from .errors import ConfigError
 from .models import Merge, Scope
 from .plugins.base import EmptyConfig
-from .registry import EXECUTORS, PLUGINS, FieldEntry, PluginRegistry
+from .registry import FieldEntry, PluginRegistry, Registries
 
 
-def build_models(plugins: PluginRegistry = PLUGINS) -> tuple[type[BaseModel], type[BaseModel]]:
+def build_models(plugins: PluginRegistry) -> tuple[type[BaseModel], type[BaseModel]]:
     return (
         _compose("GlobalConfig", plugins, (Scope.GLOBAL, Scope.BOTH)),
         _compose("CellConfig", plugins, (Scope.CELL, Scope.BOTH)),
@@ -91,7 +93,7 @@ def _merge_value(merge: Merge, base: Any, new: Any) -> Any:
     return new
 
 
-def combine(layers: list[dict[str, Any]], plugins: PluginRegistry = PLUGINS) -> dict[str, Any]:
+def combine(layers: list[dict[str, Any]], plugins: PluginRegistry) -> dict[str, Any]:
     fmap = plugins.field_map()
     merged: dict[str, Any] = {}
     for layer in layers:
@@ -104,7 +106,7 @@ def combine(layers: list[dict[str, Any]], plugins: PluginRegistry = PLUGINS) -> 
 
 
 def check_scope(
-    raw: dict[str, Any], scope: Scope, plugins: PluginRegistry = PLUGINS, where: str = ""
+    raw: dict[str, Any], scope: Scope, plugins: PluginRegistry, where: str = ""
 ) -> None:
     fmap = plugins.field_map()
     label = "global" if scope is Scope.GLOBAL else "cell"
@@ -132,9 +134,11 @@ def _filter_overrides(
     return out
 
 
-def _validate(model: type[BaseModel], data: dict[str, Any], where: str) -> BaseModel:
+def _validate(
+    model: type[BaseModel], data: dict[str, Any], where: str, registries: Registries
+) -> BaseModel:
     try:
-        return model.model_validate(data)
+        return model.model_validate(data, context={"registries": registries})
     except ValidationError as exc:
         msgs = "; ".join(
             f"@{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()
@@ -145,21 +149,25 @@ def _validate(model: type[BaseModel], data: dict[str, Any], where: str) -> BaseM
 def resolve_global(
     raw: dict[str, Any],
     overrides: dict[str, Any] | None = None,
-    plugins: PluginRegistry = PLUGINS,
+    *,
+    registries: Registries,
 ) -> BaseModel:
+    plugins = registries.plugins
     global_model, _ = build_models(plugins)
     check_scope(raw, Scope.GLOBAL, plugins)
     ov = _filter_overrides(overrides or {}, Scope.GLOBAL, plugins)
-    return _validate(global_model, combine([raw, ov], plugins), "global header")
+    return _validate(global_model, combine([raw, ov], plugins), "global header", registries)
 
 
 def resolve_cell(
     global_raw: dict[str, Any],
     cell_raw: dict[str, Any],
     overrides: dict[str, Any] | None = None,
-    plugins: PluginRegistry = PLUGINS,
+    *,
+    registries: Registries,
     name: str = "cell",
 ) -> BaseModel:
+    plugins = registries.plugins
     _, cell_model = build_models(plugins)
     fmap = plugins.field_map()
     inherited = {
@@ -169,26 +177,22 @@ def resolve_cell(
     }
     check_scope(cell_raw, Scope.CELL, plugins, where=f" (cell {name!r})")
     ov = _filter_overrides(overrides or {}, Scope.CELL, plugins)
-    return _validate(cell_model, combine([inherited, cell_raw, ov], plugins), f"cell {name!r}")
+    return _validate(
+        cell_model, combine([inherited, cell_raw, ov], plugins), f"cell {name!r}", registries
+    )
 
 
-def resolve_engine(cfg: BaseModel) -> str:
+def resolve_engine(cfg: BaseModel, plugins: PluginRegistry) -> str:
     """First-result decision: Engine answers for explicit @engine, Input infers
     from its own key; core default is duckdb."""
-    return PLUGINS.first_result("resolve_engine", cfg) or "duckdb"
+    return plugins.first_result("resolve_engine", cfg) or "duckdb"
 
 
-def input_spec(config: Any, engine: str) -> dict[str, Any]:
-    """The ``input.<engine>`` directive as a dict, ``{}`` when absent. A bare
-    string is the engine's shorthand for its main key, the executor's
-    ``input_shorthand``: ``input: {sqlite: x.db}`` is ``{path: x.db}``."""
-    spec = (getattr(config, "input", None) or {}).get(engine)
-    if spec is None:
-        return {}
-    if isinstance(spec, dict):
-        return spec
-    return {EXECUTORS.get(engine).input_shorthand: spec}
+def resolve_sink_type(cfg: BaseModel, plugins: PluginRegistry) -> str:
+    return plugins.first_result("resolve_sink", cfg) or "parquet"
 
 
-def resolve_sink_type(cfg: BaseModel) -> str:
-    return PLUGINS.first_result("resolve_sink", cfg) or "parquet"
+def registries_of(info: Any) -> Registries | None:
+    """The notebook's registries inside a validator (``info`` is pydantic's
+    ValidationInfo); None when a model is validated outside a compile."""
+    return (info.context or {}).get("registries")

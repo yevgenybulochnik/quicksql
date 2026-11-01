@@ -17,11 +17,17 @@ from quicksql.catalog import (
     sink_output_node,
     sqlite_context_node,
 )
-from quicksql.compiler import compile_text
-from quicksql.config import resolve_cell
+from quicksql import config
+from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.executors.bigquery_exec import BigQueryExecutor
 from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.sinks import make_sink
+
+BUILTINS = builtin_registries()  # read-only here
+
+
+def resolve_cell(global_raw, cell_raw):
+    return config.resolve_cell(global_raw, cell_raw, registries=BUILTINS)
 
 FIELD_PATH_COLUMNS = ["column", "field_path", "type", "mode", "description"]
 
@@ -307,7 +313,7 @@ def test_bigquery_catalog_chain(monkeypatch) -> None:
         return FakeClient()
 
     monkeypatch.setattr(BigQueryExecutor, "make_client", make)
-    node = bigquery_context_node({"project": "p"})
+    node = bigquery_context_node({"project": "p"}, BUILTINS)
     datasets = node.load()
     assert datasets["dataset"].to_list() == ["analytics", "raw"]
     tables_node = node.child(datasets.row(0, named=True))
@@ -359,7 +365,7 @@ def test_postgres_catalog_chain(monkeypatch) -> None:
         return created[-1]
 
     monkeypatch.setattr(PostgresExecutor, "make_connection", make)
-    node = postgres_context_node("postgresql://x")
+    node = postgres_context_node("postgresql://x", BUILTINS)
     schemas = node.load()
     assert schemas["schema"].to_list() == ["public", "analytics"]
     tables_node = node.child(schemas.row(0, named=True))
@@ -382,7 +388,7 @@ def test_sink_output_node_reads_parquet_struct(tmp_path, con) -> None:
         f"COPY (SELECT 1 AS id, {{'name': 'x'}} AS event)"
         f" TO '{tmp_path}/data/c.parquet' (FORMAT PARQUET)"
     )
-    node = sink_output_node("c", resolve_cell({}, {}), tmp_path)
+    node = sink_output_node("c", resolve_cell({}, {}), tmp_path, BUILTINS)
     frame = node.load()
     assert frame["field_path"].to_list() == ["id", "event", "event.name"]
     assert node.child is None
@@ -397,7 +403,7 @@ def test_postgres_catalog_chain_live(pg_dsn) -> None:
         con.execute("CREATE TABLE catalog_live (id int NOT NULL, email text)")
         con.execute("COMMENT ON COLUMN catalog_live.id IS 'primary key'")
     try:
-        node = postgres_context_node(pg_dsn)
+        node = postgres_context_node(pg_dsn, BUILTINS)
         assert "public" in node.load()["schema"].to_list()
         tables_node = node.child({"schema": "public"})
         assert "catalog_live" in tables_node.load()["table"].to_list()
@@ -473,7 +479,7 @@ def test_node_cache_keys_disambiguate_connections(monkeypatch) -> None:
     # titles collide (e.g. leaf "schema.table" on both servers)
     monkeypatch.setattr(PostgresExecutor, "make_connection", lambda self, dsn: FakeCatalogPg())
     def pg_leaf(dsn: str) -> CatalogNode:
-        node = postgres_context_node(dsn)
+        node = postgres_context_node(dsn, BUILTINS)
         tables_node = node.child(node.load().row(0, named=True))
         return tables_node.child(tables_node.load().row(0, named=True))
 
@@ -489,7 +495,7 @@ def test_node_cache_keys_disambiguate_connections(monkeypatch) -> None:
     monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
 
     def bq_leaf(project: str) -> CatalogNode:
-        node = bigquery_context_node({"project": project})
+        node = bigquery_context_node({"project": project}, BUILTINS)
         tables_node = node.child(node.load().row(0, named=True))
         return tables_node.child(tables_node.load().row(0, named=True))
 
@@ -500,14 +506,14 @@ def test_sink_output_node_duckdb_sink_needs_the_conduit_cursor(tmp_path) -> None
     cfg = resolve_cell({"output": {"type": "duckdb", "path": "warehouse.db"}}, {})
     conduit = duckdb.connect()
     try:
-        sink = make_sink(cfg, tmp_path)
+        sink = make_sink(cfg, tmp_path, BUILTINS)
         sink.prepare(conduit)
         conduit.execute(f"CREATE TABLE {sink.ref_expr('c')} AS SELECT {{'a': 1}} AS s")
         # a throwaway connection cannot re-ATTACH the conduit-held file...
         with pytest.raises(duckdb.Error, match="[Uu]nique file handle"):
-            sink_output_node("c", cfg, tmp_path).load()
+            sink_output_node("c", cfg, tmp_path, BUILTINS).load()
         # ...but a cursor of the conduit sees the existing ATTACH
-        node = sink_output_node("c", cfg, tmp_path, connect=conduit.cursor)
+        node = sink_output_node("c", cfg, tmp_path, BUILTINS, connect=conduit.cursor)
         assert node.load()["field_path"].to_list() == ["s", "s.a"]
     finally:
         conduit.close()

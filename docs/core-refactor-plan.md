@@ -58,7 +58,13 @@ plan (phase dependencies, Phase 3/4/7/8 design corrections, Phase 5 made optiona
   watch/TUI reruns, config edits included; `.quicksql/state.json` and `quicksql status`;
   one closing line per watch cycle; one compile per TUI save and at `watch` startup
   (`6b51e2e`, `37b8b98`).
-- Next — Phase 4. The agent-facing CLI beyond `run --json` is planned in
+- Done — state files moved to `~/.quicksql/state/`, one per notebook (2026-11-01, PR #4).
+- Done — Phase 4 (2026-11-01, branch `refactor/phase4-registries`): a registry per
+  notebook; decorators mark, `bootstrap.py` lists the builtins and loads rc/`--plugins`
+  modules into the notebook's own registries; the TUI loads the rc at startup and on `o`;
+  an edited rc reloads; the package `__init__`s are lazy and the core's ignore list is
+  empty.
+- Next — Phase 6. The agent-facing CLI beyond `run --json` is planned in
   `docs/agent-cli-plan.md`.
 
 ## Context
@@ -96,9 +102,10 @@ below lands in place, one phase at a time, with the existing test suite as the s
 | Per-cell `input.duckdb` is silently ignored | reproduced: ran in `:memory:` | 3 (fixed) |
 | Dropped Postgres connections and expired BigQuery sessions go undetected | read | 3 (fixed) |
 | `config.input` is hand-parsed in 12 places | grep | 3 (fixed), 5 |
-| Process-global registries: rc plugins leak across notebooks; TUI `o` skips the new rc | read | 4 |
-| An edited rc never reloads in a long-lived TUI/LSP: the loader skips names already in `sys.modules` (2026-10-30) | read: `cli._load_plugin_module` | 4 |
-| `executors/`, `sinks/` and `plugins/__init__.py` import every implementation, so importing a contract (`plugins.base`) loads all builtins (2026-10-30) | read | 4, 6 |
+| Process-global registries: rc plugins leak across notebooks; TUI `o` skips the new rc | read | 4 (fixed) |
+| An edited rc never reloads in a long-lived TUI/LSP: the loader skips names already in `sys.modules` (2026-10-30) | read: `cli._load_plugin_module` | 4 (fixed) |
+| An rc edited within the same second at the same size ran its stale `__pycache__` bytecode once the loader keyed modules on content (2026-11-01) | reproduced by the Phase 4 reload test | 4 (fixed) |
+| `executors/`, `sinks/` and `plugins/__init__.py` import every implementation, so importing a contract (`plugins.base`) loads all builtins (2026-10-30) | read | 4 (fixed) |
 | Unregistering the Input plugin breaks every compile (`AttributeError`) | reproduced | 5 |
 | Validator names must be unique across all plugins (configs composed by inheritance) | read | 5 |
 | Engine names hard-coded in `catalog.py` (12), `lsp/schema.py` (7), the LSP dialect map | grep | 6 |
@@ -263,7 +270,38 @@ As planned:
   reopened and its upstream re-materialized.
 - Breaking: the executor contract. Update `docs/plugin-authoring.md`.
 
-**Phase 4 — a registry per notebook (L).**
+**Phase 4 — a registry per notebook (L; done).** As built, where it differs from the
+plan below:
+- Done: `registry.Registries` (plugins, executors, sinks, readers) with `add(*classes)`,
+  `copy()` and `Registry.remove`. Adding the class a name already holds is a no-op;
+  another class under that name is a duplicate. `registry.marked(module)` collects the
+  decorated classes a module *defines*, in definition order.
+- Done: `bootstrap.py` is the composition root: `BUILTIN_MODULES` (registration order
+  unchanged from the old import order), `builtin_registries()` (a copy of a set built
+  once), `load_plugin_module` and `registries_for(notebook, plugins)`, plus app-level
+  `compile_file`/`compile_text` that supply registries. The core's
+  `compiler.compile_text/compile_file` take `registries=` with no default, so the
+  compiler imports no composition root.
+- Done: the loader keys a `.py` module on its path and content, and runs it from the
+  hashed bytes: Python's `__pycache__` is keyed on mtime and size, which a same-second
+  edit can keep, and it served the old rc (found by the reload test). A module that
+  fails to run isn't cached.
+- Done: validators reach the registries through pydantic's validation context
+  (`config.registries_of(info)`). `config.input_spec` became `Executor.input_spec`;
+  the conduit reads duckdb's input with `executors.base.engine_input`.
+- Done: `RunContext.registries`; the catalog's node builders, `make_sink`,
+  `reader_for`, `render_sql` and `watcher.should_rerun` take registries. `QsqlApp` and
+  the LSP's `Analyzer` take an optional `registries` (an embedding app, a test); the
+  LSP compiles with the builtins until Phase 7.
+- Done: `Project.overrides` stays, documented for `after_compile` hooks.
+- Done: the package `__init__`s re-export only their base module, so the 11 Phase 4
+  entries left import-linter's ignore list, and `duckdb_exec` imports `ConduitSession`
+  directly (Phase 3's debt). Kitchen-sink still compiles in ~6 ms through
+  `bootstrap.compile_file`, registries built per compile included.
+- Tests: `conftest.py`'s `registries` and `add_plugin` fixtures replace the
+  snapshot/restore fixture; `tests/test_bootstrap.py` holds the plan's tests.
+
+As planned:
 - A `Registries` object (plugins, executors, sinks, readers) per notebook, passed
   explicitly through compile, render and config. `Project` carries its `Registries`, so
   the runner, sinks, watcher, TUI and LSP get them from the project. This finishes the

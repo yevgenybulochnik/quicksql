@@ -14,7 +14,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from quicksql.compiler import compile_file
+from quicksql.bootstrap import compile_file
 from quicksql.errors import QsqlError
 from quicksql.parser import parse_file
 from quicksql.runner import run_project

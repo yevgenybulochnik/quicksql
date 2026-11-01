@@ -311,8 +311,11 @@ One demonstrator ships in-tree and needs zero core edits: `emit_sql` (`plugins/e
 a `run` wrapper that writes every rendered cell to `render_dir` before it executes.
 
 Third-party plugins load via `--plugins mod.name` / `--plugins path/to/file.py`, or a
-`quicksqlrc.py` sitting next to the notebook (auto-loaded). `quicksql explain` prints the
-resulting chain and which plugins participate in each hook:
+`quicksqlrc.py` sitting next to the notebook (auto-loaded, by the CLI, `watch` and the
+TUI). They load into that notebook's own registries: another notebook in the same TUI
+never sees them, and an edited `quicksqlrc.py` reloads on the next recompile, no restart.
+The language server doesn't load them yet. `quicksql explain` prints the resulting chain
+and which plugins participate in each hook:
 
 ```console
 $ uv run quicksql explain

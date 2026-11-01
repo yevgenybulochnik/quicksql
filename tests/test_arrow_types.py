@@ -14,7 +14,7 @@ import pytest
 
 pa = pytest.importorskip("pyarrow")
 
-from quicksql.compiler import compile_text
+from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.executors.base import register_frame
 from quicksql.executors.bigquery_exec import BigQueryExecutor
 from quicksql.models import RunContext
@@ -23,7 +23,7 @@ from quicksql.models import RunContext
 @pytest.fixture
 def ctx(tmp_path):
     conn = duckdb.connect()
-    yield RunContext(conn=conn, root=tmp_path)
+    yield RunContext(conn=conn, root=tmp_path, registries=builtin_registries())
     conn.close()
 
 

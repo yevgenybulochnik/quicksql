@@ -16,13 +16,15 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ErrorLevel, ParseError
 
-from ..compiler import compile_text
+from ..bootstrap import compile_text
+from ..compiler import Project
 from ..errors import ConfigErrorGroup, CycleError, ParseError as QsqlParseError, QsqlError
 from ..executors.base import statement_spans
 from .googlesql import find_execute_query, parse_errors
 from . import vocab
 from .mask import Opaque, mask_jinja
 from .schema import SchemaCache, columns_for, relation_names
+from ..registry import Registries
 
 # quicksql engine names line up with sqlglot dialect names
 _DIALECT = {"duckdb": "duckdb", "postgres": "postgres", "sqlite": "sqlite", "bigquery": "bigquery"}
@@ -50,9 +52,16 @@ class Completion:
 
 @dataclass
 class Analyzer:
-    """Holds the schema cache across requests (remote introspection is slow)."""
+    """Holds the schema cache across requests (remote introspection is slow).
+
+    Compiles with the builtin registries, or ``registries`` when given; no
+    quicksqlrc.py loads (an rc is project code: Phase 7 gates it on trust)."""
 
     cache: SchemaCache = field(default_factory=SchemaCache)
+    registries: Registries | None = None
+
+    def _compile(self, text: str, root: Path | str) -> Project:
+        return compile_text(text, Path(root), registries=self.registries)
 
     @cached_property
     def _gsql_bin(self) -> str | None:
@@ -63,7 +72,7 @@ class Analyzer:
 
     def diagnostics(self, text: str, root: Path | str = ".") -> list[Diagnostic]:
         try:
-            project = compile_text(text, Path(root))
+            project = self._compile(text, root)
         except ConfigErrorGroup as group:
             return [_line_diag(text, e.line, e.message) for e in group.errors]
         except QsqlParseError as exc:
@@ -84,7 +93,7 @@ class Analyzer:
         self, text: str, root: Path | str, line: int, character: int
     ) -> list[Completion]:
         try:
-            project = compile_text(text, Path(root))
+            project = self._compile(text, root)
         except QsqlError:
             project = None  # can't scope-resolve, but keywords still help
         lines = text.splitlines()
@@ -106,7 +115,7 @@ class Analyzer:
             tbl = _TABLE_POS.search(prefix)
             if tbl is not None:
                 segments = tbl.group(1).split(".")[:-1]  # done segments only
-                names = relation_names(cell, segments, self.cache)
+                names = relation_names(cell, segments, project.registries, self.cache)
                 if names:
                     return [Completion(n, "table", detail) for n, detail in names]
 
@@ -143,7 +152,7 @@ class Analyzer:
     ) -> tuple[int, int] | None:
         """`ref('x')` under the cursor -> the (line, 0) where cell x is defined."""
         try:
-            project = compile_text(text, Path(root))
+            project = self._compile(text, root)
         except QsqlError:
             return None
         lines = text.splitlines()
@@ -159,7 +168,7 @@ class Analyzer:
     def document_symbols(self, text: str, root: Path | str) -> list[tuple[str, int, int, str]]:
         """(cell name, start_line, end_line, engine) for the outline, 0-indexed."""
         try:
-            project = compile_text(text, Path(root))
+            project = self._compile(text, root)
         except QsqlError:
             return []
         return [

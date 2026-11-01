@@ -25,8 +25,8 @@ from .conduit import ConduitSession, conduit_target
 from .errors import ExecutorError, QsqlError, describe
 from .executors.base import EngineSession, SessionLost, result_view
 from .models import RenderedCell, RunContext, RunEvent, RunResult, Status
-from .registry import EXECUTORS, PLUGINS, SINKS
-from .sinks import make_sink
+from .registry import Registries
+from .sinks.base import make_sink
 from .state import (
     CellState,
     Landed,
@@ -193,17 +193,17 @@ class StatementError(ExecutorError):
         super().__init__(f"statement {index} of {count}: {detail}" if count > 1 else detail)
 
 
-def _context_key(cell: RenderedCell) -> str:
-    return EXECUTORS.get(cell.engine).context_key(cell.config)
+def _context_key(cell: RenderedCell, registries: Registries) -> str:
+    return registries.executors.get(cell.engine).context_key(cell.config)
 
 
 def _context_session(cell: RenderedCell, ctx: RunContext) -> tuple[EngineSession, bool]:
     """The cell's context session, opened on the context's first cell and kept
     by the run session; without one, a private session the caller closes."""
-    executor = EXECUTORS.get(cell.engine)
+    executor = ctx.registries.executors.get(cell.engine)
     if ctx.session is None:
         return executor.open_session(cell.config, ctx), True
-    key = _context_key(cell)
+    key = _context_key(cell, ctx.registries)
     if key not in ctx.session.engine_sessions:
         ctx.session.engine_sessions[key] = executor.open_session(cell.config, ctx)
     return ctx.session.engine_sessions[key], False
@@ -220,9 +220,9 @@ def execute_cell(cell: RenderedCell, ctx: RunContext, land: bool = True) -> str:
     ``land=False`` stops after the temp: its landed output already stands.
     """
     session, private = _context_session(cell, ctx)
-    lands_output = SINKS.get(cell.sink_type).lands_output
+    lands_output = ctx.registries.sinks.get(cell.sink_type).lands_output
     scoped = cell.reffed_in_context or bool(cell.context_refs)
-    statements = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    statements = ctx.registries.executors.get(cell.engine).split_statements(cell.sql)
     *setup, final = statements
 
     def numbered(index: int, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -261,7 +261,7 @@ def _forget_context(project: Project, session: RunSession, key: str) -> None:
             gone.close()
     session.materialized -= {
         n for n in session.materialized
-        if n in project.cells and _context_key(project.cells[n]) == key
+        if n in project.cells and _context_key(project.cells[n], project.registries) == key
     }
 
 
@@ -294,7 +294,7 @@ def _retry_in_a_new_session(project: Project, cell: RenderedCell, ctx: RunContex
     """The engine rejected a statement because the context's session is gone.
     Nothing ran, so reopen the session, re-create the temps the cell reads,
     and run it once more; losing the new session too fails the cell."""
-    key = _context_key(cell)
+    key = _context_key(cell, project.registries)
     _forget_context(project, ctx.session, key)
     ctx.emit("cell_step", cell.name, f"{key} session lost: reopening")
     _restore_temps(project, cell, ctx)
@@ -307,10 +307,10 @@ def _blame_the_query(cell: RenderedCell, ctx: RunContext) -> None:
     (a bad cast) reads as the sink's and quotes the sink's SQL. Run the query
     alone: an error of its own is the cell's, numbered and quoting its SQL;
     none, and the sink's error stands."""
-    if cell.reffed_in_context or not SINKS.get(cell.sink_type).lands_output:
+    if cell.reffed_in_context or not ctx.registries.sinks.get(cell.sink_type).lands_output:
         return  # landed from a temp that already ran it, or nothing to land
     session, private = _context_session(cell, ctx)
-    statements = EXECUTORS.get(cell.engine).split_statements(cell.sql)
+    statements = ctx.registries.executors.get(cell.engine).split_statements(cell.sql)
     try:
         session.check(statements[-1])
     except Exception as exc:
@@ -320,10 +320,14 @@ def _blame_the_query(cell: RenderedCell, ctx: RunContext) -> None:
             session.close()
 
 
-def _drop_stale_temp(cell: RenderedCell, session: RunSession) -> None:
+def _drop_stale_temp(cell: RenderedCell, session: RunSession, registries: Registries) -> None:
     """A cell that didn't come out ok may have a temp left from an earlier
     run; drop it so nothing reads it stale."""
-    live = session.engine_sessions.get(_context_key(cell)) if cell.reffed_in_context else None
+    live = (
+        session.engine_sessions.get(_context_key(cell, registries))
+        if cell.reffed_in_context
+        else None
+    )
     if live is not None:
         with suppress(Exception):  # a dead session took its temps along
             live.drop(cell.name)
@@ -350,11 +354,11 @@ def base_runner(project: Project) -> Inner:
             # cell-declared extensions load via the Extensions plugin's
             # before_execute; sinks are core mechanism, so theirs load here
             ctx.emit("cell_step", cell.name, "preparing sinks")
-            sink = make_sink(cell.config, ctx.root)
+            sink = make_sink(cell.config, ctx.root, project.registries)
             for ext in sink.requires:
                 _load_ext_cached(ctx, ext, cell.name)
             for upstream in cell.depends_on:
-                up_sink = make_sink(project.cells[upstream].config, ctx.root)
+                up_sink = make_sink(project.cells[upstream].config, ctx.root, project.registries)
                 for ext in up_sink.requires:
                     _load_ext_cached(ctx, ext, cell.name)
                 up_sink.prepare(ctx.conn)
@@ -392,7 +396,7 @@ def base_runner(project: Project) -> Inner:
 
 def build_chain(project: Project) -> Inner:
     runner: Inner = base_runner(project)
-    for plug in reversed(PLUGINS.chain()):
+    for plug in reversed(project.registries.plugins.chain()):
         runner = _wrap(plug, runner)
     return runner
 
@@ -421,6 +425,7 @@ def run_project(
         ext_cache=session.loaded_extensions,
         session=session,
         on_event=on_event,
+        registries=project.registries,
     )
     chain = build_chain(project)
     session.load_state(project)
@@ -466,7 +471,7 @@ def run_project(
                 # any temp table it left is stale; forgetting it makes a later
                 # exact rerun (watch/TUI) re-include the cell
                 session.materialized.discard(name)
-                _drop_stale_temp(cell, session)
+                _drop_stale_temp(cell, session, project.registries)
             # a later exact rerun pulls the cell back in unless this says ok
             session.last_status[name] = result.status
             results.append(result)
@@ -534,7 +539,7 @@ def _skipped(name: str, roots: list[str]) -> RunResult:
 
 def _notify(ctx: RunContext, hook: str, call: Callable[[Any], None]) -> None:
     """Fire-and-forget lifecycle notifications: failures are logged, never fatal."""
-    for plug in PLUGINS.overriding(hook):
+    for plug in ctx.registries.plugins.overriding(hook):
         try:
             call(plug)
         except Exception:

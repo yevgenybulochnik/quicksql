@@ -2,18 +2,28 @@ import os
 
 import pytest
 
-from quicksql import registry
-from quicksql.bootstrap import load_builtins
+from quicksql.bootstrap import builtin_registries
 
 
-@pytest.fixture(autouse=True)
-def fresh_registries():
-    """Snapshot every registry so tests can register scratch plugins freely."""
-    load_builtins()
-    snaps = [(r, r.snapshot()) for r in registry.ALL_REGISTRIES]
-    yield
-    for reg, snap in snaps:
-        reg.restore(snap)
+@pytest.fixture
+def registries():
+    """This test's own registries: the builtins, to add scratch plugins to
+    (``registries.add(MyPlugin)``) and compile with (``registries=registries``).
+    Decorators only mark classes, so nothing leaks between tests."""
+    return builtin_registries()
+
+
+@pytest.fixture
+def add_plugin(registries):
+    """``@add_plugin`` on a scratch plugin class: ``@plugin``, then added to
+    this test's ``registries``."""
+    from quicksql.registry import plugin
+
+    def decorate(cls):
+        registries.add(plugin(cls))
+        return cls
+
+    return decorate
 
 
 @pytest.fixture(autouse=True)
@@ -73,8 +83,9 @@ def project_dir(tmp_path):
 
 
 @pytest.fixture
-def discard_sink():
-    """A third-party effect-only sink: lands_output = False, but not named 'none'."""
+def discard_sink(registries):
+    """A third-party effect-only sink: lands_output = False, but not named 'none'.
+    Added to the test's ``registries``."""
     from quicksql.registry import sink
     from quicksql.sinks.base import Sink
 
@@ -88,4 +99,5 @@ def discard_sink():
         def ref_expr(self, cell_name):
             return "nowhere"
 
+    registries.add(Discard)
     return Discard

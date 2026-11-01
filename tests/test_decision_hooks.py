@@ -2,19 +2,15 @@
 
 import pytest
 
-from quicksql.compiler import compile_file, compile_text
+from quicksql.bootstrap import compile_file, compile_text
 from quicksql.errors import ConfigError
 from quicksql.plugins.base import Plugin
-from quicksql.registry import PLUGINS, plugin
+from quicksql.registry import plugin
 from quicksql.runner import RunSession
 from quicksql.watcher import plan_rerun
 
 
-def _drop(name: str) -> None:
-    PLUGINS.restore({k: v for k, v in PLUGINS.snapshot().items() if k != name})
-
-
-def test_first_result_returns_highest_priority_answer() -> None:
+def test_first_result_returns_highest_priority_answer(registries) -> None:
     @plugin
     class Loud(Plugin):
         priority = -50
@@ -31,7 +27,9 @@ def test_first_result_returns_highest_priority_answer() -> None:
 
     from quicksql.config import resolve_cell, resolve_engine
 
-    assert resolve_engine(resolve_cell({}, {})) == "sqlite"
+    registries.add(Loud, Quiet)
+    cfg = resolve_cell({}, {}, registries=registries)
+    assert resolve_engine(cfg, registries.plugins) == "sqlite"
 
 
 def test_engine_resolution_owners_split(tmp_path) -> None:
@@ -47,24 +45,26 @@ def test_engine_resolution_owners_split(tmp_path) -> None:
     assert project.cells["fallback"].engine == "duckdb"
 
 
-def test_dropping_depends_on_plugin_removes_its_edges(tmp_path) -> None:
+def test_dropping_depends_on_plugin_removes_its_edges(tmp_path, registries) -> None:
     text = "-- @cell a\nSELECT 1;\n-- @cell b\n-- @depends_on: [a]\nSELECT 2;"
-    assert compile_text(text, root=tmp_path).cells["b"].depends_on == ["a"]
-    _drop("depends_on")
+    assert compile_text(text, root=tmp_path, registries=registries).cells["b"].depends_on == ["a"]
+    registries.plugins.remove("depends_on")
     with pytest.raises(ConfigError, match="unknown directive: @depends_on"):
-        compile_text(text, root=tmp_path)  # directive gone with the plugin
-    bare = compile_text("-- @cell a\nSELECT 1;\n-- @cell b\nSELECT 2;", root=tmp_path)
+        compile_text(text, root=tmp_path, registries=registries)  # directive gone with the plugin
+    bare = compile_text(
+        "-- @cell a\nSELECT 1;\n-- @cell b\nSELECT 2;", root=tmp_path, registries=registries
+    )
     assert bare.cells["b"].depends_on == []
 
 
-def test_dropping_autorun_plugin_defaults_to_rerun_everything(tmp_path) -> None:
+def test_dropping_autorun_plugin_defaults_to_rerun_everything(tmp_path, registries) -> None:
     f = tmp_path / "base.sql"
     f.write_text("-- @cell a\n-- @autorun: false\nSELECT 1;")
-    project = compile_file(f)
+    project = compile_file(f, registries=registries)
     assert plan_rerun(project, RunSession()) == []  # autorun:false filters it out
-    _drop("autorun")
+    registries.plugins.remove("autorun")
     f.write_text("-- @cell a\nSELECT 1;")
-    project = compile_file(f)
+    project = compile_file(f, registries=registries)
     assert plan_rerun(project, RunSession()) == ["a"]  # no plugin -> default: rerun
 
 
@@ -91,4 +91,4 @@ def test_extensions_plugin_loads_via_before_execute(tmp_path, monkeypatch) -> No
     project = compile_text("-- @cell a\n-- @extensions: [json]\nSELECT 1;", root=tmp_path)
     assert project.run()[0].ok
     assert "json" in loads
-    assert "extensions" in [p.name for p in PLUGINS.chain()]  # it joined the chain
+    assert "extensions" in [p.name for p in project.registries.plugins.chain()]  # it joined the chain

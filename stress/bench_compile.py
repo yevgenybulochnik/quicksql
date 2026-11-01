@@ -5,7 +5,7 @@ import statistics
 import time
 from pathlib import Path
 
-from quicksql.compiler import compile_file
+from quicksql.bootstrap import compile_file  # with the notebook's own registries, as the CLI and TUI compile
 
 NOTEBOOK = Path(__file__).resolve().parent.parent / "demo" / "kitchen-sink" / "kitchen-sink.qsql"
 WARMUP, RUNS = 5, 50

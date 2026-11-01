@@ -20,7 +20,7 @@ from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel
 
 from .errors import ConfigError, QsqlError, describe
-from .registry import PLUGINS
+from .registry import Registries
 from .sinks.base import Sink
 
 
@@ -45,6 +45,7 @@ class RenderContext:
     config: Any
     root: Path
     producers: Mapping[str, Producer]
+    registries: Registries  # the notebook's: e.g. source() picks its reader here
     context: str = ""
     supports_context_refs: bool = False
     edges: list[str] = field(default_factory=list)
@@ -109,7 +110,7 @@ def build_context(rctx: RenderContext) -> dict[str, Any]:
     """Merge plugin-contributed globals under the collision guard."""
     context: dict[str, Any] = {"config": rctx.config}
     owners = {key: "core" for key in context}
-    for plug in PLUGINS.overriding("render_context"):
+    for plug in rctx.registries.plugins.overriding("render_context"):
         for key, value in (_call_hook(plug, "render_context", rctx) or {}).items():
             if key in owners:
                 raise ConfigError(
@@ -143,6 +144,7 @@ def render_sql(
     config: Any,
     producers: Mapping[str, Producer],
     root: Path,
+    registries: Registries,
     context: str = "",
     supports_context_refs: bool = False,
 ) -> tuple[str, RenderContext]:
@@ -151,6 +153,7 @@ def render_sql(
         config=config,
         root=root,
         producers=producers,
+        registries=registries,
         context=context,
         supports_context_refs=supports_context_refs,
     )
@@ -167,7 +170,7 @@ def render_sql(
         detail = describe(exc, (TemplateError,))
         raise ConfigError(f"cell {name!r}: template error: {detail}") from exc
 
-    for plug in PLUGINS.overriding("after_render"):
+    for plug in registries.plugins.overriding("after_render"):
         out = _call_hook(plug, "after_render", rctx, sql)
         if out is not None:
             sql = out

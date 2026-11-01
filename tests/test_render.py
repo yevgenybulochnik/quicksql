@@ -1,6 +1,6 @@
 import pytest
 
-from quicksql.compiler import compile_text
+from quicksql.bootstrap import compile_text
 from quicksql.errors import ConfigError, ExecutorError
 from quicksql.plugins.base import Plugin
 from quicksql.registry import plugin
@@ -11,7 +11,7 @@ def test_render_context_capability_verbs(tmp_path) -> None:
     project = compile_text("-- @cell a\nSELECT 1 AS x;", root=tmp_path)
     rctx = RenderContext(
         name="probe", config=project.cells["a"].config, root=tmp_path,
-        producers={},
+        producers={}, registries=project.registries,
     )
     with pytest.raises(ConfigError, match="unknown cell"):
         rctx.add_edge("ghost")
@@ -174,9 +174,12 @@ def test_loops_conditionals_filters_and_macros_still_render(tmp_path) -> None:
 # ---------- any exception while rendering is a template error ----------
 
 
-def _render(tmp_path, body: str):
-    config = compile_text("-- @cell a\nSELECT 1;", root=tmp_path).cells["a"].config
-    return render_sql("a", body, config, producers={}, root=tmp_path)
+def _render(tmp_path, body: str, registries=None):
+    project = compile_text("-- @cell a\nSELECT 1;", root=tmp_path, registries=registries)
+    return render_sql(
+        "a", body, project.cells["a"].config, producers={}, root=tmp_path,
+        registries=project.registries,
+    )
 
 
 _PYTHON_ERRORS = {
@@ -221,8 +224,10 @@ def test_an_unknown_ref_keeps_its_own_message_not_a_template_error(tmp_path) -> 
     [ConfigError("cell 'a': no lookup table"), ExecutorError("warehouse unreachable")],
     ids=["config-error", "executor-error"],
 )
-def test_a_quicksql_error_from_a_contributed_global_passes_through(tmp_path, error) -> None:
-    @plugin
+def test_a_quicksql_error_from_a_contributed_global_passes_through(
+    tmp_path, error, add_plugin, registries
+) -> None:
+    @add_plugin
     class Lookups(Plugin):
         def render_context(self, rctx):
             def lookup():
@@ -231,39 +236,39 @@ def test_a_quicksql_error_from_a_contributed_global_passes_through(tmp_path, err
             return {"lookup": lookup}
 
     with pytest.raises(type(error)) as excinfo:
-        _render(tmp_path, "SELECT {{ lookup() }};")
+        _render(tmp_path, "SELECT {{ lookup() }};", registries)
     assert excinfo.value is error  # the very exception, not a wrapper around it
 
 
 # ---------- a render hook that raises is a compile error, not a crash ----------
 
 
-def _raising_hook(hook: str, error: Exception) -> None:
-    """Register a scratch plugin whose ``hook`` raises ``error``."""
+def _raising_hook(registries, hook: str, error: Exception) -> None:
+    """Add a scratch plugin whose ``hook`` raises ``error``."""
 
     def boom(self, *args):
         raise error
 
-    plugin(type("Boom", (Plugin,), {hook: boom}))
+    registries.add(plugin(type("Boom", (Plugin,), {hook: boom})))
 
 
 @pytest.mark.parametrize("hook", ["render_context", "after_render"])
 def test_a_render_hook_that_raises_is_a_template_error_naming_its_plugin(
-    tmp_path, hook
+    tmp_path, hook, registries
 ) -> None:
-    _raising_hook(hook, KeyError("x"))
+    _raising_hook(registries, hook, KeyError("x"))
     with pytest.raises(ConfigError) as excinfo:
-        compile_text("-- @cell a\nSELECT 1;", root=tmp_path)
+        compile_text("-- @cell a\nSELECT 1;", root=tmp_path, registries=registries)
     assert str(excinfo.value).endswith(
         f"cell 'a' (line 1): template error: plugin 'boom' {hook}: KeyError: 'x'"
     )
 
 
 @pytest.mark.parametrize("hook", ["render_context", "after_render"])
-def test_a_quicksql_error_from_a_render_hook_passes_through(tmp_path, hook) -> None:
+def test_a_quicksql_error_from_a_render_hook_passes_through(tmp_path, hook, registries) -> None:
     config = compile_text("-- @cell a\nSELECT 1;", root=tmp_path).cells["a"].config
     error = ConfigError("cell 'a': no lookup table")
-    _raising_hook(hook, error)  # after compiling, which would run the hook too
+    _raising_hook(registries, hook, error)  # after compiling, which would run the hook too
     with pytest.raises(ConfigError) as excinfo:
-        render_sql("a", "SELECT 1;", config, producers={}, root=tmp_path)
+        render_sql("a", "SELECT 1;", config, producers={}, root=tmp_path, registries=registries)
     assert excinfo.value is error

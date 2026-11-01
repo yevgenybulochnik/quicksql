@@ -37,14 +37,25 @@ first `@cell`) inherited by every cell.
   start (its temps re-materialize), a failed cell's temp is dropped, and `SessionLost`
   (an expired BigQuery session) reopens, re-materializes, and retries the cell once;
   before each cell the runner re-creates any same-context temp it reads that's gone.
-  Read an engine's input with `config.input_spec(config, engine)`, never by hand.
+  Read an engine's input with its executor's `input_spec(config)`, never by hand (the
+  conduit reads duckdb's with `executors.base.engine_input`).
 - **DuckDB is the cross-context conduit.** Cells using *cross-context*
   `ref()`/`source()`/`@extensions` must run on duckdb (compile-time guardrail); other
   engines extract to Polars/Arrow and DuckDB lands it in any sink. Every duckdb cell runs
   on the conduit (`conduit.py`: `conduit_target`, `ConduitSession`), so a cell whose own
   `input.duckdb` differs from the header's is a compile error.
-- **Everything is a plugin.** `@plugin` / `@executor` / `@source_reader` / `@sink`
-  decorators register into registries (`registry.py`). A `Plugin` bundles a pydantic
+- **Everything is a plugin; registries are per notebook.** `@plugin` / `@executor` /
+  `@source_reader` / `@sink` only *mark* a class (`registry.py`); nothing registers on
+  import. `bootstrap.py` is the composition root: `BUILTIN_MODULES` is the one list of
+  builtins, and `registries_for(notebook, plugins)` builds a notebook's `Registries`
+  (plugins/executors/sinks/readers) from them plus the classes its `quicksqlrc.py` and
+  `--plugins` modules *define* (`registry.marked`); a `.py` module is keyed on path +
+  content, so an edited rc reloads. The core takes `registries=` explicitly and has no
+  default (`compiler.compile_text/compile_file`); front-ends and tests call
+  `bootstrap.compile_file/compile_text`, which supply them. `Project.registries` carries
+  them to the runner (`RunContext.registries`), sinks, watcher, catalog, TUI and LSP;
+  validators read them via `config.registries_of(info)` (pydantic validation context).
+  Hook participant lists are cached per registry. A `Plugin` bundles a pydantic
   `Config` (its fields become directives; validators run on merged config; merge
   strategy rides on fields via `qfield`) with behavior hooks (lower `priority` =
   outermore): `run(cell, ctx, inner)` wraps execution (or the simpler
@@ -108,7 +119,10 @@ first `@cell`) inherited by every cell.
 ## Architecture map (`src/quicksql/`)
 
 - `parser.py` — text → RawBlocks (directive YAML + SQL body + body hash)
-- `registry.py` — registries + decorators; field→plugin map with collision guard
+- `registry.py` — `Registry`/`PluginRegistry`/`Registries`, the marking decorators,
+  `marked(module)`; field→plugin map with collision guard
+- `bootstrap.py` — the composition root: builtins list, `registries_for`, the shared
+  plugin-module loader, app-level `compile_file`/`compile_text`
 - `plugins/` — `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary),
   `emit_sql.py` (behavior-plugin demonstrator)
 - `config.py` — model composition, scope checks, layer merging, engine/sink resolution
@@ -136,8 +150,9 @@ first `@cell`) inherited by every cell.
 
 Write the failing pytest first and watch it fail **for the expected reason**; write the
 minimal code to green; refactor while green. Tests mirror `src/` layout
-(`tests/test_<module>.py`); shared fixtures in `tests/conftest.py` (registry
-snapshot/restore is autouse — tests may register scratch plugins freely).
+(`tests/test_<module>.py`); shared fixtures in `tests/conftest.py`: `registries` (this
+test's own builtin copy) and `add_plugin` (decorate a scratch plugin to add it there);
+pass `registries=registries` to `compile_text`/`compile_file`/`QsqlApp`/`Analyzer`.
 
 ## Gotchas
 

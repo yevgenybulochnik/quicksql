@@ -10,17 +10,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .config import input_spec
 import duckdb
 
-from .executors.base import EngineSession, unwrap_error_context
+from .executors.base import EngineSession, engine_input, unwrap_error_context
 from .models import RunContext
 
 
 def conduit_target(config: Any, root: Path) -> str:
     """The database ``config``'s ``input.duckdb`` names: a path under ``root``,
     or ``:memory:``."""
-    path = input_spec(config, "duckdb").get("path")
+    path = engine_input(config, "duckdb").get("path")
     if not path or path == ":memory:":
         return ":memory:"
     return str(root / path)
