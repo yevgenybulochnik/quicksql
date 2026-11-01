@@ -415,3 +415,118 @@ def test_a_run_that_ran_nothing_clears_nothing(host) -> None:
     run_through(host, 1, host.project, [])
     assert host.catalog_cache.peek(level) is not None
     assert _invalidated(host, since) == []
+
+
+# ---------- browsing the catalog (quicksql live catalog) ----------
+
+
+def _wide_root(rows: int, description: str = "") -> CatalogNode:
+    """A root holding one table, ``wide``, whose leaf has ``rows`` field paths."""
+    from quicksql.executors.base import field_path_frame
+
+    fields = field_path_frame([(f"c{i}", f"c{i}", "STRING", "", description) for i in range(rows)])
+    leaf = CatalogNode(title="wh.wide", load=lambda: fields, key="wh.wide")
+    tables = pl.DataFrame({"table": ["wide"]})
+    return CatalogNode(title="wh", load=lambda: tables, child=lambda row: leaf, name_columns=("table",))
+
+
+def test_browse_the_top_level_names_each_row(host) -> None:
+    root, cache = host.catalog_scope()
+    got = host.browse(root, cache, [], offset=0, rows=200)
+    assert (got["title"], got["leaf"], got["path"]) == ("catalog", False, [])
+    assert got["names"] == ["duckdb::memory:", "a", "b", "manual"]
+    assert (got["total"], got["offset"], got["next_offset"]) == (4, 0, None)
+
+
+def test_browse_a_landed_output(host) -> None:
+    from quicksql.runner import run_project
+
+    assert all(r.ok for r in run_project(host.project))
+    root, cache = host.catalog_scope()
+    got = host.browse(root, cache, ["a"], offset=0, rows=200)
+    assert got["leaf"] is True and got["names"] is None
+    assert [row[1] for row in got["rows"]] == ["x"]  # field_path
+
+
+def test_browse_an_unknown_path_names_the_segment(host) -> None:
+    root, cache = host.catalog_scope()
+    with pytest.raises(LiveError) as err:
+        host.browse(root, cache, ["aa"], offset=0, rows=10)
+    assert err.value.code == "unknown_path" and "'aa'" in err.value.message
+    with pytest.raises(LiveError) as err:  # an in-memory context has nothing beneath it
+        host.browse(root, cache, ["duckdb::memory:", "x"], offset=0, rows=10)
+    assert err.value.code == "unknown_path"
+
+
+def test_browse_a_failing_load_says_why_without_the_password(host) -> None:
+    def boom():
+        raise RuntimeError("connection to postgresql://u:hunter2@h/db failed")
+
+    root = CatalogNode(title="root", load=boom)
+    with pytest.raises(LiveError) as err:
+        host.browse(root, CatalogCache(), [], offset=0, rows=10)
+    assert err.value.code == "load_failed"
+    assert "hunter2" not in err.value.message and "postgresql://u:***@h/db" in err.value.message
+
+
+def test_browse_redacts_what_it_shows(host) -> None:
+    frame = pl.DataFrame({"name": ["postgres:postgresql://u:hunter2@h/db"]})
+    root = CatalogNode(title="root", load=lambda: frame, child=lambda row: None)
+    got = host.browse(root, CatalogCache(), [], offset=0, rows=10)
+    assert "hunter2" not in repr(got)
+
+
+def test_browse_pages_a_wide_leaf_and_filters_it(host) -> None:
+    root, cache = _wide_root(2500), CatalogCache()
+    first = host.browse(root, cache, ["wide"], offset=0, rows=1000)
+    assert (len(first["rows"]), first["total"], first["next_offset"]) == (1000, 2500, 1000)
+    assert first["cached"] is False
+    last = host.browse(root, cache, ["wide"], offset=2000, rows=1000)
+    assert (len(last["rows"]), last["next_offset"]) == (500, None)
+    assert len(host.browse(root, cache, ["wide"], offset=0, rows=5000)["rows"]) == 1000  # MAX_ROWS
+    matched = host.browse(root, cache, ["wide"], offset=0, rows=200, match="C24", columns=["field_path"])
+    assert matched["columns"] == ["field_path"] and matched["cached"] is True
+    assert matched["total"] == 111  # c24, c240–c249, c2400–c2499
+
+
+def test_browse_shrinks_a_page_to_fit_one_message(host, monkeypatch) -> None:
+    from quicksql.live.protocol import encode
+
+    monkeypatch.setattr("quicksql.live.host.MAX_LINE", 60_000)
+    got = host.browse(_wide_root(1000, description="d" * 200), CatalogCache(), ["wide"], offset=0, rows=1000)
+    assert len(encode({"id": 1, "result": got})) <= 60_000
+    assert 0 < len(got["rows"]) < 1000 and got["next_offset"] == len(got["rows"])
+
+
+def test_browse_refresh_reloads_the_level(host) -> None:
+    loads: list[int] = []
+    frame = pl.DataFrame({"name": ["x"]})
+
+    def load():
+        loads.append(1)
+        return frame
+
+    root, cache = CatalogNode(title="root", load=load), CatalogCache()
+    host.browse(root, cache, [], offset=0, rows=10)
+    assert host.browse(root, cache, [], offset=0, rows=10)["cached"] is True and loads == [1]
+    assert host.browse(root, cache, [], offset=0, rows=10, refresh=True)["cached"] is False
+    assert loads == [1, 1]
+
+
+def test_browse_rejects_bad_params(host) -> None:
+    root, cache = host.catalog_scope()
+    for kwargs in ({"offset": -1, "rows": 10}, {"offset": 0, "rows": 0}):
+        with pytest.raises(LiveError) as err:
+            host.browse(root, cache, [], **kwargs)
+        assert err.value.code == "invalid"
+    with pytest.raises(LiveError) as err:
+        host.browse(root, cache, [], offset=0, rows=10, columns=["nope"])
+    assert err.value.code == "invalid" and "kind" in err.value.message  # names what there is
+
+
+def test_the_catalog_needs_a_compiled_notebook(nb, fake_driver) -> None:
+    host = LiveHost(fake_driver, nb)
+    fake_driver.host = host
+    with pytest.raises(LiveError) as err:
+        host.catalog_scope()
+    assert err.value.code == "no_project"

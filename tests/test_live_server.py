@@ -386,3 +386,56 @@ def test_a_bug_in_a_handler_answers_internal_and_the_connection_lives(live, monk
             client.call("snapshot")
         assert err.value.code == "internal" and "a bug" in err.value.message
         assert client.call("arm")["armed"] is True  # same connection, still answering
+
+
+# ---------- the catalog ----------
+
+
+def test_the_catalog_lists_a_level_by_its_path(landed) -> None:
+    with landed.client() as client:
+        assert "catalog" in client.hello["methods"]
+        top = client.call("catalog", path=[])
+        leaf = client.call("catalog", path=["a"])
+    assert top["names"] == ["duckdb::memory:", "a", "b"]
+    assert leaf["leaf"] is True and [row[1] for row in leaf["rows"]] == ["x"]
+
+
+def test_an_unknown_catalog_path_answers_unknown_path(live) -> None:
+    with live.client() as client:
+        with pytest.raises(LiveError) as err:
+            client.call("catalog", path=["nope"])
+    assert err.value.code == "unknown_path" and "nope" in err.value.message
+
+
+@pytest.mark.parametrize("params", [
+    {"path": "a"}, {"path": [1]}, {"rows": "x"}, {"offset": True}, {"match": 3},
+    {"columns": "kind"}, {"top_level": "yes"}, {"timeout": 0},
+])
+def test_catalog_params_are_checked(live, params) -> None:
+    with live.client() as client:
+        with pytest.raises(LiveError) as err:
+            client.call("catalog", **params)
+    assert err.value.code == "invalid"
+
+
+def test_a_slow_catalog_load_times_out_and_carries_on(live, monkeypatch) -> None:
+    import polars as pl
+
+    from quicksql.catalog import CatalogNode
+
+    gate = threading.Event()
+    frame = pl.DataFrame({"name": ["x"]})
+
+    def load():
+        gate.wait(10)
+        return frame
+
+    slow = CatalogNode(title="slow", load=load)
+    monkeypatch.setattr(live.host, "catalog_root", lambda project=None: slow)
+    with live.client() as client:
+        with pytest.raises(LiveError) as err:
+            client.call("catalog", path=[], timeout=0.3)
+        assert err.value.code == "timeout" and "again" in err.value.message
+        gate.set()
+        got = client.call("catalog", path=[], timeout=5)
+    assert got["names"] == ["x"]

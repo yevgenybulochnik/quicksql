@@ -209,6 +209,38 @@ def test_run_and_watch_refuse_while_a_tui_has_the_notebook(live) -> None:
     assert cli("watch", str(live.nb)).exit_code == 5
 
 
+# ---------- the catalog ----------
+
+
+def test_catalog_prints_a_level_and_reads_a_leaf(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb))
+    assert result.exit_code == 0, result.output
+    assert "duckdb::memory:" in result.output and "output" in result.output
+    doc = json.loads(cli("live", "catalog", str(landed.nb), "a", "--json").stdout)
+    assert doc["leaf"] is True and doc["path"] == ["a"] and doc["rows"][0][1] == "x"
+
+
+def test_catalog_pages_with_rows_and_offset(landed) -> None:
+    doc = json.loads(cli("live", "catalog", str(landed.nb), "-n", "1", "--offset", "1", "--json").stdout)
+    assert doc["names"] == ["a"] and doc["next_offset"] == 2
+    assert "--offset 1" in cli("live", "catalog", str(landed.nb), "-n", "1").output  # the next page
+
+
+def test_catalog_match_and_columns(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb), "--match", "B", "--columns", "kind,name", "--json")
+    doc = json.loads(result.stdout)
+    assert doc["columns"] == ["kind", "name"] and doc["names"] == ["b"]
+
+
+def test_an_unknown_catalog_path_exits_3(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb), "nope")
+    assert result.exit_code == 3 and "nope" in result.output
+
+
+def test_catalog_without_a_tui_exits_4(nb) -> None:
+    assert cli("live", "catalog", str(nb)).exit_code == 4
+
+
 # ---------- the client loads neither Polars nor Textual ----------
 
 WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"
@@ -217,7 +249,7 @@ WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quick
 def test_live_commands_need_neither_polars_nor_textual(live) -> None:
     env = {**os.environ}
     for args in (["live", "arm", str(live.nb)], ["live", "wait", str(live.nb), "--json"],
-                 ["status", str(live.nb), "--json"]):
+                 ["status", str(live.nb), "--json"], ["live", "catalog", str(live.nb), "--json"]):
         done = subprocess.run(
             [sys.executable, "-c", WITHOUT, *args], capture_output=True, text=True, env=env,
             timeout=60,

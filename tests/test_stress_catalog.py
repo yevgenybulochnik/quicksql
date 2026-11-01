@@ -612,31 +612,39 @@ def test_s6_one_load_for_two_askers(engine, request, stress_project) -> None:
 # ---------- S7: the size of a wide leaf ----------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="phase 2: the leaf pages, each response within MAX_ROWS and MAX_LINE")
 @pytest.mark.parametrize("engine", ["bq", "pg", "fake1000"])
-def test_s7_wide_leaf_fits_the_socket(engine, request, stress_project) -> None:
-    """The wide leaf's sizes: whole, one page, and filtered as Phase 1's
-    match / columns / top-level would cut it."""
+def test_s7_wide_leaf_fits_the_socket(engine, request, stress_project, fake_driver) -> None:
+    """The wide leaf through ``quicksql live catalog`` (``LiveHost.browse``):
+    every page within MAX_ROWS and MAX_LINE, together the whole leaf; the
+    filters cut it down."""
     shape, _ = backend(request, engine)
-    _, frames, _ = walk_to_wide(CatalogCache(), stress_project(), shape)
-    leaf = frames[-1]
-    paths = leaf["field_path"]
-    top = leaf.filter(~paths.str.contains(".", literal=True))
-    matched = leaf.filter(paths.str.contains("col_01", literal=True))
+    host = live_host(fake_driver, stress_project())
+    root, cache = host.catalog_scope()
+    path = [pick(root.load(), {"kind": "context", "engine": shape.engine})["name"], *shape.segments]
+
+    def browse(**kwargs: Any) -> dict[str, Any]:
+        return host.browse(root, cache, path, **{"offset": 0, "rows": MAX_ROWS, **kwargs})
+
+    pages, offset = [], 0
+    while offset is not None:
+        pages.append(browse(offset=offset))
+        offset = pages[-1]["next_offset"]
+    sizes = [len(encode({"id": 1, "result": p})) for p in pages]
     data = {
-        "rows": leaf.height,
-        "bytes": response_bytes(leaf),
-        "pages_at_max_rows": math.ceil(leaf.height / MAX_ROWS),
-        "first_page_bytes": response_bytes(leaf.head(MAX_ROWS)),
-        "no_description_bytes": response_bytes(leaf.drop("description")),
-        "top_level_rows": top.height,
-        "match_col_01_rows": matched.height,
-        "match_col_01_bytes": response_bytes(matched),
+        "rows": pages[0]["total"],
+        "pages": len(pages),
+        "bytes": max(sizes),  # the largest response
+        "no_description_bytes": len(encode({"id": 1, "result": browse(
+            columns=["column", "field_path", "type", "mode"])})),
+        "top_level_rows": browse(top_level=True)["total"],
+        "match_col_01_rows": browse(match="col_01")["total"],
         "max_line": MAX_LINE,
     }
     record("S7", engine, data)
-    assert data["rows"] <= MAX_ROWS and data["bytes"] <= MAX_LINE  # one response today
+    if data["rows"] != shape.wide_rows:
+        pytest.fail(f"wide leaf has {data['rows']} rows, not {shape.wide_rows}")
+    assert sum(len(p["rows"]) for p in pages) == shape.wide_rows
+    assert all(len(p["rows"]) <= MAX_ROWS for p in pages) and max(sizes) <= MAX_LINE
 
 
 # ---------- S8–S9: a new session ----------
