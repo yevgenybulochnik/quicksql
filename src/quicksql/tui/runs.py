@@ -127,9 +127,10 @@ class RunController:
         and each cell_finished retires its cell so status flips one at a time."""
         self.app.log_line(event.line())
         result = event.result if event.kind == "cell_finished" else None
-        if result is not None and result.status == "failed" and result.error:
+        error = (result.error or "").strip() if result is not None else ""
+        if result is not None and result.status == "failed" and "\n" in error:
             # the full message, once per result: the line above keeps only its
-            # first line (a skipped cell's line already says it all)
+            # first line (a one-line message, or a skipped cell's, is all there)
             self.app.log_line(f"{event.cell} failed:\n{result.error}")
         if gen != self.gen:
             return  # a replaced run may still be draining: log it, never show it
