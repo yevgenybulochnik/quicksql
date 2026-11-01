@@ -47,6 +47,7 @@ from quicksql.catalog import CatalogCache, CatalogNode, project_root_node, redac
 from quicksql.compiler import Project
 from quicksql.executors.bigquery_exec import BigQueryExecutor
 from quicksql.executors.postgres_exec import PostgresExecutor
+from quicksql.live.host import LiveHost
 from quicksql.live.protocol import MAX_LINE, MAX_ROWS, encode
 from quicksql.lsp.schema import SchemaCache, columns_for
 from quicksql.overrides import gather_overrides
@@ -420,8 +421,8 @@ def response_bytes(frame: Any) -> int:
     return len(encode({"id": 1, "result": {"columns": frame.columns, "rows": frame.rows()}}))
 
 
-def context(cache: CatalogCache, project: Project, engine: str) -> CatalogNode:
-    root = project_root_node(project)
+def context(cache: CatalogCache, project: Project, engine: str, root: CatalogNode | None = None) -> CatalogNode:
+    root = root or project_root_node(project)
     frame, _ = cache.load(root)
     return root.child(pick(frame, {"kind": "context", "engine": engine}))
 
@@ -440,8 +441,21 @@ def drill(cache: CatalogCache, node: CatalogNode, picks: tuple[dict[str, str], .
         node = node.child(pick(frame, picks[len(frames) - 1]))
 
 
-def walk_to_wide(cache: CatalogCache, project: Project, shape: Shape):
-    return drill(cache, context(cache, project, shape.engine), shape.wide)
+def walk_to_wide(cache: CatalogCache, project: Project, shape: Shape, root: CatalogNode | None = None):
+    return drill(cache, context(cache, project, shape.engine, root), shape.wide)
+
+
+def live_host(driver: Any, project: Project) -> LiveHost:
+    """A live host on ``project``, as the TUI hosts one (its cache is the
+    Catalog tab's and an agent's)."""
+    host = LiveHost(driver, NOTEBOOK)
+    driver.host = host
+    host.loaded(project)
+    return host
+
+
+def host_walk(host: LiveHost, shape: Shape):
+    return walk_to_wide(host.catalog_cache, host.project, shape, root=host.catalog_root())
 
 
 # ---------- S1–S3: browsing ----------
@@ -516,48 +530,48 @@ def test_s3_warm_browse(engine, request, stress_project) -> None:
 # ---------- S4–S6: what clears the cache, and who loads ----------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 2: a save clears the top level only")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
-def test_s4_saves_keep_the_warehouse(engine, request, stress_project) -> None:
-    """20 saves, the wide leaf read after each: no warehouse round trips."""
+def test_s4_saves_keep_the_warehouse(engine, request, stress_project, fake_driver) -> None:
+    """20 saves, the wide leaf browsed to after each, through the live host:
+    no warehouse round trips."""
     shape, meter = backend(request, engine)
-    cache = CatalogCache()
-    walk_to_wide(cache, stress_project(), shape)
+    host = live_host(fake_driver, stress_project())
+    host_walk(host, shape)
     with measuring(meter) as m:
         for _ in range(SAVES):
-            project = stress_project()  # the watcher recompiles
-            cache.invalidate()  # as QsqlApp._on_recompiled does today
-            walk_to_wide(cache, project, shape)
+            host.recompiled(stress_project(), [])  # the watcher compiled a save
+            host_walk(host, shape)
     m["saves"] = SAVES
     record("S4", engine, m)
     assert m["round_trips"] == 0
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 2: a run clears only the contexts it ran in")
-def test_s5_runs_clear_only_their_contexts(bq_live, pg_live, stress_project) -> None:
+def test_s5_runs_clear_only_their_contexts(bq_live, pg_live, stress_project, fake_driver) -> None:
     """A duckdb-only run keeps both warehouses; a BigQuery run reloads only
     BigQuery's levels."""
     meter = bq_live  # one meter counts both
-    project, cache = stress_project(), CatalogCache()
-    walk_to_wide(cache, project, BQ)
-    walk_to_wide(cache, project, PG)
+    host = live_host(fake_driver, stress_project())
+    project = host.project
 
-    def run(cell: str) -> None:
+    def walk_both() -> None:
+        host_walk(host, BQ)
+        host_walk(host, PG)
+
+    def run(cell: str, run_id: int) -> None:
         results = run_project(project, select=[cell])
         if not all(r.ok for r in results):
             pytest.fail(f"{cell} didn't run: {[r.error for r in results if not r.ok]}")
+        host.run_requested(run_id, None)  # as the TUI's run controller reports it
+        host.run_ended(run_id, results)
 
-    run("local_numbers")
+    walk_both()
+    run("local_numbers", 1)
     with measuring(meter) as duck:
-        cache.invalidate()  # as QsqlApp.run_landed does today, whatever ran
-        walk_to_wide(cache, project, BQ)
-        walk_to_wide(cache, project, PG)
+        walk_both()
     record("S5", "after a duckdb run", duck)
-    run("bq_shard")
+    run("bq_shard", 2)
     with measuring(meter) as bq:
-        cache.invalidate()
-        walk_to_wide(cache, project, BQ)
-        walk_to_wide(cache, project, PG)
+        walk_both()
     record("S5", "after a bigquery run", bq)
     assert duck["round_trips"] == 0
     assert engine_trips(bq, "pg.") == 0

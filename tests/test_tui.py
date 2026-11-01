@@ -683,7 +683,7 @@ async def test_catalog_cache_serves_redrills_and_ctrl_r_refetches(notebook) -> N
         assert len(app.sheet_stack) == 1
 
 
-async def test_run_and_notebook_switch_clear_the_catalog_cache(notebook) -> None:
+async def test_a_run_clears_the_catalog_levels_it_touched_and_a_switch_clears_all(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.press("R")
@@ -692,17 +692,17 @@ async def test_run_and_notebook_switch_clear_the_catalog_cache(notebook) -> None
         await pilot.press("S")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app.catalog.cache) > 0
-        await pilot.press("q", "R")  # back to cells, rerun: outputs changed
+        await pilot.press("j", "enter")  # into the first output's schema
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app.catalog.cache) == 0
-        await pilot.press("S")
+        cache = app.host.catalog_cache  # the live host's: an agent shares it
+        assert len(cache) == 2  # the top level and that schema
+        await pilot.press("q", "q", "R")  # back to cells, rerun: outputs changed
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app.catalog.cache) > 0
-        app._load_notebook(notebook)  # switching notebooks resets everything
-        assert len(app.catalog.cache) == 0
+        assert len(cache) == 1  # the schema went; the top level didn't change
+        app._load_notebook(notebook)  # switching notebooks starts afresh
+        assert len(app.host.catalog_cache) == 0
 
 
 async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:

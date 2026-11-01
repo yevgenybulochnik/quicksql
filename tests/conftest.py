@@ -198,6 +198,11 @@ class FakeDriver:
         finally:
             conn.close()
 
+    def connect(self):
+        import duckdb
+
+        return duckdb.connect()
+
     def controls_changed(self) -> None:
         self.repaints += 1
 

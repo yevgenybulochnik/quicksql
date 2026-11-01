@@ -3,9 +3,11 @@ through a fake driver (no Textual, no socket)."""
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from quicksql.bootstrap import compile_file
+from quicksql.catalog import CatalogCache, CatalogNode
 from quicksql.live.host import LiveHost
 from quicksql.live.protocol import LiveError
 from quicksql.models import RunEvent, RunResult
@@ -325,3 +327,91 @@ def test_saving_the_same_text_again_keeps_what_its_run_found(host) -> None:
     outcome = host.outcomes[project.source_hash]
     assert outcome["state"] == "ran" and outcome["summary"]["failed"] == 1
     assert host.since(0)[-1]["kind"] == "settled"  # a waiter still hears it settle
+
+
+# ---------- the catalog cache (docs/catalog-plan.md, Phase 2) ----------
+
+
+def _cached_level(host: LiveHost, scope: str) -> CatalogNode:
+    """A level under the top-level row ``scope``, loaded into the host's cache."""
+    frame = pl.DataFrame({"n": [1]})
+    node = CatalogNode(title=f"under {scope}", load=lambda: frame, scope=scope)
+    host.catalog_cache.load(node)
+    return node
+
+
+def _invalidated(host: LiveHost, since: int) -> list[dict]:
+    return [e for e in host.since(since) if e["kind"] == "catalog_invalidated"]
+
+
+def test_the_host_keeps_a_catalog_cache_per_notebook(host, nb) -> None:
+    cache = host.catalog_cache
+    assert isinstance(cache, CatalogCache)
+    host.switch(nb)
+    assert host.catalog_cache is not cache
+
+
+def test_the_host_builds_one_catalog_root_per_project(host, nb) -> None:
+    """One root per compiled project: its engines' clients live across requests."""
+    root = host.catalog_root()
+    assert host.catalog_root() is root
+    assert root.load()["name"].to_list()[0] == "duckdb::memory:"
+    host.recompiled(compile_file(nb), [])
+    assert host.catalog_root() is not root
+
+
+def test_a_save_clears_the_top_level_and_the_outputs_but_keeps_warehouses(host, nb) -> None:
+    root = host.catalog_root()
+    host.catalog_cache.load(root)
+    warehouse, output = _cached_level(host, "bigquery:p"), _cached_level(host, "a")
+    since = host.seq
+    host.recompiled(compile_file(nb), [])
+    cache = host.catalog_cache
+    assert cache.peek(root) is None and cache.peek(output) is None  # what a save can change
+    assert cache.peek(warehouse) is not None  # a save changes no warehouse
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["top_level"], event["scopes"]) == ("save", True, ["a", "b", "manual"])
+
+
+def test_a_run_clears_the_contexts_it_ran_in_and_the_outputs_it_landed(host) -> None:
+    root = host.catalog_root()
+    host.catalog_cache.load(root)
+    levels = {s: _cached_level(host, s) for s in ("duckdb::memory:", "bigquery:p", "a", "b", "manual")}
+    since = host.seq
+    host.run_requested(1, None)
+    skipped = RunResult(cell="b", status="skipped", error="a failed")
+    run_through(host, 1, host.project, [ok("a"), skipped])
+    kept = {scope for scope, node in levels.items() if host.catalog_cache.peek(node) is not None}
+    assert kept == {"bigquery:p", "b", "manual"}  # b was skipped: it never ran
+    assert host.catalog_cache.peek(root) is not None  # a run adds no top-level row
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["run_id"], event["top_level"], event["scopes"]) == (
+        "run", 1, False, ["a", "duckdb::memory:"],
+    )
+
+
+def test_a_run_clears_the_engine_its_cells_land_in(tmp_path, fake_driver) -> None:
+    """A sqlite cell landing in a duckdb sink changes duckdb's catalog too."""
+    nb = tmp_path / "nb.qsql"
+    nb.write_text(
+        "-- @cell lake\nSELECT 1 AS x;\n\n"
+        "-- @cell src\n-- @engine: sqlite\n"
+        "/*@\ninput: { sqlite: s.db }\noutput: { type: duckdb, path: out.db }\n*/\nSELECT 1 AS y;\n"
+    )
+    host = LiveHost(fake_driver, nb)
+    fake_driver.host = host
+    host.loaded(compile_file(nb))
+    lake, other = _cached_level(host, "duckdb::memory:"), _cached_level(host, "bigquery:p")
+    host.run_requested(1, None)
+    run_through(host, 1, host.project, [ok("src")])
+    assert host.catalog_cache.peek(lake) is None
+    assert host.catalog_cache.peek(other) is not None
+
+
+def test_a_run_that_ran_nothing_clears_nothing(host) -> None:
+    level = _cached_level(host, "duckdb::memory:")
+    since = host.seq
+    host.run_requested(1, None)
+    run_through(host, 1, host.project, [])
+    assert host.catalog_cache.peek(level) is not None
+    assert _invalidated(host, since) == []
