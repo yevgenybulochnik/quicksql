@@ -6,7 +6,9 @@ the CatalogNode each came from; Enter drills a row into its child node. Frames
 are cached by node (`catalog.CatalogCache`) and dropped when a run, a save or
 a notebook switch changes what they describe; ctrl+r refetches one level.
 The stack is kept across tab switches: each Sheet holds its own
-cursor/sort/filter for S / Enter to resume.
+cursor/sort/filter for S / Enter to resume. A notebook switch bumps the
+view's generation and starts a fresh cache: a load still running for the old
+notebook then lands nowhere, neither on the stack nor in the cache.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ class CatalogView(Surface):
         self.loading: str | None = None  # the title of a load in flight
         self.dive_pending = False  # S pressed while the root loads
         self._root_loading = False  # a root load is in flight
+        self._gen = 0  # bumped per notebook; a load from an older one is dropped
         self._table: SheetTable | None = None
 
     def focused(self) -> SheetTable:
@@ -59,11 +62,14 @@ class CatalogView(Surface):
         self.app.refresh_subtitle()
 
     def reset(self) -> None:
-        """A notebook switch: no stack, nothing cached or pending."""
+        """A notebook switch: no stack, nothing cached or pending. The old
+        cache is left to the old notebook's loads still running."""
+        self._gen += 1
         self.stack = []
+        self.cache = CatalogCache()
+        self.loading = None
         self.dive_pending = False
         self._root_loading = False
-        self.cache.invalidate()
         self.refresh()  # the old listing must not show under the new notebook
 
     def dive(self) -> None:
@@ -106,23 +112,28 @@ class CatalogView(Surface):
         self._load(node, replace=True)
 
     def _load(self, node: CatalogNode, replace: bool = False) -> None:
-        work = partial(self._fetch, node, replace)
-        self.app.run_worker(work, thread=True, exclusive=True, group="catalog")
+        # not `exclusive`: Textual would only flag the old thread cancelled;
+        # the generation is what keeps an older notebook's load off the stack
+        work = partial(self._fetch, node, replace, self._gen, self.cache)
+        self.app.run_worker(work, thread=True, group="catalog")
 
-    def _fetch(self, node: CatalogNode, replace: bool) -> None:
-        """On the worker thread: load ``node``'s frame, then hand the sheet to
-        the UI thread — pushed, or swapped in for the top one on a refetch."""
+    def _fetch(self, node: CatalogNode, replace: bool, gen: int, cache: CatalogCache) -> None:
+        """On the worker thread: load ``node``'s frame into the cache of the
+        notebook it was asked for, then hand the sheet to the UI thread —
+        pushed, or swapped in for the top one on a refetch."""
         call = self.app.call_from_thread
-        call(self._started, node.title)
+        call(self._started, gen, node.title)
         try:
-            frame, _ = self.cache.load(node)
+            frame, _ = cache.load(node)
         except Exception as exc:
-            call(self._failed, node.title, exc)
+            call(self._failed, gen, node.title, exc)
             return
         sheet = Sheet(frame, title=node.title, drill=node)
-        call(self._replace_top if replace else self._push, sheet)
+        call(self._replace_top if replace else self._push, gen, sheet)
 
-    def _started(self, title: str) -> None:
+    def _started(self, gen: int, title: str) -> None:
+        if gen != self._gen:
+            return
         self.loading = title
         self.app.refresh_subtitle()
 
@@ -130,14 +141,18 @@ class CatalogView(Surface):
         self.loading = None
         self.app.refresh_subtitle()
 
-    def _failed(self, title: str, exc: Exception) -> None:
+    def _failed(self, gen: int, title: str, exc: Exception) -> None:
+        if gen != self._gen:
+            return  # the previous notebook's load (its session may be closed)
         self.app.log_line(f"catalog {title}: {exc}")
         self.app.notify(f"catalog: {exc}", severity="error")
         self.dive_pending = False
         self._root_loading = False
         self._ended()  # drop the loading… note
 
-    def _push(self, sheet: Sheet) -> None:
+    def _push(self, gen: int, sheet: Sheet) -> None:
+        if gen != self._gen:
+            return  # the previous notebook's listing
         self._root_loading = False  # a root push lands on an empty stack
         self.stack.append(sheet)
         if self.dive_pending:  # S while the root was loading
@@ -146,10 +161,12 @@ class CatalogView(Surface):
         self.refresh()
         self._ended()
 
-    def _replace_top(self, sheet: Sheet) -> None:
+    def _replace_top(self, gen: int, sheet: Sheet) -> None:
+        if gen != self._gen:
+            return
         if self.stack:
             self.stack[-1] = sheet
             self.refresh()
             self._ended()
         else:
-            self._push(sheet)
+            self._push(gen, sheet)
