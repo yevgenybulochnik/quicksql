@@ -126,6 +126,36 @@ def test_multistatement_materialization_capability() -> None:
     assert EXECUTORS.get("bigquery").supports_multistatement_materialization is False
 
 
+def test_builtin_executors_declare_their_sqlglot_dialect() -> None:
+    dialects = {name: EXECUTORS.get(name).dialect for name in EXECUTORS.names()}
+    assert dialects == {
+        "duckdb": "duckdb", "sqlite": "sqlite", "postgres": "postgres", "bigquery": "bigquery"
+    }
+
+
+def test_an_executor_splits_statements_in_its_declared_dialect(tsql_engine, registries) -> None:
+    # [a;b] is one T-SQL identifier; generic SQL's tokenizer splits inside it,
+    # and the engine's name, mssql, is no sqlglot dialect at all
+    body = "SELECT 1 AS [a;b]; SELECT 2"
+    assert registries.executors.get("mssql").split_statements(body) == [
+        "SELECT 1 AS [a;b]",
+        "SELECT 2",
+    ]
+
+
+def test_an_executor_without_a_dialect_splits_on_generic_sql() -> None:
+    from quicksql.executors.base import Executor
+
+    class Plain(Executor):
+        name = "plain"
+
+        def open_session(self, config, ctx):
+            raise NotImplementedError
+
+    assert Plain.dialect is None
+    assert Plain().split_statements("SELECT 1; SELECT 2;") == ["SELECT 1", "SELECT 2"]
+
+
 def test_duckdb_executor_creates_view(ctx) -> None:
     view = execute_cell(_cell("a", "SELECT 42 AS x;"), ctx)
     assert ctx.conn.sql(f'SELECT * FROM "{view}"').fetchall() == [(42,)]

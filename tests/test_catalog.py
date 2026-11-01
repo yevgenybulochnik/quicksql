@@ -218,6 +218,55 @@ def test_catalog_directive_supports_other_engines(tmp_path, monkeypatch) -> None
     assert node.child(row).load()["schema"].to_list() == ["public", "analytics"]
 
 
+def test_a_third_party_engines_context_drills_into_its_own_catalog(
+    tmp_path, tsql_engine, registries
+) -> None:
+    project = compile_text(
+        "-- @engine: mssql\n-- @cell a\nSELECT 1 AS x;\n", root=tmp_path, registries=registries
+    )
+    node = project_root_node(project)
+    [row] = node.load().filter(pl.col("kind") == "context").iter_rows(named=True)
+    assert (row["name"], row["engine"]) == ("mssql:wh", "mssql")
+    wh = node.child(row)
+    assert wh.title == "mssql:wh"
+    leaf = wh.child(wh.load().row(0, named=True))
+    assert leaf.load()["field_path"].to_list() == ["x"]
+
+
+def test_a_third_party_engine_takes_catalog_directive_targets(
+    tmp_path, tsql_engine, registries
+) -> None:
+    project = compile_text(
+        "/*@ catalog: { mssql: [wh, lake] } */\n-- @engine: mssql\n-- @cell a\nSELECT 1 AS x;\n",
+        root=tmp_path,
+        registries=registries,
+    )
+    contexts = project_root_node(project).load().filter(pl.col("kind") == "context")
+    # wh is the cell's own context: the @catalog target dedupes against it
+    assert contexts.select("name", "detail").rows() == [("mssql:wh", ""), ("mssql:lake", "@catalog")]
+
+
+def test_an_engine_without_a_catalog_has_no_context_to_drill(tmp_path, registries) -> None:
+    from quicksql.executors.base import Executor
+    from quicksql.registry import executor
+
+    @executor("bare")
+    class Bare(Executor):
+        def open_session(self, config, ctx):
+            raise NotImplementedError
+
+    registries.add(Bare)
+    project = compile_text(
+        "/*@ catalog: { bare: [x] } */\n-- @engine: bare\n-- @cell a\nSELECT 1 AS x;\n",
+        root=tmp_path,
+        registries=registries,
+    )
+    node = project_root_node(project)
+    contexts = node.load().filter(pl.col("kind") == "context")
+    assert contexts["name"].to_list() == ["bare:"]  # no @catalog row: it takes no targets
+    assert node.child(contexts.row(0, named=True)) is None
+
+
 def test_catalog_directive_is_global_only(tmp_path) -> None:
     from quicksql.errors import QsqlError
 

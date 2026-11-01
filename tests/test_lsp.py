@@ -212,6 +212,43 @@ def test_diagnostics_surface_sqlglot_syntax_errors(tmp_path) -> None:
     assert any(d.source == "sqlglot" for d in diags)
 
 
+def test_diagnostics_check_a_third_party_engine_in_its_declared_dialect(
+    tmp_path, tsql_engine, registries
+) -> None:
+    from quicksql.lsp.analysis import Analyzer
+
+    analyzer = Analyzer(registries=registries)
+    # TOP is T-SQL's own: generic SQL rejects it
+    valid = "-- @engine: mssql\n-- @cell a\nSELECT TOP 1 x FROM dbo.t;\n"
+    assert analyzer.diagnostics(valid, tmp_path) == []
+    invalid = "-- @engine: mssql\n-- @cell a\nSELECT * FROM WHERE 1;\n"
+    assert [(d.line, d.source) for d in analyzer.diagnostics(invalid, tmp_path)] == [(2, "sqlglot")]
+
+
+def test_table_columns_come_from_a_third_party_engines_catalog(
+    tmp_path, tsql_engine, registries
+) -> None:
+    from quicksql.bootstrap import compile_text
+    from quicksql.lsp.schema import table_columns
+
+    project = compile_text(
+        "-- @engine: mssql\n-- @cell a\nSELECT 1 AS x;\n", root=tmp_path, registries=registries
+    )
+    cell = project.cells["a"]
+    assert table_columns(project, cell, "dbo.t") == [("x", "INT")]
+    assert table_columns(project, cell, "t") == [("x", "INT")]  # the engine's default schema
+    assert table_columns(project, cell, "dbo.nope") == []
+
+
+def test_completion_offers_a_third_party_tables_columns(tmp_path, tsql_engine, registries) -> None:
+    from quicksql.lsp.analysis import Analyzer
+
+    line = "SELECT TOP 1 e. FROM dbo.t AS e"
+    text = f"-- @engine: mssql\n-- @cell a\n{line}\n"
+    comps = Analyzer(registries=registries).completions(text, tmp_path, 2, len("SELECT TOP 1 e."))
+    assert [(c.label, c.detail) for c in comps if c.kind == "field"] == [("x", "INT")]
+
+
 def test_diagnostics_accept_var_in_operand_position(tmp_path) -> None:
     """A var used as a comparison operand must not produce a syntax error;
     the cell's merged vars feed the mask so the parsed SQL carries the value."""

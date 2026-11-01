@@ -47,3 +47,39 @@ def test_every_module_is_classified() -> None:
         m for m in modules if not any(m == e or (e.endswith(".**") and m.startswith(e[:-2])) for e in listed)
     )
     assert not unlisted, f"classify in pyproject.toml [tool.importlinter]: {unlisted}"
+
+
+def _imported_privates(path: Path, module: str) -> list[str]:
+    """``module.name`` for each underscored name ``path`` imports from another
+    quicksql module."""
+    import ast
+
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    found = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            parts = package.split(".")
+            source = ".".join(parts[: len(parts) - node.level + 1] + [node.module or ""]).rstrip(".")
+        else:
+            source = node.module or ""
+        if source.split(".")[0] != "quicksql" or source == module:
+            continue
+        found += [f"{source}.{alias.name}" for alias in node.names if alias.name.startswith("_")]
+    return found
+
+
+def test_no_module_imports_another_modules_privates() -> None:
+    """import-linter sees modules, not names: a front-end reaching into the
+    runner's privates is front-end -> core, which the contracts allow. A
+    private name is its module's own; anything shared gets a public one."""
+    src = ROOT / "src"
+    leaks = [
+        f"{path.relative_to(ROOT)}: {name}"
+        for path in sorted(src.rglob("*.py"))
+        for name in _imported_privates(
+            path, ".".join(path.relative_to(src).with_suffix("").parts).removesuffix(".__init__")
+        )
+    ]
+    assert not leaks, "\n".join(leaks)

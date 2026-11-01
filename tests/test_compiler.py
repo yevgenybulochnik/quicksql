@@ -137,6 +137,26 @@ def test_reffed_single_statement_bigquery_compiles(tmp_path) -> None:
     assert project.cells["parent"].reffed_in_context is True
 
 
+def test_reffed_multistatement_check_splits_in_the_engines_dialect(
+    tmp_path, tsql_engine, registries, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        registries.executors.get("mssql"), "supports_multistatement_materialization", False
+    )
+    text = (
+        "-- @engine: mssql\n"
+        "-- @cell parent\nBODY\n"
+        "-- @cell child\nSELECT count(*) AS c FROM {{ ref('parent') }};"
+    )
+    # one T-SQL statement, though generic SQL would split it at the ;
+    one = compile_text(text.replace("BODY", "SELECT 1 AS [a;b];"), root=tmp_path, registries=registries)
+    assert one.cells["parent"].reffed_in_context is True
+    with pytest.raises(ConfigError, match="single statement"):
+        compile_text(
+            text.replace("BODY", "SELECT 1 AS n; SELECT 2 AS n;"), root=tmp_path, registries=registries
+        )
+
+
 def test_extensions_union_config_and_render_collected(tmp_path) -> None:
     project = compile_text(
         "-- @cell a\n-- @extensions: [spatial]\nSELECT * FROM {{ source('s.xlsx') }};",

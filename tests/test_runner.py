@@ -949,3 +949,16 @@ def test_a_sink_that_fails_on_its_own_keeps_its_error(tmp_path, registries) -> N
     ).run()
     assert result.error == "IO Error: the disk is full"
     assert result.statement is None
+
+
+def test_a_third_party_engine_runs_each_statement_split_in_its_dialect(
+    tmp_path, tsql_engine, registries
+) -> None:
+    project = compile_text(
+        "-- @cell a\n-- @engine: mssql\nSELECT 1 AS [a;b];\nSELECT 2 AS x\n",
+        root=tmp_path,
+        registries=registries,
+    )
+    [result] = run_project(project)
+    assert result.ok, result.error
+    assert tsql_engine == ["SELECT 1 AS [a;b]", "SELECT 2 AS x"]
