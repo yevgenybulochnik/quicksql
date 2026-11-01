@@ -692,17 +692,17 @@ async def test_run_and_notebook_switch_clear_the_catalog_cache(notebook) -> None
         await pilot.press("S")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) > 0
+        assert len(app.catalog.cache) > 0
         await pilot.press("q", "R")  # back to cells, rerun: outputs changed
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) == 0
+        assert len(app.catalog.cache) == 0
         await pilot.press("S")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert len(app._catalog_cache) > 0
+        assert len(app.catalog.cache) > 0
         app._load_notebook(notebook)  # switching notebooks resets everything
-        assert len(app._catalog_cache) == 0
+        assert len(app.catalog.cache) == 0
 
 
 async def test_catalog_load_error_clears_loading_subtitle(notebook) -> None:
@@ -1470,7 +1470,7 @@ async def test_5_on_an_empty_catalog_tab_loads_the_root_itself(deep_catalog) -> 
 async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeypatch) -> None:
     # S starts the root load itself *and* activates the tab, whose handler
     # also wants the root: only one load may start, or two roots get pushed
-    from quicksql.tui import app as tui
+    from quicksql.tui import catalog_view as tui
 
     calls = []
     real = tui.project_root_node

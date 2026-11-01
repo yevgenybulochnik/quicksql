@@ -17,7 +17,7 @@ import traceback
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from ..errors import QsqlError
 from ..models import RunEvent, RunResult
@@ -51,6 +51,16 @@ class RunController:
         self.gen += 1
         self.results = {}
         self.running = set()
+
+    def connect(self) -> Any:
+        """A DuckDB handle that reads what this session landed: a cursor of
+        the live conduit (it may already hold sink ATTACHes, and cursors are
+        per-thread-safe), or a throwaway connection before the first run."""
+        if self.session.conn is not None:
+            return self.session.conn.cursor()
+        import duckdb
+
+        return duckdb.connect()
 
     def close(self) -> None:
         self._cancel.set()
@@ -95,7 +105,7 @@ class RunController:
                 return  # replaced while it waited: the newer run does the work
             if project is None:
                 try:
-                    project = self.app._compile(path)
+                    project = self.app.compile_notebook(path)
                 except QsqlError as exc:
                     call(self.app.log_line, f"compile error: {exc}")
                     return

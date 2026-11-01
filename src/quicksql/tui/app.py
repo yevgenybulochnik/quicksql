@@ -18,7 +18,6 @@ from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from ..bootstrap import compile_file
-from ..catalog import CatalogCache, CatalogNode, project_root_node
 from ..compiler import Project
 from ..errors import QsqlError
 from ..models import RunResult
@@ -103,15 +102,11 @@ class QsqlApp(App):
         self.mode = "cells"  # or "data" / "catalog": whose keys these are
         self.data = DataPanes(self)  # the Data tab's sheet stacks
         self.catalog = CatalogView(self)  # the Catalog tab's own dive
-        self._catalog_dive_pending = False  # S pressed while the root loads
-        self._catalog_root_loading = False  # a root load is in flight
-        self._catalog_loading: str | None = None  # the title of a load in flight
         self._row_names: list[str] = []
         self._pending_g = False
         self._last_search = ""
         self._input_mode = "search"  # what the bottom input edits: search | filter
         self._filtering: Surface | None = None  # the surface being live-filtered
-        self._catalog_cache = CatalogCache()  # cleared on run/recompile/switch
 
     @property
     def session(self) -> RunSession:
@@ -203,7 +198,7 @@ class QsqlApp(App):
         else:
             self._show_picker(startup=True)
 
-    def _compile(self, path: Path) -> Project:
+    def compile_notebook(self, path: Path) -> Project:
         """Compile with the notebook's own registries: the builtins, the
         quicksqlrc.py next to it (reloaded when edited) and --plugins."""
         return compile_file(path, self.overrides, self.plugins, registries=self.registries)
@@ -215,17 +210,13 @@ class QsqlApp(App):
         # in-flight run of it must not paint this one
         self.runs.reset()
         self.data.reset()
-        self.catalog.stack = []
-        self._catalog_dive_pending = False
-        self._catalog_root_loading = False
-        self._catalog_cache.invalidate()
-        self.catalog.refresh()  # the old listing must not show under this notebook
+        self.catalog.reset()
         self.mode = "cells"
         self.armed = False
         self._refresh_armed_indicator()
         self.project = None
         try:
-            self.project = self._compile(self.path)
+            self.project = self.compile_notebook(self.path)
         except QsqlError as exc:
             self.log_line(f"compile error: {exc}")
             return
@@ -233,7 +224,7 @@ class QsqlApp(App):
         self._refresh_cells()
         self._refresh_detail()
         if self.query_one(TabbedContent).active == "tab_catalog":
-            self._load_catalog_root()  # no activation fires: browse the new root
+            self.catalog.load_root()  # no activation fires: browse the new root
         if self.auto_run:
             self.action_run_all()
         else:
@@ -361,8 +352,8 @@ class QsqlApp(App):
         flight, the catalog's top sheet in a catalog dive, the Data sheet when
         dived or browsed on its tab, else the selected cell. Runs and
         recompiles repaint through here, so they never overwrite a sheet's."""
-        if self._catalog_loading is not None:
-            self.sub_title = f"loading {self._catalog_loading}…"
+        if self.catalog.loading is not None:
+            self.sub_title = f"loading {self.catalog.loading}…"
         elif self.mode == "catalog" and self.catalog.stack:
             self.sub_title = self.catalog.subtitle
         elif self.data.stack and (
@@ -409,7 +400,7 @@ class QsqlApp(App):
         return Sheet(frame, title=name, sample=sample)
 
     def _preview_frame(self, name: str) -> pl.DataFrame:
-        return preview_frame(self.project, self.results.get(name), name, self._catalog_connect)
+        return preview_frame(self.project, self.results.get(name), name, self.runs.connect)
 
     # ---------- actions (footer bindings) ----------
 
@@ -492,51 +483,12 @@ class QsqlApp(App):
         tabs = self.query_one(TabbedContent)
         if tabs.active != "tab_catalog":
             tabs.active = "tab_catalog"
-        if self.catalog_stack:
-            self.mode = "catalog"
-            self.catalog.refresh()
-        else:  # root loads on a threaded worker: dive when it lands
-            self._catalog_dive_pending = True
-            # started here, not left to the activation handler: when the tab
-            # is already active, no activation fires
-            self._load_catalog_root()
-
-    def _load_catalog_root(self) -> None:
-        """Load the root listing unless there's a stack or a load in flight —
-        S/5, the tab activation and a notebook switch can all ask at once."""
-        if self.catalog_stack or self._catalog_root_loading or not self.project:
-            return
-        self._catalog_root_loading = True
-        self._catalog_worker(project_root_node(self.project, connect=self._catalog_connect))
+        self.catalog.dive()
 
     def action_refetch(self) -> None:
         """ctrl+r: drop the current catalog sheet's cached frame and reload it."""
-        if self.mode != "catalog" or not self.catalog_stack:
-            return
-        node: CatalogNode | None = self.catalog_stack[-1].drill
-        if node is None:
-            return
-        self._catalog_cache.invalidate(node)
-        self._catalog_worker(node, replace=True)
-
-    def _catalog_connect(self):
-        """DuckDB handle for catalog reads: a cursor of the live conduit (it
-        may already hold sink ATTACHes, and cursors are per-thread-safe), or
-        a throwaway connection before the first run."""
-        if self.session.conn is not None:
-            return self.session.conn.cursor()
-        import duckdb
-
-        return duckdb.connect()
-
-    def _drill_current(self) -> None:
-        sheet = self.sheet_stack[-1]
-        node: CatalogNode = sheet.drill
-        if node.child is None or sheet.frame.height == 0:
-            return  # a leaf (field-path sheet): nowhere further down
-        child = node.child(sheet.frame.row(sheet.cursor[0], named=True))
-        if child is not None:
-            self._catalog_worker(child)
+        if self.mode == "catalog":
+            self.catalog.refetch()
 
     def action_search(self) -> None:
         self._input_mode = "search"
@@ -772,7 +724,7 @@ class QsqlApp(App):
                 self.data.refresh()  # the kept dive, as it was left
         elif active == "tab_catalog":
             self._leave_data_dive()
-            self._load_catalog_root()
+            self.catalog.load_root()
         else:
             self._leave_data_dive()
             self._leave_catalog_dive()
@@ -809,7 +761,7 @@ class QsqlApp(App):
             and self.sheet_stack
             and self.sheet_stack[-1].drill is not None
         ):
-            self._drill_current()  # Enter on a catalog sheet goes deeper
+            self.catalog.drill()  # Enter on a catalog sheet goes deeper
             return
         if self.query_one(TabbedContent).active == "tab_catalog":
             # browsing the Catalog tab: dive into the listing (the catalog
@@ -834,51 +786,6 @@ class QsqlApp(App):
         if self.query_one(TabbedContent).active == "tab_data":
             self._show_current_data()  # the Data sheet follows the selection
 
-    # ---------- workers ----------
-
-    @work(thread=True, exclusive=True, group="catalog")
-    def _catalog_worker(self, node: CatalogNode, replace: bool = False) -> None:
-        self.call_from_thread(self._catalog_load_started, node.title)
-        try:
-            frame, _ = self._catalog_cache.load(node)
-        except Exception as exc:
-            self.call_from_thread(self.log_line, f"catalog {node.title}: {exc}")
-            self.call_from_thread(self.notify, f"catalog: {exc}", severity="error")
-            self.call_from_thread(setattr, self, "_catalog_dive_pending", False)
-            self.call_from_thread(setattr, self, "_catalog_root_loading", False)
-            self.call_from_thread(self._catalog_load_ended)  # drop the loading… note
-            return
-        sheet = Sheet(frame, title=node.title, drill=node)
-        if replace:  # refetch: swap the current sheet, keep the stack shape
-            self.call_from_thread(self._replace_top_sheet, sheet)
-        else:
-            self.call_from_thread(self._push_catalog_sheet, sheet)
-
-    def _catalog_load_started(self, title: str) -> None:
-        self._catalog_loading = title
-        self.refresh_subtitle()
-
-    def _catalog_load_ended(self) -> None:
-        self._catalog_loading = None
-        self.refresh_subtitle()
-
-    def _push_catalog_sheet(self, sheet: Sheet) -> None:
-        self._catalog_root_loading = False  # a root push lands on an empty stack
-        self.catalog_stack.append(sheet)
-        if self._catalog_dive_pending:  # S while the root was loading
-            self._catalog_dive_pending = False
-            self.mode = "catalog"
-        self.catalog.refresh()
-        self._catalog_load_ended()
-
-    def _replace_top_sheet(self, sheet: Sheet) -> None:
-        if self.catalog_stack:
-            self.catalog_stack[-1] = sheet
-            self.catalog.refresh()
-            self._catalog_load_ended()
-        else:
-            self._push_catalog_sheet(sheet)
-
     # ---------- run hooks (RunController, on the UI thread) ----------
 
     def run_adopted(self, project: Project) -> None:
@@ -894,7 +801,7 @@ class QsqlApp(App):
 
     def run_landed(self) -> None:
         """A run ended, the current one or a replaced one: outputs changed."""
-        self._catalog_cache.invalidate()
+        self.catalog.cache.invalidate()
 
     def run_finished(self) -> None:
         """The current run ended."""
@@ -913,7 +820,7 @@ class QsqlApp(App):
             if not touches(changes, self.path):
                 continue
             try:
-                project = self._compile(self.path)
+                project = self.compile_notebook(self.path)
             except QsqlError as exc:
                 self.log_line(f"compile error: {exc}")
                 continue
@@ -925,7 +832,7 @@ class QsqlApp(App):
         # adopt the new project before consulting autorun overlays: a freshly
         # added cell only exists in the new one (KeyError otherwise)
         self.project = project
-        self._catalog_cache.invalidate()  # cells/contexts may have changed
+        self.catalog.cache.invalidate()  # cells/contexts may have changed
         self._refresh_cells()
         self._refresh_detail()
         if not self.armed:
