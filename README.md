@@ -358,8 +358,11 @@ while toggling `autorun` or `tags` reruns nothing. An `autorun: false` cell neve
 its own, and its downstream keeps reading its old output until it does. Each save ends with
 one closing line: the rerun's counts, `nothing to rerun`, or the compile error.
 
-Each run records, in `.quicksql/state.json` next to the notebook, every cell's last status
-and the fingerprint its landed output was built from. The directory ignores itself in git.
+Each run records, in a per-notebook file under `~/.quicksql/state/`, every cell's last
+status and the fingerprint its landed output was built from; nothing is written next to the
+notebook. Set `QSQL_HOME` to move `~/.quicksql` (state files and user templates) elsewhere.
+The file is keyed on the notebook's path, so a moved or renamed notebook starts over as
+`new`.
 `quicksql status [--json]` reads it: a cell is `ok`, `failed` or `skipped` from its last
 run, `stale` when its landed output was built from something else than the cell would be
 built from now (it says why: its SQL or config changed, or an upstream landed a new output),
@@ -447,7 +450,7 @@ without Docker.
 | `config.py` | compose plugin Configs into models; scope checks; layer merging; engine/sink resolution |
 | `render.py` | Jinja on SQL bodies; `ref`/`source`/`var`/`env`; records edges + extensions |
 | `graph.py` | topo sort, cycle detection, downstream sets |
-| `state.py` | fingerprints, the `.quicksql/state.json` state file, `status` |
+| `state.py` | fingerprints, the per-notebook state file under `~/.quicksql/state/`, `status` |
 | `compiler.py` | parse → config → render → graph ⇒ a `Project` |
 | `runner.py` | topo run; the cell protocol (`execute_cell`) over each context's engine session; the plugin run-chain; the run session |
 | `conduit.py` | the DuckDB conduit: its target, and the duckdb engine's session on it |
