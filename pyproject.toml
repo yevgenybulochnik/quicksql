@@ -110,6 +110,7 @@ forbidden_modules = [
     "quicksql.scaffold",
     "quicksql.sheet",
     "quicksql.tui",
+    "quicksql.tui.**",
     "quicksql.watcher",
 ]
 ignore_imports = []
@@ -144,6 +145,7 @@ forbidden_modules = [
     "quicksql.scaffold",
     "quicksql.sheet",
     "quicksql.tui",
+    "quicksql.tui.**",
     "quicksql.watcher",
 ]
 ignore_imports = []

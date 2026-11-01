@@ -1362,7 +1362,7 @@ async def test_5_on_an_empty_catalog_tab_loads_the_root_itself(deep_catalog) -> 
 async def test_s_from_another_tab_starts_exactly_one_root_load(notebook, monkeypatch) -> None:
     # S starts the root load itself *and* activates the tab, whose handler
     # also wants the root: only one load may start, or two roots get pushed
-    import quicksql.tui as tui
+    from quicksql.tui import app as tui
 
     calls = []
     real = tui.project_root_node
@@ -1801,7 +1801,7 @@ async def test_a_save_with_nothing_to_rerun_says_so(notebook) -> None:
 
 
 async def test_a_save_compiles_the_notebook_once(notebook, monkeypatch) -> None:
-    from quicksql import tui
+    from quicksql.tui import app as tui
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:
@@ -1886,7 +1886,7 @@ async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
 
 
 async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypatch) -> None:
-    from quicksql import tui as tui_mod
+    from quicksql.tui import app as tui_mod
 
     def boom(*args, **kwargs):
         raise RuntimeError("executor exploded")
@@ -2132,7 +2132,7 @@ async def test_old_notebook_run_finishing_after_switch_leaves_new_one_alone(
     adopt its project, pend its cells or store its results in the new one."""
     import threading
 
-    from quicksql import tui as tui_mod
+    from quicksql.tui import app as tui_mod
 
     one = tmp_path / "one.qsql"
     one.write_text("-- @cell a\nSELECT 1 AS x;\n")
