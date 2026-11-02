@@ -385,6 +385,81 @@ def test_completion_alias_scopes_to_a_fake_bigquery_table(tmp_path, monkeypatch)
     assert "event_id" in fields and "name" in fields
 
 
+# ---------- the catalog on disk (docs/catalog-plan.md, Phase 3) ----------
+
+_EVENTS = (
+    "-- @input: { bigquery: { project: p } }\n"
+    "-- @cell c\nSELECT e. FROM analytics.events AS e\n"
+)
+
+
+def _counting_events(monkeypatch, calls: list[str]) -> None:
+    """BigQuery's analytics.events, each get_table recorded."""
+    from types import SimpleNamespace
+
+    from quicksql.executors.bigquery_exec import BigQueryExecutor
+
+    class FakeClient:
+        def get_table(self, path):
+            calls.append(path)
+            return SimpleNamespace(schema=[
+                SimpleNamespace(name="event_id", field_type="INT64", mode="", fields=(), description="")
+            ])
+
+    monkeypatch.setattr(BigQueryExecutor, "make_client", lambda self, spec: FakeClient())
+
+
+def _event_fields(tmp_path) -> list[str]:
+    """Column completion on ``e.`` as a freshly started LSP answers it."""
+    from quicksql.lsp.analysis import Analyzer
+
+    comps = Analyzer().completions(_EVENTS, tmp_path, 2, len("SELECT e."))
+    return [c.label for c in comps if c.kind == "field"]
+
+
+def test_a_restarted_lsp_completes_columns_from_disk(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    _counting_events(monkeypatch, calls)
+    assert _event_fields(tmp_path) == ["event_id"]
+    assert _event_fields(tmp_path) == ["event_id"]  # another process: another Analyzer
+    assert calls == ["analytics.events"]
+
+
+def test_the_lsp_reads_the_table_the_catalog_tab_loaded(tmp_path, monkeypatch) -> None:
+    from quicksql.bootstrap import compile_text
+    from quicksql.catalog import CatalogCache, project_root_node, resolve
+    from quicksql.catalog_store import default_store
+
+    calls: list[str] = []
+    _counting_events(monkeypatch, calls)
+    project = compile_text(_EVENTS, root=tmp_path)
+    resolve(project_root_node(project), ["bigquery:p", "analytics", "events"],
+            CatalogCache(store=default_store()))
+    assert _event_fields(tmp_path) == ["event_id"]
+    assert calls == ["analytics.events"]
+
+
+def test_after_a_run_on_its_engine_the_lsp_loads_the_table_afresh(tmp_path, monkeypatch) -> None:
+    from quicksql.catalog import CatalogCache
+    from quicksql.catalog_store import default_store
+
+    calls: list[str] = []
+    _counting_events(monkeypatch, calls)
+    _event_fields(tmp_path)
+    CatalogCache(store=default_store()).invalidate(scopes=["bigquery:p"])  # the TUI's run ended
+    assert _event_fields(tmp_path) == ["event_id"]
+    assert calls == ["analytics.events"] * 2
+
+
+def test_with_persistence_off_each_lsp_loads_its_own(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_PERSIST", "0")
+    calls: list[str] = []
+    _counting_events(monkeypatch, calls)
+    _event_fields(tmp_path)
+    _event_fields(tmp_path)
+    assert calls == ["analytics.events"] * 2
+
+
 def _relation_fake_client(monkeypatch, projects_seen):
     """FakeClient serving datasets p:{analytics,staging} / other-proj:{ds1},
     tables analytics:{events,users}; records which project each call used."""
