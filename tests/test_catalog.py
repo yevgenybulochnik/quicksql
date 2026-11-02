@@ -19,6 +19,7 @@ from quicksql.catalog import (
     resolve,
     sink_output_node,
 )
+from quicksql import catalog as qcatalog
 from quicksql import config
 from quicksql.bootstrap import builtin_registries, compile_text
 from quicksql.conduit import duckdb_field_paths
@@ -1331,3 +1332,286 @@ def test_bigquery_listings_ask_for_full_pages(monkeypatch) -> None:
     node.child({"dataset": "d"}).load()
     assert BigQueryExecutor.page_size == 1000
     assert asked == [("datasets", 1000), ("tables", 1000)]
+
+
+# ---------- warming: the tables a notebook names (Phase 4) ----------
+
+PG_INPUT = "-- @engine: postgres\n/*@ input: { postgres: 'postgresql://x' } */\n"
+BQ_INPUT = "-- @engine: bigquery\n/*@ input: { bigquery: p } */\n"
+
+
+def _named(text: str, root: Path, registries=None) -> list[CatalogNode]:
+    project = compile_text(text, root=root, registries=registries)
+    return list(qcatalog.named_tables(project))
+
+
+def test_named_tables_are_what_remote_cells_read_in_from_and_join(tmp_path) -> None:
+    """Built by each engine's catalog_table, stamped as the LSP stamps its
+    leaves: the cell's context, persisted. A CTE, a ref() and a local
+    engine's tables aren't warehouse tables worth a round trip ahead."""
+    leaves = _named(
+        "-- @cell local\nSELECT * FROM main.local_t;\n\n"
+        f"-- @cell pg0\n{PG_INPUT}SELECT 1 AS x;\n\n"
+        f"-- @cell pg\n{PG_INPUT}"
+        "WITH c AS (SELECT * FROM s.a)\n"
+        "SELECT * FROM c JOIN b ON true JOIN {{ ref('pg0') }} r ON true;\n\n"
+        f"-- @cell bq\n{BQ_INPUT}"
+        "SELECT * FROM ds.t JOIN `other.ds2.u` USING (id)\n"
+        "WHERE id IN (SELECT id FROM ds.v);\n",
+        tmp_path,
+    )
+    assert {leaf.cache_key: leaf.scope for leaf in leaves} == {  # key: scope
+        "postgres:postgresql://x/s.a": "postgres:postgresql://x",
+        "postgres:postgresql://x/public.b": "postgres:postgresql://x",
+        "bigquery:p/ds.t": "bigquery:p",
+        "bigquery:other/ds2.u": "bigquery:p",  # another project, read from this context
+        "bigquery:p/ds.v": "bigquery:p",
+    }
+    assert len(leaves) == 5 and all(leaf.persist for leaf in leaves)
+
+
+def test_named_tables_skip_what_the_cell_makes_and_what_jinja_hides(tmp_path) -> None:
+    """A table the cell creates, or writes into, isn't one it reads; a
+    table behind Jinja can't be known, unless it's a var() whose value
+    the LSP's mask writes in."""
+    leaves = _named(
+        f"-- @cell pg\n{PG_INPUT}/*@ vars: {{ known: s.known }} */\n"
+        "CREATE TEMP TABLE x AS SELECT * FROM s.a;\n"
+        "INSERT INTO s.z SELECT * FROM x JOIN {{ var('hidden', 's.h') }} h ON true;\n"
+        "SELECT * FROM s.a JOIN {{ var('known') }} k ON true;\n",
+        tmp_path,
+    )
+    assert sorted(leaf.cache_key for leaf in leaves) == [
+        "postgres:postgresql://x/s.a", "postgres:postgresql://x/s.known",
+    ]
+
+
+def test_named_tables_name_each_level_once(tmp_path) -> None:
+    other = "-- @engine: postgres\n/*@ input: { postgres: 'postgresql://y' } */\n"
+    leaves = _named(
+        f"-- @cell a\n{PG_INPUT}SELECT * FROM s.a;\n\n"
+        f"-- @cell b\n{PG_INPUT}SELECT * FROM s.a JOIN s.a AS again ON true;\n\n"
+        f"-- @cell c\n{other}SELECT * FROM s.a;\n",
+        tmp_path,
+    )
+    assert sorted(leaf.cache_key for leaf in leaves) == [
+        "postgres:postgresql://x/s.a", "postgres:postgresql://y/s.a",
+    ]
+
+
+def test_a_cell_that_doesnt_parse_names_nothing(tmp_path) -> None:
+    leaves = _named(
+        f"-- @cell broken\n{PG_INPUT}SELECT 'unterminated FROM s.a;\n\n"
+        f"-- @cell fine\n{PG_INPUT}SELECT * FROM s.b;\n",
+        tmp_path,
+    )
+    assert [leaf.cache_key for leaf in leaves] == ["postgres:postgresql://x/s.b"]
+
+
+def test_a_third_party_remote_engine_warms_through_its_own_catalog_table(
+    tmp_path, registries, tsql_engine, monkeypatch
+) -> None:
+    text = "-- @cell t\n-- @engine: mssql\nSELECT * FROM dbo.t JOIN dbo.missing ON 1 = 1;\n"
+    assert _named(text, tmp_path, registries) == []  # its catalog doesn't persist
+    monkeypatch.setattr(type(registries.executors.get("mssql")), "catalog_persists", True)
+    [leaf] = _named(text, tmp_path, registries)  # catalog_table knows no dbo.missing
+    assert (leaf.title, leaf.scope, leaf.persist) == ("dbo.t", "mssql:wh", True)
+
+
+# ---------- warming: loading ahead (Phase 4) ----------
+
+
+def _wait_for(condition, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            pytest.fail("timed out")
+        time.sleep(0.01)
+
+
+def test_warming_loads_whats_missing_behind_the_caller(disk) -> None:
+    calls, gate = [], threading.Event()
+    cache = disk()
+    cache.warm([_remote("a", calls, gate=gate), _remote("b", calls, gate=gate)])
+    assert cache.peek(_remote("a", calls)) is None  # warm() didn't wait for the loads
+    gate.set()
+    assert cache.wait_warm(5)
+    assert sorted(calls) == ["a", "b"]
+    later = disk()  # the next session reads them from disk
+    assert later.read(_remote("a", calls)).cached and later.read(_remote("b", calls)).cached
+    assert sorted(calls) == ["a", "b"]
+
+
+def test_warming_skips_levels_fresh_in_memory_or_on_disk(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("on_disk", calls))
+    cache = disk()
+    cache.load(_remote("in_memory", calls))
+    calls.clear()
+    cache.warm([_remote("on_disk", calls), _remote("in_memory", calls), _remote("new", calls)])
+    assert cache.wait_warm(5)
+    assert calls == ["new"]
+    assert cache.peek(_remote("on_disk", calls)) is None  # fresh on disk: not even read
+
+
+def test_warming_reloads_what_is_past_revalidation_or_cleared(disk) -> None:
+    calls: list[str] = []
+    first = disk()
+    first.load(_remote("old", calls))
+    first.load(_remote("cleared", calls, scope="postgres:h"))
+    disk.clock.now += 1
+    first.invalidate(scopes={"postgres:h"})  # a run ended there
+    disk.clock.now += 200
+    calls.clear()
+    cache = disk(revalidate_after=100)
+    cache.warm([_remote("old", calls), _remote("cleared", calls, scope="postgres:h")])
+    assert cache.wait_warm(5)
+    assert sorted(calls) == ["cleared", "old"]
+    hit = cache.read(_remote("old", calls))
+    assert hit.cached and not hit.stale and hit.age == 0
+
+
+def test_warming_leaves_levels_that_dont_persist_alone(disk) -> None:
+    calls: list[int] = []
+    cache = disk()
+    cache.warm([_counting_node("local", 1, calls)])
+    assert cache.wait_warm(5)
+    assert calls == []
+
+
+@pytest.mark.parametrize("workers", [None, 2])
+def test_warming_runs_at_most_its_workers_at_once(disk, workers) -> None:
+    lock, running, peak, calls = threading.Lock(), [0], [0], []
+
+    def node(i: int) -> CatalogNode:
+        def load() -> pl.DataFrame:
+            with lock:
+                calls.append(i)
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            time.sleep(0.05)
+            with lock:
+                running[0] -= 1
+            return pl.DataFrame({"n": [i]})
+
+        return CatalogNode(title=f"t{i}", load=load, key=f"t{i}", scope="bigquery:p", persist=True)
+
+    cache = disk() if workers is None else disk(warm_workers=workers)
+    cache.warm([node(i) for i in range(10)])
+    assert cache.wait_warm(10)
+    assert sorted(calls) == list(range(10))
+    assert 1 <= peak[0] <= (workers or 4)
+
+
+def test_an_asker_shares_a_warm_load_under_way(disk) -> None:
+    calls, gate, out = [], threading.Event(), []
+    cache = disk()
+    cache.warm([_remote("k", calls, gate=gate)])
+    _wait_for(lambda: calls == ["k"])
+    asker = threading.Thread(target=lambda: out.append(cache.read(_remote("k", calls))))
+    asker.start()
+    gate.set()
+    asker.join(5)
+    assert calls == ["k"] and out and out[0].cached
+
+
+def test_a_warm_load_that_fails_is_forgotten(disk) -> None:
+    calls, state = [], {"n": 1, "fail": True}
+    cache = disk()
+    cache.warm([_remote("k", calls, state)])
+    assert cache.wait_warm(5)
+    state["fail"] = False
+    assert not cache.read(_remote("k", calls, state)).cached
+    assert calls == ["k", "k"]
+
+
+def test_a_warm_load_a_clear_overtakes_isnt_kept(disk) -> None:
+    calls, gate = [], threading.Event()
+    cache = disk()
+    cache.warm([_remote("k", calls, gate=gate)])
+    _wait_for(lambda: calls == ["k"])
+    disk.clock.now += 1
+    cache.invalidate(scopes={"bigquery:p"})  # a run ended while it loaded
+    gate.set()
+    assert cache.wait_warm(5)
+    assert cache.peek(_remote("k", calls)) is None
+    assert not disk().read(_remote("k", calls)).cached
+
+
+def test_warming_tells_of_a_level_it_changed_not_of_one_it_added(disk) -> None:
+    calls, state, refreshed = [], {"n": 1}, []
+    cache = disk(revalidate_after=100, on_refresh=refreshed.append)
+    cache.load(_remote("held", calls, state))
+    disk.clock.now += 200
+    state["n"] = 2
+    cache.warm([_remote("held", calls, state), _remote("new", calls, state)])
+    assert cache.wait_warm(5)
+    assert [n.cache_key for n in refreshed] == ["held"]
+    assert cache.peek(_remote("held", calls))["n"].to_list() == [2]
+
+
+def test_no_warm_workers_warm_nothing(disk) -> None:
+    calls: list[str] = []
+    cache = disk(warm_workers=0)
+    cache.warm([_remote("k", calls)])
+    assert cache.wait_warm(5) and calls == []
+
+
+def test_warming_lists_its_nodes_on_a_warming_thread_and_survives_a_failing_list(disk) -> None:
+    """A generator of nodes (named_tables parses SQL) costs the caller
+    nothing; one that breaks part way warms what it yielded."""
+    calls, where = [], []
+
+    def nodes():
+        where.append(threading.current_thread().name)
+        yield _remote("k", calls)
+        raise RuntimeError("a parser bug")
+
+    cache = disk()
+    cache.warm(nodes())
+    assert cache.wait_warm(5)
+    assert where == ["catalog-warm"] and calls == ["k"]
+
+
+# ---------- settings (Phase 4) ----------
+
+
+def test_catalog_settings_without_the_environment_are_the_defaults() -> None:
+    got = qcatalog.settings({})
+    assert (got.revalidate_after, got.max_age, got.warm_workers) == (15 * 60, 7 * 24 * 3600, 4)
+
+
+@pytest.mark.parametrize(
+    "value, seconds",
+    [("60", 60), ("0", 0), ("90s", 90), ("15m", 900), ("2h", 7200), ("1.5h", 5400), ("7d", 604800), (" 3D ", 259200)],
+)
+def test_catalog_ages_are_seconds_or_a_number_and_a_unit(value, seconds) -> None:
+    got = qcatalog.settings({"QSQL_CATALOG_REVALIDATE_AFTER": value, "QSQL_CATALOG_MAX_AGE": value})
+    assert (got.revalidate_after, got.max_age) == (seconds, seconds)
+
+
+@pytest.mark.parametrize("value", ["", "soon", "-5", "5x", "m"])
+def test_an_age_that_doesnt_read_keeps_its_default(value) -> None:
+    got = qcatalog.settings({"QSQL_CATALOG_REVALIDATE_AFTER": value, "QSQL_CATALOG_MAX_AGE": value})
+    assert (got.revalidate_after, got.max_age) == (15 * 60, 7 * 24 * 3600)
+
+
+@pytest.mark.parametrize(
+    "value, workers",
+    [("0", 0), ("off", 0), ("false", 0), ("no", 0), ("8", 8), ("1", 1),
+     ("on", 4), ("true", 4), ("yes", 4), ("", 4), ("lots", 4), ("-1", 4)],
+)
+def test_qsql_catalog_warm_stops_warming_or_sets_its_workers(value, workers) -> None:
+    assert qcatalog.settings({"QSQL_CATALOG_WARM": value}).warm_workers == workers
+
+
+def test_the_default_cache_takes_the_environments_settings(monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_REVALIDATE_AFTER", "1m")
+    monkeypatch.setenv("QSQL_CATALOG_MAX_AGE", "1h")
+    monkeypatch.setenv("QSQL_CATALOG_WARM", "2")
+    refreshed = []
+    cache = qcatalog.default_cache(on_refresh=refreshed.append)
+    assert (cache.revalidate_after, cache.max_age, cache.warm_workers) == (60, 3600, 2)
+    assert cache.store is not None and cache.on_refresh == refreshed.append
+    monkeypatch.setenv("QSQL_CATALOG_PERSIST", "0")
+    assert qcatalog.default_cache().store is None

@@ -76,7 +76,7 @@ CACHE_CAP_MB = 64  # the in-memory cap Phase 1 introduces
 
 
 def rtts(kind: str) -> int:
-    return PG_CONNECT_RTT if kind.removeprefix("behind.") == "pg.connect" else 1
+    return PG_CONNECT_RTT if kind.endswith("pg.connect") else 1
 
 
 @dataclass
@@ -88,8 +88,11 @@ class Meter:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def hit(self, kind: str) -> None:
-        if threading.current_thread().name.startswith("catalog-refresh"):
+        thread = threading.current_thread().name
+        if thread.startswith("catalog-refresh"):
             kind = f"behind.{kind}"  # a refresh behind an answer, not before it
+        elif thread.startswith("catalog-warm"):
+            kind = f"warm.{kind}"  # warming ahead of any asker
         with self.lock:
             self.calls[kind] += 1
         if self.latency:
@@ -371,8 +374,11 @@ def backend(request: pytest.FixtureRequest, engine: str) -> tuple[Shape, Meter]:
 
 @pytest.fixture
 def stress_project(tmp_path, monkeypatch, registries) -> Callable[[], Project]:
-    """Compile the stress notebook (again, as a save does) in a scratch root."""
+    """Compile the stress notebook (again, as a save does) in a scratch root.
+    Warming is off, so each scenario counts its own path's round trips; S12
+    turns it on."""
     monkeypatch.setenv("QSQL_STRESS_PG_DSN", PG_DSN)
+    monkeypatch.setenv("QSQL_CATALOG_WARM", "0")
     nb = tmp_path / "catalog.qsql"
     shutil.copy(NOTEBOOK, nb)
     sets = [f"input.bigquery.endpoint={BQ_ENDPOINT}"] if BQ_ENDPOINT != "http://localhost:9052" else []
@@ -781,27 +787,59 @@ def _rss_mb() -> float:
 # ---------- S12: the tables a notebook names ----------
 
 
+def named_notebook(path: Path, shape: Shape) -> Path:
+    """A notebook whose one cell names ``shape.named`` (30 tables) in that
+    engine's stress context."""
+    if shape.engine == "bigquery":
+        head = (f"-- @engine: bigquery\n/*@ input: {{ bigquery: "
+                f"{{ project: {BQ_PROJECT}, endpoint: {BQ_ENDPOINT} }} }} */\n")
+    else:
+        head = "-- @engine: postgres\n/*@ input: { postgres: { dsn: $QSQL_STRESS_PG_DSN } } */\n"
+    body = "\nUNION ALL ".join(f"SELECT 1 AS n FROM {table}" for table in shape.named)
+    path.write_text(f"-- @cell named\n{head}{body};\n")
+    return path
+
+
 @pytest.mark.parametrize("engine", ["bq", "pg"])
-def test_s12_named_tables_load_once(engine, request, stress_project) -> None:
-    """A notebook naming 30 tables, opened twice: 30 loads the first time,
-    none the second while they're fresh (Phase 3's disk; Phase 4's warming
-    moves the first loads to the open, not their count)."""
+def test_s12_opening_warms_the_named_tables(
+    engine, request, stress_project, fake_driver, registries, tmp_path, monkeypatch
+) -> None:
+    """Open a notebook naming 30 tables: the open itself makes no round
+    trip, so the TUI paints as soon as it would without warming, and the
+    30 loads run behind it. Then the LSP completes every table without a
+    round trip, and a second open, while they're fresh, loads nothing."""
     shape, meter = backend(request, engine)
-    project = stress_project()
-    cell = project.cells[shape.cell]
+    stress_project()  # its fixture sets the Postgres DSN's variable
+    nb = named_notebook(tmp_path / "named.qsql", shape)
 
-    def session() -> list[list[Any]]:
-        cache = SchemaCache()  # each session starts its own, over the shared disk
-        return [columns_for(project, cell, t, cache) for t in shape.named]
+    def opened(warm: str) -> tuple[LiveHost, float]:
+        monkeypatch.setenv("QSQL_CATALOG_WARM", warm)
+        start = time.perf_counter()
+        host = live_host(fake_driver, compile_file(nb, registries=registries))
+        return host, round((time.perf_counter() - start) * 1000, 1)
 
+    _, cold_ms = opened("0")
     with measuring(meter) as first:
-        columns = session()
+        host, open_ms = opened("4")
+        if not host.catalog_cache.wait_warm(120):
+            pytest.fail("warming never finished")
+    project = host.project
+    with measuring(meter) as lsp:
+        columns = [columns_for(project, project.cells["named"], t, SchemaCache()) for t in shape.named]
     with measuring(meter) as again:
-        session()
-    record("S12", f"{engine}/first open", first)
+        host, _ = opened("4")
+        if not host.catalog_cache.wait_warm(120):
+            pytest.fail("warming never finished")
+    warm = engine_trips(first, "warm.")
+    record("S12", f"{engine}/first open", {**first, "warm_round_trips": warm,
+                                           "open_ms": open_ms, "open_ms_without_warming": cold_ms})
+    record("S12", f"{engine}/LSP after warming", lsp)
     record("S12", f"{engine}/second open", again)
     if not all(columns):
         pytest.fail("a named table had no columns: has the seed changed?")
-    loads = lambda m: m["calls"].get("pg.connect", 0) + m["calls"].get("bq.tables.get", 0)  # noqa: E731
-    assert loads(first) == len(shape.named)
-    assert loads(again) == 0
+    loads = lambda m, prefix="": (  # noqa: E731
+        m["calls"].get(f"{prefix}pg.connect", 0) + m["calls"].get(f"{prefix}bq.tables.get", 0))
+    assert loads(first, "warm.") == len(shape.named)
+    assert first["round_trips"] == warm  # none of them on the opening thread
+    assert lsp["round_trips"] == 0
+    assert again["round_trips"] == 0

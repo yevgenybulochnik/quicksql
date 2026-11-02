@@ -173,3 +173,39 @@ def test_the_default_store_lives_under_qsql_home(monkeypatch, tmp_path) -> None:
 def test_qsql_catalog_persist_off_means_no_store(monkeypatch, value) -> None:
     monkeypatch.setenv("QSQL_CATALOG_PERSIST", value)
     assert default_store() is None
+
+
+# ---------- warming and settings (Phase 4) ----------
+
+
+def test_saved_at_reads_when_a_level_was_loaded_without_its_frame(tmp_path) -> None:
+    store = CatalogStore(tmp_path / "catalog")
+    store.put("k", frame(), saved_at=500.0, scope="s")
+    assert store.saved_at("k", scope="s") == 500.0
+    assert store.saved_at("missing", scope="s") is None
+
+
+def test_saved_at_misses_a_level_its_scope_cleared_since(tmp_path) -> None:
+    store = CatalogStore(tmp_path / "catalog")
+    store.put("k", frame(), saved_at=500.0, scope="s")
+    store.clear(["s"], at=600.0)
+    assert store.saved_at("k", scope="s") is None
+
+
+def test_saved_at_misses_an_unreadable_level(tmp_path) -> None:
+    store = CatalogStore(tmp_path / "catalog")
+    store.put("k", frame(), saved_at=500.0, scope=None)
+    [path] = levels(tmp_path / "catalog")
+    path.write_bytes(b"not a header\n")
+    assert store.saved_at("k", scope=None) is None
+
+
+def test_qsql_catalog_size_mb_caps_the_disk(monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_SIZE_MB", "10")
+    assert default_store().max_bytes == 10 * 2**20
+
+
+@pytest.mark.parametrize("value", ["", "lots", "-5", "0"])
+def test_a_size_that_isnt_a_positive_number_keeps_the_default_cap(monkeypatch, value) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_SIZE_MB", value)
+    assert default_store().max_bytes == 256 * 2**20

@@ -2,12 +2,14 @@
 through a fake driver (no Textual, no socket)."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
 from quicksql.bootstrap import compile_file
 from quicksql.catalog import CatalogCache, CatalogNode
+from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.live.host import LiveHost
 from quicksql.live.protocol import LiveError
 from quicksql.models import RunEvent, RunResult
@@ -443,6 +445,13 @@ def test_persistence_off_keeps_the_hosts_catalog_in_memory(nb, fake_driver, monk
     assert host.catalog_cache.store is None
 
 
+def test_the_hosts_catalog_ages_levels_as_the_environment_says(nb, fake_driver, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_REVALIDATE_AFTER", "1m")
+    monkeypatch.setenv("QSQL_CATALOG_MAX_AGE", "2d")
+    cache = LiveHost(fake_driver, nb).catalog_cache
+    assert (cache.revalidate_after, cache.max_age) == (60, 2 * 24 * 3600)
+
+
 def test_a_refresh_behind_that_changed_a_level_is_an_event(host) -> None:
     calls, state = [], {"n": 1}
     cache = host.catalog_cache
@@ -471,6 +480,72 @@ def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb) -> Non
     old.read(_remote_level("bigquery:p", calls, state))
     assert old.wait_refreshes(5)
     assert _invalidated(host, since) == []
+
+
+# ---------- warming (Phase 4) ----------
+
+
+class PgColumns:
+    """A Postgres where every table has one column; it records each table
+    whose columns it's asked for."""
+
+    def __init__(self, asked: list[str]) -> None:
+        self.asked = asked
+
+    def execute(self, sql, params=None):
+        if "information_schema.columns" in sql:
+            self.asked.append(".".join(params))
+            return SimpleNamespace(fetchall=lambda: [("id", "integer", "NO", None)])
+        return SimpleNamespace(fetchall=lambda: [])
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def pg_asked(monkeypatch) -> list[str]:
+    asked: list[str] = []
+    monkeypatch.setattr(PostgresExecutor, "make_connection", lambda self, dsn: PgColumns(asked))
+    return asked
+
+
+def _pg_notebook(path: Path, tables: str) -> Path:
+    path.write_text(
+        "-- @cell local\nSELECT 1 AS x;\n\n"
+        "-- @cell pg\n-- @engine: postgres\n/*@ input: { postgres: 'postgresql://x' } */\n"
+        f"SELECT * FROM {tables};\n"
+    )
+    return path
+
+
+def _opened(path: Path, driver) -> LiveHost:
+    host = LiveHost(driver, path)
+    driver.host = host
+    host.loaded(compile_file(path))
+    return host
+
+
+def test_opening_a_notebook_warms_the_tables_its_cells_name(tmp_path, fake_driver, pg_asked) -> None:
+    host = _opened(_pg_notebook(tmp_path / "nb.qsql", "s.a JOIN s.b ON true"), fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    assert sorted(pg_asked) == ["s.a", "s.b"]
+
+
+def test_a_save_warms_what_it_newly_names(tmp_path, fake_driver, pg_asked) -> None:
+    nb = _pg_notebook(tmp_path / "nb.qsql", "s.a")
+    host = _opened(nb, fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    _pg_notebook(nb, "s.a JOIN s.c ON true")
+    host.recompiled(compile_file(nb), ["pg"])
+    assert host.catalog_cache.wait_warm(5)
+    assert pg_asked == ["s.a", "s.c"]  # s.a is still fresh
+
+
+def test_with_warming_off_nothing_loads_ahead(tmp_path, fake_driver, pg_asked, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_WARM", "0")
+    host = _opened(_pg_notebook(tmp_path / "nb.qsql", "s.a"), fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    assert pg_asked == []
 
 
 # ---------- browsing the catalog (quicksql live catalog) ----------

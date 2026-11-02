@@ -460,6 +460,15 @@ def test_with_persistence_off_each_lsp_loads_its_own(tmp_path, monkeypatch) -> N
     assert calls == ["analytics.events"] * 2
 
 
+def test_the_lsps_catalog_ages_levels_as_the_environment_says(monkeypatch) -> None:
+    from quicksql.lsp.schema import SchemaCache
+
+    monkeypatch.setenv("QSQL_CATALOG_REVALIDATE_AFTER", "1m")
+    monkeypatch.setenv("QSQL_CATALOG_MAX_AGE", "2d")
+    cache = SchemaCache().catalog
+    assert (cache.revalidate_after, cache.max_age) == (60, 2 * 24 * 3600)
+
+
 def _relation_fake_client(monkeypatch, projects_seen):
     """FakeClient serving datasets p:{analytics,staging} / other-proj:{ds1},
     tables analytics:{events,users}; records which project each call used."""
