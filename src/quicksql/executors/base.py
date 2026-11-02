@@ -215,6 +215,10 @@ class Executor(ABC):
     # ---- the catalog: optional; an engine without one is listed, not browsed.
     # Nodes load lazily, so building one connects to nothing.
 
+    # whether its catalog's levels are kept on disk across sessions
+    # (catalog_store): worth it where a load is a round trip to a server
+    catalog_persists: ClassVar[bool] = False
+
     def catalog(self, config: Any, root: Path) -> CatalogNode | None:
         """The browsable tree of the context ``config`` names (the TUI's
         catalog), or None when it can't be browsed."""

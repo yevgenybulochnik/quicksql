@@ -41,6 +41,7 @@ __all__ = [
     "redact",
     "resolve",
     "sink_output_node",
+    "stamp",
 ]
 
 DEFAULT_MAX_BYTES = 64 * 2**20  # a cache holds this much; the least recently used goes first
@@ -364,20 +365,27 @@ def sink_output_node(
     return CatalogNode(title=f"schema({cell_name})", load=load)
 
 
-def _scoped(node: CatalogNode | None, scope: str) -> CatalogNode | None:
-    """``node`` and every level beneath it, stamped with ``scope``."""
+def stamp(node: CatalogNode | None, *, scope: str | None, persist: bool) -> CatalogNode | None:
+    """``node`` and every level beneath it, stamped with the top-level row
+    it sits under (``scope``) and whether it's kept on disk (``persist``:
+    its engine's ``catalog_persists``). The root stamps its subtrees; the
+    LSP stamps the leaves it builds itself."""
     if node is None:
         return None
     child = node.child
     if child is None:
-        return replace(node, scope=scope)
-    return replace(node, scope=scope, child=lambda row: _scoped(child(row), scope))
+        return replace(node, scope=scope, persist=persist)
+    return replace(
+        node, scope=scope, persist=persist,
+        child=lambda row: stamp(child(row), scope=scope, persist=persist),
+    )
 
 
 def project_root_node(project: Project, connect: Callable[[], Any] | None = None) -> CatalogNode:
     """Top level: the project's engine contexts (deduped), @catalog-declared
     browse targets, and cell outputs. Each subtree is scoped by its row's
-    name (``CatalogNode.scope``)."""
+    name (``CatalogNode.scope``) and persists as its engine declares
+    (``stamp``)."""
     registries = project.registries
     contexts: list[tuple[str, str, Any]] = []  # (context_key, engine, config)
     seen: set[str] = set()
@@ -415,14 +423,15 @@ def project_root_node(project: Project, connect: Callable[[], Any] | None = None
 
     def child(row: dict[str, Any]) -> CatalogNode | None:
         name = row["name"]
-        if row["kind"] == "output":
+        if row["kind"] == "output":  # local, and a run rewrites it: never kept
             cell = project.cells[name]
             node = sink_output_node(cell.name, cell.config, project.root, registries, connect=connect)
-        elif name in declared:
+            return stamp(node, scope=name, persist=False)
+        executor = registries.executors.get(row["engine"])
+        if name in declared:
             node = declared[name]
         else:
-            engine, config = by_key[name]
-            node = registries.executors.get(engine).catalog(config, project.root)
-        return _scoped(node, name)
+            node = executor.catalog(by_key[name][1], project.root)
+        return stamp(node, scope=name, persist=executor.catalog_persists)
 
     return CatalogNode(title="catalog", load=lambda: frame, child=child)

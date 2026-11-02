@@ -69,6 +69,7 @@ class PostgresExecutor(Executor):
     dialect = "postgres"
     supports_context_refs = True
     input_shorthand = "dsn"
+    catalog_persists = True
 
     def context_key(self, config: Any) -> str:
         return _context_key(_dsn(config))

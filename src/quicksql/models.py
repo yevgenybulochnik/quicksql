@@ -276,6 +276,8 @@ class CatalogNode:
     # the top-level row this level sits under (a context key, an @catalog
     # target, an output's cell), so a cache can drop one subtree
     scope: str | None = None
+    # kept on disk across sessions (its engine's ``catalog_persists``)
+    persist: bool = False
 
     @property
     def cache_key(self) -> str:

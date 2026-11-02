@@ -114,6 +114,7 @@ class BigQueryExecutor(Executor):
     # listings ask for full pages: the API's own default page is smaller, and
     # each page is a round trip
     page_size = 1000
+    catalog_persists = True
 
     def split_statements(self, sql: str) -> list[str]:
         return [strip_trailing_semicolon(sql)]
@@ -220,6 +221,10 @@ class BigQueryExecutor(Executor):
             return holder["client"]
 
         title = f"bigquery:{spec.get('project')}"
+        # the key names the endpoint too: two emulators can hold a project of
+        # the same name, and the disk keeps levels across sessions
+        endpoint = spec.get("endpoint")
+        base = f"{title}@{endpoint}" if endpoint else title
 
         def dataset_node(ds: str) -> CatalogNode:
             def tables_load() -> pl.DataFrame:
@@ -237,11 +242,15 @@ class BigQueryExecutor(Executor):
                 return CatalogNode(
                     title=f"{ds}.{table}",
                     load=lambda: bq_field_paths(client().get_table(f"{ds}.{table}").schema),
-                    key=f"{title}/{ds}.{table}",
+                    key=f"{base}/{ds}.{table}",
                 )
 
             return CatalogNode(
-                title=f"{title}/{ds}", load=tables_load, child=tables_child, name_columns=("table",)
+                title=f"{title}/{ds}",
+                load=tables_load,
+                child=tables_child,
+                key=f"{base}/{ds}",
+                name_columns=("table",),
             )
 
         if dataset is not None:
@@ -254,4 +263,4 @@ class BigQueryExecutor(Executor):
         def child(row: dict[str, Any]) -> CatalogNode:
             return dataset_node(row["dataset"])
 
-        return CatalogNode(title=title, load=load, child=child, name_columns=("dataset",))
+        return CatalogNode(title=title, load=load, child=child, key=base, name_columns=("dataset",))

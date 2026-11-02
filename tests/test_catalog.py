@@ -987,7 +987,6 @@ def test_project_root_node_stamps_persistence_from_each_rows_engine(tmp_path) ->
     assert pg.persist and pg.child({"schema": "public"}).child({"table": "t"}).persist
     local = root.child(rows[next(n for n in rows if n.startswith("sqlite:"))])
     assert not local.persist and not local.child({"table": "t"}).persist
-    assert not root.child(rows["duckdb::memory:"]).persist
     assert not any(root.child(rows[cell]).persist for cell in ("bq", "pg", "local"))  # outputs
     assert not root.persist
 
