@@ -1,9 +1,39 @@
 # Plan: the schema catalog for agents, fast on big warehouses
 
-**Status:** Phases 0–1 done (2026-11-01, branch `feat/live-catalog`): the stress harness
-and baseline are in `stress/catalog/`, and the catalog core is in `catalog.py`. Phases 1–2
-implement issue #11 (`quicksql live catalog`). Phases 3–5 are a follow-up issue: keeping
+**Status:** Phases 0–2 done (2026-11-02, branch `feat/live-catalog`), so issue #11
+(`quicksql live catalog`) is implemented. The stress harness and baseline are in
+`stress/catalog/`, the catalog core is in `catalog.py`, and the live side is in
+`live/host.py`, `live/server.py` and the CLI. Phases 3–5 are a follow-up issue: keeping
 the remote catalog across sessions, and warming it.
+
+Phase 2 as built, where it differs from the plan below:
+- **The host owns the catalog.** `LiveHost.catalog_cache` (a fresh one per notebook) and
+  `catalog_root(project)` (one per compiled project, built with `Driver.connect`, which
+  is new) are shared by the Catalog tab and `quicksql live catalog`.
+- **A save clears the top level and the outputs,** not just the top level, because a
+  save can move where an output lands.
+- **A run clears the contexts on every engine its cells ran on or landed in,** a sink type
+  that names an engine counting too (a sqlite cell with a duckdb sink clears duckdb). It
+  also clears the outputs of the cells that ran; a skipped cell clears nothing.
+- **The event:** `catalog_invalidated` carries `reason`, `run_id`, `top_level` and
+  `scopes`.
+- **The socket method.** `catalog` takes `path`, `offset`, `rows` (200), `match`,
+  `columns`, `top_level`, `refresh` and `timeout` (60 s). It answers
+  `{path, title, leaf, columns, rows, names, total, offset, next_offset, cached}`:
+  `names` is new (the next segment for each row), and there's no `key`.
+- **Errors:** `unknown_path` (exit 3) names the segment and the closest rows;
+  `load_failed` (exit 1) is redacted.
+- **The CLI.** `quicksql live catalog FILE [PATH...]` checks that the TUI's `hello` lists
+  `catalog` and says to restart it if not. Text output shows each row's name whole and
+  once.
+- **Stress:** S4–S7 meet their budgets.
+  - S4, twenty saves: BigQuery 60 → 0 round trips, Postgres 240 → 0.
+  - S5: after a DuckDB run 15 → 0; after a BigQuery run 15 → 3.
+  - S7: the largest response for the 9950-column leaf 10 MB → 1.07 MB.
+- **Verified end to end against the stress stack:** the TUI hosted the stress notebook
+  while the CLI read its catalog. It checked exact paths, paging, filters, a mistyped
+  segment, Postgres through its redacted name (the password never shown), a level the
+  TUI loaded read back cached by the CLI, and a save's event.
 
 Phase 1 as built, where it differs from the plan below:
 - **Walking by name.** `catalog.resolve(root, path, cache)` returns a `Resolved` (node,
