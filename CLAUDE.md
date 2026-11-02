@@ -111,8 +111,11 @@ first `@cell`) inherited by every cell.
   subscriber queues (`events_lost`, never unbounded growth). `quicksql tui` serves it on a
   per-notebook 0600 Unix socket (`live.protocol.socket_path`: `$QSQL_HOME/run/`, or the
   runtime dir when too long) from the TUI's own loop (`live/server.py`), so requests and
-  keys share one thread; DuckDB reads (`head`, `query`) run on a worker through
-  `RunController.reading()`, which holds the session open. `quicksql live …` is the
+  keys share one thread; DuckDB reads (`head`, `query`) and catalog loads (`catalog`) run
+  on a worker through `RunController.reading()`, which holds the session open. The host
+  owns the schema catalog (`catalog_cache`, one `catalog_root` per project), shared by
+  the Catalog tab and `quicksql live catalog`; a save drops the top level and outputs, a
+  run the contexts on engines it ran on or landed in (`catalog_invalidated`). `quicksql live …` is the
   stdlib client (no Textual/Polars). Still reflect-only for the file: the socket never
   writes it. `quicksql run`/`watch` refuse while a TUI hosts the notebook (one runner per
   notebook); `QsqlApp(live=False)` by default, so tests opt in.

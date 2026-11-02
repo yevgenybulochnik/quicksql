@@ -92,6 +92,21 @@ A cell's `"status"`: `queued`, `running`, `ok`, `failed`, `skipped`, `stale` or 
 
 `quicksql live query SQL --json`: `{"columns": [...], "rows": [[...]]}`.
 
+`quicksql live catalog NOTEBOOK [PATH...] --json`, one page of one level:
+
+```json
+{"path": ["bigquery:proj", "sales"], "title": "bigquery:proj/sales", "leaf": false,
+ "columns": ["table", "type"], "rows": [["orders", "TABLE"], ["orders_2024", "VIEW"]],
+ "names": ["orders", "orders_2024"], "total": 412, "offset": 0, "next_offset": 200,
+ "cached": false}
+```
+
+- `names` holds each row's next path segment; it's `null` at a leaf.
+- A leaf's columns are `column`, `field_path`, `type`, `mode` and `description`.
+- `next_offset` is `null` on the last page.
+- `cached` says the level came from the shared cache.
+- `total` counts the rows after `--match` and `--top-level`.
+
 ## Events
 
 `quicksql live events` prints `{"seq": 57, "kind": "controls_changed", ...}` per line; the
@@ -106,9 +121,9 @@ with the code's exit status:
 |---|---|
 | `no_session`, `timeout`, `protocol`, `events_lost` | 4 |
 | `busy`, `refused` | 5 |
-| `unknown_cell`, `no_project` | 3 |
+| `unknown_cell`, `unknown_path`, `no_project` | 3 |
 | `invalid`, `unknown_method`, `unsupported` | 2 |
-| `not_readable`, `query_failed`, `internal` | 1 |
+| `not_readable`, `query_failed`, `load_failed`, `internal` | 1 |
 
 ## `quicksql directives NOTEBOOK --json`
 

@@ -625,6 +625,8 @@ _EXIT_FOR = {
     live_protocol.UNSUPPORTED: 2,
     live_protocol.NOT_READABLE: EXIT_FAILED,
     live_protocol.QUERY_FAILED: EXIT_FAILED,
+    live_protocol.UNKNOWN_PATH: EXIT_COMPILE,
+    live_protocol.LOAD_FAILED: EXIT_FAILED,
     live_protocol.INTERNAL: EXIT_FAILED,
 }
 
@@ -814,8 +816,8 @@ def live_events(
 
     Kinds: compiled,
     compile_failed, run_started, cell_started, cell_finished, run_finished,
-    run_ended, settled, controls_changed, notebook_closed. Without --follow,
-    the recent ones (after --since) and exit."""
+    run_ended, settled, controls_changed, catalog_invalidated, notebook_closed.
+    Without --follow, the recent ones (after --since) and exit."""
     wanted = [k for k in (kinds or "").split(",") if k]
 
     def show(event: dict[str, Any]) -> None:
@@ -854,6 +856,66 @@ def live_query(
         typer.echo(json.dumps(got, default=str))
     else:
         _print_table(got["columns"], got["rows"])
+
+
+@live_app.command("catalog")
+def live_catalog(
+    file: Path = FILE_ARG,
+    path: Optional[list[str]] = typer.Argument(
+        None, help="The level to read: a row name per level, from the top"
+    ),
+    rows: int = typer.Option(200, "--rows", "-n", min=1, max=live_protocol.MAX_ROWS),
+    offset: int = typer.Option(0, "--offset", min=0, help="The first row to show"),
+    match: Optional[str] = typer.Option(
+        None, "--match", help="Only rows whose name (at a table: field path) contains this, any case"
+    ),
+    columns: Optional[str] = typer.Option(None, "--columns", help="Comma-separated columns to show"),
+    top_level: bool = typer.Option(
+        False, "--top-level", help="At a table: top-level columns only, no nested field paths"
+    ),
+    refresh: bool = typer.Option(False, "--refresh", help="Load the level afresh, not from the cache"),
+    timeout: float = typer.Option(60, "--timeout", help="Seconds to wait for a load (it carries on)"),
+    json_out: bool = JSON_OPT,
+) -> None:
+    """Read the schema catalog the TUI's Catalog tab shows, a level at a time.
+
+    The top level lists the notebook's contexts (engine connections), its @catalog
+    targets and its cells' outputs; name one to go a level down, then a schema or
+    dataset, then a table, whose rows are its columns' field paths and types. Each
+    row's name is the next path segment: `quicksql live catalog NOTEBOOK
+    bigquery:proj sales orders`. Metadata only, never table contents. Exit 3 for a
+    path that leads nowhere (the error names the closest rows), 1 when a load fails."""
+    params: dict[str, Any] = {
+        "path": list(path or []), "offset": offset, "rows": rows, "top_level": top_level,
+        "refresh": refresh, "timeout": timeout,
+    }
+    if match:
+        params["match"] = match
+    if columns:
+        params["columns"] = [c.strip() for c in columns.split(",") if c.strip()]
+
+    def go(client: LiveClient) -> Any:
+        if "catalog" not in client.hello.get("methods", ()):
+            raise LiveError(
+                live_protocol.UNKNOWN_METHOD,
+                "this TUI predates `quicksql live catalog`: restart it to read the catalog",
+            )
+        return client.call("catalog", **params)
+
+    got = _live_call(file, json_out, go)
+    if json_out:
+        typer.echo(json.dumps(got, default=str))
+        return
+    shown = len(got["rows"])
+    span = f"{got['offset'] + 1}–{got['offset'] + shown} of {got['total']}" if shown else f"0 of {got['total']}"
+    typer.secho(f"{got['title']} · {span}" + (" · cached" if got["cached"] else ""), bold=True)
+    table_columns, table_rows = got["columns"], got["rows"]
+    if got["names"] is not None and "name" not in table_columns:
+        table_columns = ["name", *table_columns]  # what to type to go deeper
+        table_rows = [[name, *row] for name, row in zip(got["names"], table_rows)]
+    _print_table(table_columns, table_rows)
+    if got["next_offset"] is not None:
+        typer.echo(f"more: --offset {got['next_offset']}")
 
 
 @live_app.command("focus")

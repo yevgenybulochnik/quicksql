@@ -31,17 +31,21 @@ from ..watcher import should_rerun
 from .protocol import (
     BUSY,
     INVALID,
+    LOAD_FAILED,
+    MAX_LINE,
     MAX_ROWS,
     NO_PROJECT,
     NOT_READABLE,
     QUERY_FAILED,
     REFUSED,
     UNKNOWN_CELL,
+    UNKNOWN_PATH,
     LiveError,
+    encode,
 )
 
 if TYPE_CHECKING:
-    from ..catalog import CatalogNode
+    from ..catalog import CatalogCache, CatalogNode, Resolved
     from ..compiler import Project
 
 
@@ -392,6 +396,59 @@ class LiveHost:
             self._catalog_project = project
         return self._catalog_root
 
+    def catalog_scope(self) -> tuple[CatalogNode, CatalogCache]:
+        """The top level and the cache a ``browse`` reads, taken on the loop
+        thread before a worker reads them."""
+        return self.catalog_root(self._need_project()), self.catalog_cache
+
+    def browse(
+        self,
+        root: CatalogNode,
+        cache: CatalogCache,
+        path: list[str],
+        *,
+        offset: int,
+        rows: int,
+        match: str | None = None,
+        columns: list[str] | None = None,
+        top_level: bool = False,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """One page of the catalog level ``path`` names (a worker thread):
+        walked and loaded through ``cache``, filtered, each row named for the
+        next segment, everything shown redacted, and cut to fit one message."""
+        from ..catalog import CatalogPathError, narrow, resolve
+
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise LiveError(INVALID, "offset is a non-negative integer")
+        rows = _rows(rows)
+        registries = self._registries()
+        with self.driver.reading():  # held in use: a notebook switch waits for the load
+            try:
+                got = resolve(root, path, cache, refresh=refresh)
+            except CatalogPathError as err:
+                raise LiveError(UNKNOWN_PATH, _redact(str(err), registries)) from None
+            except Exception as exc:
+                message = _redact(f"{type(exc).__name__}: {exc}", registries)
+                raise LiveError(LOAD_FAILED, f"loading {' / '.join(path) or 'the catalog'}: {message}") from None
+        try:
+            frame = narrow(got.node, got.frame, match=match, columns=columns, top_level=top_level)
+        except ValueError as exc:
+            raise LiveError(INVALID, str(exc)) from None
+        budget = MAX_LINE - 4096  # the envelope's room
+        while True:
+            doc = _catalog_page(got, frame, offset, rows, path, registries)
+            if rows == 1 or len(encode({"id": 0, "result": doc})) <= budget:
+                return doc
+            rows = max(1, rows // 2)
+
+    def _registries(self) -> Any:
+        if self.project is not None:
+            return self.project.registries
+        from ..bootstrap import builtin_registries
+
+        return builtin_registries()
+
     def _run_scopes(self, results: Iterable[RunResult]) -> set[str]:
         """The top-level rows a run's results may have changed: the contexts
         on every engine its cells ran on or landed in, and their outputs. A
@@ -698,6 +755,38 @@ class LiveHost:
 def _summary(results: Iterable[RunResult]) -> dict[str, int]:
     counts = Counter(r.status for r in results)
     return {s: counts[s] for s in ("ok", "failed", "skipped")}
+
+
+def _redact(text: str, registries: Any) -> str:
+    from ..catalog import redact
+
+    return redact(text, registries)
+
+
+def _catalog_page(
+    got: Resolved, frame: Any, offset: int, rows: int, path: list[str], registries: Any
+) -> dict[str, Any]:
+    """A page of a resolved level, as the socket sends it: every string
+    shown through the engines' redaction."""
+    from ..catalog import page
+
+    doc = page(got.node, frame, offset, rows)
+
+    def shown(value: Any) -> Any:
+        return _redact(value, registries) if isinstance(value, str) else value
+
+    return {
+        "path": [shown(p) for p in path],
+        "title": shown(doc["title"]),
+        "leaf": doc["leaf"],
+        "columns": [shown(c) for c in doc["columns"]],
+        "rows": [[shown(v) for v in row] for row in doc["rows"]],
+        "names": None if doc["names"] is None else [shown(n) for n in doc["names"]],
+        "total": doc["total"],
+        "offset": doc["offset"],
+        "next_offset": doc["next_offset"],
+        "cached": got.cached,
+    }
 
 
 def _rows(rows: int) -> int:

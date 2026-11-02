@@ -196,7 +196,9 @@ class Resolved:
     path: tuple[str, ...]
 
 
-def resolve(root: CatalogNode, path: Sequence[str], cache: CatalogCache) -> Resolved:
+def resolve(
+    root: CatalogNode, path: Sequence[str], cache: CatalogCache, refresh: bool = False
+) -> Resolved:
     """Walk ``path`` (a row name per level, see ``CatalogNode.row_name``) down
     from ``root`` and load where it ends, through ``cache``.
 
@@ -205,7 +207,8 @@ def resolve(root: CatalogNode, path: Sequence[str], cache: CatalogCache) -> Reso
     exact path costs the one load at its end. Such a guess is checked when
     the end fails to load or comes back empty (Postgres answers an unknown
     table with no columns): the levels guessed through are listed then, so an
-    unknown segment is named rather than a load error passed on.
+    unknown segment is named rather than a load error passed on. ``refresh``
+    drops where the path ends from the cache first, so it loads afresh.
     """
     node = root
     guessed: list[tuple[CatalogNode, int]] = []  # (level, depth) built from a name
@@ -224,6 +227,8 @@ def resolve(root: CatalogNode, path: Sequence[str], cache: CatalogCache) -> Reso
         if child is None:  # e.g. a context whose engine has no catalog
             raise CatalogPathError(path, depth, "leaf", f"{segment} can't be browsed")
         node = child
+    if refresh:
+        cache.invalidate(node)
     try:
         frame, cached = cache.load(node)
     except Exception:

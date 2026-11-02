@@ -227,9 +227,9 @@ def test_catalog_pages_with_rows_and_offset(landed) -> None:
 
 
 def test_catalog_match_and_columns(landed) -> None:
-    result = cli("live", "catalog", str(landed.nb), "--match", "B", "--columns", "kind,name", "--json")
-    doc = json.loads(result.stdout)
-    assert doc["columns"] == ["kind", "name"] and doc["names"] == ["b"]
+    result = cli("live", "catalog", str(landed.nb), "--match", "A", "--columns", "kind,name", "--json")
+    doc = json.loads(result.stdout)  # any case: only "a" has an a ("duckdb::memory:" hasn't)
+    assert doc["columns"] == ["kind", "name"] and doc["names"] == ["a"]
 
 
 def test_an_unknown_catalog_path_exits_3(landed) -> None:

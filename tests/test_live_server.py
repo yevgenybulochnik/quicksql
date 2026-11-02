@@ -430,7 +430,7 @@ def test_a_slow_catalog_load_times_out_and_carries_on(live, monkeypatch) -> None
         gate.wait(10)
         return frame
 
-    slow = CatalogNode(title="slow", load=load)
+    slow = CatalogNode(title="slow", load=load, child=lambda row: None)
     monkeypatch.setattr(live.host, "catalog_root", lambda project=None: slow)
     with live.client() as client:
         with pytest.raises(LiveError) as err:

@@ -23,7 +23,7 @@ from typing import Any
 
 PROTOCOL = 1
 MAX_LINE = 4 * 1024 * 1024  # one message; a query's rows are capped well below
-MAX_ROWS = 1000  # head/query rows per request
+MAX_ROWS = 1000  # head/query/catalog rows per request
 # Unix socket paths are capped at 108 bytes on Linux, 104 on macOS
 MAX_SOCKET_PATH = 100
 
@@ -39,6 +39,8 @@ BUSY = "busy"  # a run is under way, or the cell asked for is running
 REFUSED = "refused"  # the file says otherwise, or the request isn't allowed
 NOT_READABLE = "not_readable"  # an output this session can't read (yet)
 QUERY_FAILED = "query_failed"  # the query ran and DuckDB raised
+UNKNOWN_PATH = "unknown_path"  # a catalog path segment that leads nowhere
+LOAD_FAILED = "load_failed"  # a catalog level's load raised (its engine, unreachable?)
 EVENTS_LOST = "events_lost"
 UNSUPPORTED = "unsupported"  # a TUI verb on a host without a screen
 INTERNAL = "internal"  # a bug in the session; the connection carries on
