@@ -28,7 +28,6 @@ import polars as pl
 from dataclasses import dataclass
 
 from .. import catalog
-from ..catalog_store import default_store
 from ..conduit import load_extension
 from ..sources import reader_for
 
@@ -65,7 +64,7 @@ class SchemaCache:
 
 
 def _default_catalog() -> catalog.CatalogCache:
-    return catalog.CatalogCache(store=default_store())
+    return catalog.default_cache()
 
 
 def _cols(frame: pl.DataFrame) -> list[Column]:

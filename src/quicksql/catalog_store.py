@@ -35,9 +35,11 @@ import polars as pl
 
 from .state import quicksql_home
 
-__all__ = ["CatalogStore", "Stored", "default_store", "PERSIST_ENV"]
+__all__ = ["CatalogStore", "Stored", "default_store", "switched_off", "PERSIST_ENV", "SIZE_ENV"]
 
-PERSIST_ENV = "QSQL_CATALOG_PERSIST"  # not QUICKSQL_*: overrides.py reads those as config
+# not QUICKSQL_*: overrides.py reads those as config
+PERSIST_ENV = "QSQL_CATALOG_PERSIST"
+SIZE_ENV = "QSQL_CATALOG_SIZE_MB"  # the disk's cap, in MiB
 DEFAULT_MAX_BYTES = 256 * 2**20
 _VERSION = 1
 _SUFFIX = ".level"
@@ -79,19 +81,31 @@ class CatalogStore:
             return None
         try:
             head, _, body = data.partition(b"\n")
-            header = json.loads(head)
-            if header.get("v") != _VERSION:
-                raise ValueError("another version's level")
-            saved_at = float(header["saved_at"])
+            saved_at = self._loaded_at(head)
             frame = pl.read_ipc(io.BytesIO(body), memory_map=False)
         except Exception:
             self._unlink(path)
             return None
-        cleared = self._cleared_at(scope)
-        if cleared is not None and saved_at < cleared:
+        if self._cleared_since(scope, saved_at):
             return None
         self._touch(path)  # read: the most recently used
         return Stored(frame, saved_at)
+
+    def saved_at(self, key: str, scope: str | None) -> float | None:
+        """When ``key``'s level was loaded, read from its header alone (the
+        frame stays on disk), or None where ``get`` would miss."""
+        path = self._level(key)
+        try:
+            with path.open("rb") as f:
+                head = f.readline(64 * 1024)
+        except OSError:
+            return None
+        try:
+            saved_at = self._loaded_at(head)
+        except Exception:
+            self._unlink(path)
+            return None
+        return None if self._cleared_since(scope, saved_at) else saved_at
 
     def put(self, key: str, frame: pl.DataFrame, saved_at: float, scope: str | None, title: str = "") -> None:
         """Store ``frame`` as ``key``'s level, loaded at ``saved_at`` (when
@@ -149,6 +163,19 @@ class CatalogStore:
             pass  # FileExistsError: another writer made it first
         finally:
             self._unlink(tmp)
+
+    @staticmethod
+    def _loaded_at(head: bytes) -> float:
+        """A level's header line: when it was loaded. Raises when it isn't
+        this version's header."""
+        header = json.loads(head)
+        if header.get("v") != _VERSION:
+            raise ValueError("another version's level")
+        return float(header["saved_at"])
+
+    def _cleared_since(self, scope: str | None, saved_at: float) -> bool:
+        cleared = self._cleared_at(scope)
+        return cleared is not None and saved_at < cleared
 
     def _cleared_at(self, scope: str | None) -> float | None:
         if scope is None:
@@ -236,9 +263,24 @@ class CatalogStore:
             pass
 
 
+def switched_off(value: str | None) -> bool:
+    """Whether an environment switch says off: 0, false, no or off."""
+    return (value or "").strip().lower() in ("0", "false", "no", "off")
+
+
 def default_store() -> CatalogStore | None:
-    """The store under ``$QSQL_HOME/catalog/``, or None when
+    """The store under ``$QSQL_HOME/catalog/``, capped at
+    ``QSQL_CATALOG_SIZE_MB`` (256 by default), or None when
     ``QSQL_CATALOG_PERSIST`` turns it off (0, false, no, off)."""
-    if os.environ.get(PERSIST_ENV, "").strip().lower() in ("0", "false", "no", "off"):
+    if switched_off(os.environ.get(PERSIST_ENV)):
         return None
-    return CatalogStore(quicksql_home() / "catalog")
+    return CatalogStore(quicksql_home() / "catalog", max_bytes=_size(os.environ.get(SIZE_ENV)))
+
+
+def _size(value: str | None) -> int:
+    """A cap in MiB as bytes; the default when it isn't a positive number."""
+    try:
+        mib = float(value or "")
+        return int(mib * 2**20) if mib > 0 else DEFAULT_MAX_BYTES
+    except (ValueError, OverflowError):  # not a number, or inf
+        return DEFAULT_MAX_BYTES

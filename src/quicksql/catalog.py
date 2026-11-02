@@ -7,28 +7,31 @@ pushes the frame as a Sheet whose Enter drills via ``child``; ``resolve``
 walks the same tree by name, a path segment per level. Each engine's executor
 builds its own contexts' trees (``Executor.catalog``); outputs are read back
 through DuckDB. Leaves load field-path frames
-(``executors.base.field_path_frame``).
+(``executors.base.field_path_frame``). ``named_tables`` finds the tables a
+notebook's cells read, which ``CatalogCache.warm`` loads ahead of any asker.
 """
 
 from __future__ import annotations
 
 import difflib
+import os
+import re
 import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import duckdb
 import polars as pl
 
+from .catalog_store import CatalogStore, default_store, switched_off
 from .conduit import duckdb_field_paths, load_extension
 from .config import make_sink
 from .models import CatalogNode
 
 if TYPE_CHECKING:
-    from .catalog_store import CatalogStore
     from .compiler import Project
     from .registry import Registries
 
@@ -38,11 +41,15 @@ __all__ = [
     "CatalogPathError",
     "Hit",
     "Resolved",
+    "Settings",
+    "default_cache",
+    "named_tables",
     "narrow",
     "page",
     "project_root_node",
     "redact",
     "resolve",
+    "settings",
     "sink_output_node",
     "stamp",
 ]
@@ -51,6 +58,70 @@ DEFAULT_MAX_BYTES = 64 * 2**20  # a cache holds this much; the least recently us
 DEFAULT_REVALIDATE_AFTER = 15 * 60  # seconds: a persisted level older than this refreshes behind
 DEFAULT_MAX_AGE = 7 * 24 * 3600  # seconds: one older than this is a miss
 REFRESH_WORKERS = 4  # refreshes behind running at once, per cache
+WARM_WORKERS = 4  # warming loads running at once, per cache
+
+# not QUICKSQL_*: overrides.py reads those as config
+REVALIDATE_ENV = "QSQL_CATALOG_REVALIDATE_AFTER"
+MAX_AGE_ENV = "QSQL_CATALOG_MAX_AGE"
+WARM_ENV = "QSQL_CATALOG_WARM"
+
+
+@dataclass(frozen=True)
+class Settings:
+    """How a cache ages persisted levels and how many warming loads it runs
+    at once (0: none). ``settings()`` reads them from the environment."""
+
+    revalidate_after: float = DEFAULT_REVALIDATE_AFTER
+    max_age: float = DEFAULT_MAX_AGE
+    warm_workers: int = WARM_WORKERS
+
+
+def settings(environ: Mapping[str, str] | None = None) -> Settings:
+    """The catalog's settings from ``environ`` (the process's by default):
+
+    * ``QSQL_CATALOG_REVALIDATE_AFTER``, ``QSQL_CATALOG_MAX_AGE``: seconds,
+      or a number and a unit (``90s``, ``15m``, ``2h``, ``7d``);
+    * ``QSQL_CATALOG_WARM``: how many warming loads at once; 0, false, no or
+      off turn warming off.
+
+    A value that doesn't read keeps its default. (The disk's own settings,
+    ``QSQL_CATALOG_PERSIST`` and ``QSQL_CATALOG_SIZE_MB``, are
+    ``catalog_store.default_store``'s.)"""
+    env = os.environ if environ is None else environ
+    return Settings(
+        revalidate_after=_seconds(env.get(REVALIDATE_ENV), DEFAULT_REVALIDATE_AFTER),
+        max_age=_seconds(env.get(MAX_AGE_ENV), DEFAULT_MAX_AGE),
+        warm_workers=_workers(env.get(WARM_ENV), WARM_WORKERS),
+    )
+
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
+_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 24 * 3600}
+
+
+def _seconds(value: str | None, default: float) -> float:
+    m = _DURATION.fullmatch((value or "").strip().lower())
+    return float(m.group(1)) * _UNIT[m.group(2)] if m else default
+
+
+def _workers(value: str | None, default: int) -> int:
+    if switched_off(value):
+        return 0
+    text = (value or "").strip()
+    return int(text) if text.isdigit() else default  # on, true, yes: the default
+
+
+def default_cache(on_refresh: Callable[[CatalogNode], None] | None = None) -> CatalogCache:
+    """A cache as the live host and the LSP keep one: over the default disk
+    store (none when ``QSQL_CATALOG_PERSIST`` is off), with ``settings()``."""
+    got = settings()
+    return CatalogCache(
+        store=default_store(),
+        revalidate_after=got.revalidate_after,
+        max_age=got.max_age,
+        warm_workers=got.warm_workers,
+        on_refresh=on_refresh,
+    )
 
 
 @dataclass(frozen=True)
@@ -87,11 +158,13 @@ class _Load:
 
 
 class _Behind:
-    """Runs refreshes behind answers, at most ``workers`` at once, on daemon
-    threads (quitting never waits for one) that end when there's no work."""
+    """Runs jobs behind the caller (refreshes behind answers, warming), at
+    most ``workers`` at once, on daemon threads named ``name`` (quitting
+    never waits for one) that end when there's no work."""
 
-    def __init__(self, workers: int) -> None:
+    def __init__(self, workers: int, name: str) -> None:
         self.workers = workers
+        self.name = name
         self._jobs: deque[Callable[[], None]] = deque()
         self._running = 0
         self._lock = threading.Lock()
@@ -102,7 +175,7 @@ class _Behind:
             self._jobs.append(job)
             if self._running < self.workers:
                 self._running += 1
-                threading.Thread(target=self._work, name="catalog-refresh", daemon=True).start()
+                threading.Thread(target=self._work, name=self.name, daemon=True).start()
 
     def _work(self) -> None:
         while True:
@@ -115,7 +188,7 @@ class _Behind:
             try:
                 job()
             except Exception:
-                pass  # a refresh that fails leaves the level it had
+                pass  # a refresh that fails leaves the level it had; a warm, nothing
 
     def wait(self, timeout: float | None = None) -> bool:
         with self._lock:
@@ -142,6 +215,10 @@ class CatalogCache:
     changed it); past ``max_age`` it's a miss. A level that doesn't persist
     stays until it's cleared, as before.
 
+    ``warm(nodes)`` loads ahead, behind the caller, the persisted levels
+    among ``nodes`` that would cost a round trip (at most ``warm_workers``
+    at once; 0: no warming).
+
     Invalidate one node (a refetch), the levels under some top-level rows
     (``scopes``: what a run touched), or everything (a recompile, a notebook
     switch). Clears reach the disk too: the node's level goes, a scope's
@@ -156,6 +233,7 @@ class CatalogCache:
         store: CatalogStore | None = None,
         revalidate_after: float = DEFAULT_REVALIDATE_AFTER,
         max_age: float = DEFAULT_MAX_AGE,
+        warm_workers: int = WARM_WORKERS,
         on_refresh: Callable[[CatalogNode], None] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -163,6 +241,7 @@ class CatalogCache:
         self.store = store
         self.revalidate_after = revalidate_after
         self.max_age = max_age
+        self.warm_workers = warm_workers
         self.on_refresh = on_refresh
         self.clock = clock
         self._frames: OrderedDict[str, _Entry] = OrderedDict()
@@ -170,7 +249,8 @@ class CatalogCache:
         self._size = 0
         self._floor = float("-inf")  # disk levels saved before a clear of everything are misses
         self._lock = threading.Lock()
-        self._behind = _Behind(REFRESH_WORKERS)
+        self._behind = _Behind(REFRESH_WORKERS, "catalog-refresh")
+        self._warming = _Behind(warm_workers, "catalog-warm")
 
     def __len__(self) -> int:
         return len(self._frames)
@@ -230,6 +310,27 @@ class CatalogCache:
     def wait_refreshes(self, timeout: float | None = None) -> bool:
         """Wait until no refresh is under way; False if ``timeout`` came first."""
         return self._behind.wait(timeout)
+
+    def warm(self, nodes: Iterable[CatalogNode]) -> None:
+        """Load ahead, behind the caller, the levels among ``nodes`` an asker
+        would wait on: those that persist (a remote engine's) and aren't
+        fresh in memory or on disk (missing, past ``revalidate_after``, or
+        cleared). A fresh level on disk stays there: reading it later costs
+        no round trip.
+
+        ``nodes`` is listed on a warming thread, so a generator that parses
+        SQL (``named_tables``) costs the caller nothing; one that raises
+        part way warms what it yielded. A level already loading is left to
+        that load, and an asker that comes while a warm load runs shares it.
+        A warm load is kept like an asker's (one a clear overtakes isn't),
+        one that fails is forgotten, and one that changed a level this cache
+        held is told (``on_refresh``)."""
+        if self.warm_workers > 0:
+            self._warming.submit(lambda: self._warm_each(nodes))
+
+    def wait_warm(self, timeout: float | None = None) -> bool:
+        """Wait until no warming is under way; False if ``timeout`` came first."""
+        return self._warming.wait(timeout)
 
     def invalidate(
         self, node: CatalogNode | None = None, *, scopes: Iterable[str] | None = None
@@ -328,10 +429,11 @@ class CatalogCache:
         pending = self._loading[key] = _Load(node.scope)
         self._behind.submit(lambda: self._refresh(node, pending))
 
-    def _refresh(self, node: CatalogNode, pending: _Load) -> None:
-        """A refresh behind an answer (a worker thread). One that fails
-        leaves the level it had; one that changed it is told, once its
-        waiters have it."""
+    def _refresh(self, node: CatalogNode, pending: _Load, tell_added: bool = True) -> None:
+        """A refresh behind an answer, or a warm load (a worker thread). One
+        that fails leaves the level it had; one that changed it is told,
+        once its waiters have it, and so is one that found it gone from
+        memory unless ``tell_added`` is False (warming: nobody here saw it)."""
         key = node.cache_key
         started = self.clock()
         kept = changed = False
@@ -340,7 +442,7 @@ class CatalogCache:
             with self._lock:
                 old = self._frames.get(key)
                 kept = not pending.stale
-                changed = old is None or not old.frame.equals(frame)
+                changed = not old.frame.equals(frame) if old is not None else tell_added
                 if kept:
                     self._keep(node, frame, started)
             pending.hit = Hit(frame, False)
@@ -355,6 +457,34 @@ class CatalogCache:
             pending.done.set()
         if kept and changed and self.on_refresh is not None:
             self.on_refresh(node)
+
+    def _warm_each(self, nodes: Iterable[CatalogNode]) -> None:
+        """List ``nodes`` (a warming thread) and queue a warm load of each
+        persisted one that isn't fresh and isn't loading already."""
+        for node in nodes:
+            if not node.persist or self._fresh(node):
+                continue
+            key = node.cache_key
+            with self._lock:
+                if key in self._loading:
+                    continue
+                pending = self._loading[key] = _Load(node.scope)
+            self._warming.submit(lambda n=node, p=pending: self._refresh(n, p, tell_added=False))
+
+    def _fresh(self, node: CatalogNode) -> bool:
+        """Whether ``node``'s level would answer without a round trip and
+        isn't due for revalidation: in memory, or on disk by its header."""
+        key = node.cache_key
+        now = self.clock()
+        with self._lock:
+            entry = self._frames.get(key)
+            if entry is not None and now - entry.saved_at <= self.revalidate_after:
+                return True
+        if self.store is None:
+            return False
+        saved_at = self.store.saved_at(key, node.scope)
+        return (saved_at is not None and saved_at >= self._floor
+                and now - saved_at <= self.revalidate_after)
 
     def _keep(self, node: CatalogNode, frame: pl.DataFrame, saved_at: float) -> None:
         """Hold ``frame`` as ``node``'s level (the lock held), within the cap."""
@@ -587,6 +717,80 @@ def stamp(node: CatalogNode | None, *, scope: str | None, persist: bool) -> Cata
         node, scope=scope, persist=persist,
         child=lambda row: stamp(child(row), scope=scope, persist=persist),
     )
+
+
+def named_tables(project: Project) -> Iterator[CatalogNode]:
+    """The leaves of the tables the project's cells read by name, on engines
+    whose catalog persists (remote: worth loading ahead), each level once.
+
+    A table counts when a cell names it in FROM or JOIN, parsed in its
+    engine's dialect over the LSP's Jinja mask: a ``ref()`` or an unknown
+    ``var()`` names nothing, a ``var()`` whose value the mask writes in
+    names that table. A CTE, or a table the cell creates, isn't one it
+    reads. Each leaf comes from ``Executor.catalog_table`` and is stamped as
+    the LSP stamps its own (the cell's context), so they share a level.
+
+    A generator: ``CatalogCache.warm`` lists it on a warming thread, so
+    nothing is parsed on the caller's."""
+    registries = project.registries
+    seen: set[str] = set()
+    for name in project.order:
+        cell = project.cells[name]
+        executor = registries.executors.get(cell.engine)
+        if not executor.catalog_persists:
+            continue
+        scope = executor.context_key(cell.config)
+        try:
+            names = _tables_read(cell.sql_raw, getattr(cell.config, "vars", None) or {}, executor.dialect)
+        except Exception:
+            continue  # sqlglot can't read it: it names nothing
+        for parts in names:
+            try:
+                leaf = executor.catalog_table(cell.config, project.root, parts)
+            except Exception:
+                continue  # its engine can't place it: the LSP wouldn't either
+            if leaf is None or leaf.cache_key in seen:
+                continue
+            seen.add(leaf.cache_key)
+            yield stamp(leaf, scope=scope, persist=True)
+
+
+def _tables_read(sql: str, var_values: Mapping[str, Any], dialect: str | None) -> list[list[str]]:
+    """The dotted names (qualifiers first) of the tables ``sql`` reads in
+    FROM or JOIN, in order. Raises when sqlglot can't read it."""
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
+
+    from .lsp.mask import mask_jinja
+
+    masked, spans = mask_jinja(sql, var_values)
+    placeholders = {span.name for span in spans if span.name}
+    trees = [t for t in sqlglot.parse(masked, dialect=dialect, error_level=ErrorLevel.IGNORE) if t]
+
+    def parts(table: exp.Table) -> list[str]:
+        return [p for p in (table.catalog, table.db, table.name) if p]
+
+    made = set()  # lowercased: CTEs, and what the cell creates
+    for tree in trees:
+        made |= {(cte.alias.lower(),) for cte in tree.find_all(exp.CTE) if cte.alias}
+        for create in tree.find_all(exp.Create):  # a script's, too
+            target = create.this
+            if target is not None and not isinstance(target, exp.Table):
+                target = target.find(exp.Table)  # CREATE TABLE x (a INT): inside a Schema
+            if target is not None:
+                made.add(tuple(p.lower() for p in parts(target)))
+    found: list[list[str]] = []
+    for tree in trees:
+        for table in tree.find_all(exp.Table):
+            if not isinstance(table.this, exp.Identifier) or table.name in placeholders:
+                continue  # a table function, or Jinja
+            if table.find_ancestor(exp.From, exp.Join) is None:
+                continue  # written to, not read
+            name = parts(table)
+            if tuple(p.lower() for p in name) not in made and name not in found:
+                found.append(name)
+    return found
 
 
 def project_root_node(project: Project, connect: Callable[[], Any] | None = None) -> CatalogNode:

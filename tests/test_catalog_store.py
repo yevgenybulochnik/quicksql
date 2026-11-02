@@ -205,7 +205,7 @@ def test_qsql_catalog_size_mb_caps_the_disk(monkeypatch) -> None:
     assert default_store().max_bytes == 10 * 2**20
 
 
-@pytest.mark.parametrize("value", ["", "lots", "-5", "0"])
+@pytest.mark.parametrize("value", ["", "lots", "-5", "0", "inf", "nan"])
 def test_a_size_that_isnt_a_positive_number_keeps_the_default_cap(monkeypatch, value) -> None:
     monkeypatch.setenv("QSQL_CATALOG_SIZE_MB", value)
     assert default_store().max_bytes == 256 * 2**20

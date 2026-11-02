@@ -14,7 +14,8 @@ Every method runs on one thread, the TUI's event loop, which is where key
 handlers, run events (``call_from_thread``) and socket requests all arrive;
 only ``read``, ``query`` and ``browse`` run on a worker thread, through the
 driver's ``reading`` handle, and touch no host state. The catalog's
-refreshes behind an answer reach the host through the driver's ``post``.
+refreshes behind an answer, and what its warming changed, reach the host
+through the driver's ``post``.
 """
 
 from __future__ import annotations
@@ -127,12 +128,9 @@ class LiveHost:
         self._awaiting: tuple[str, list[str]] | None = None  # a save's rerun, not yet requested
         # the schema catalog: the Catalog tab's and an agent's, one per
         # notebook, read through the disk (remote engines' levels outlive it)
-        from ..catalog import CatalogCache
-        from ..catalog_store import default_store
+        from ..catalog import default_cache
 
-        cache = CatalogCache(
-            store=default_store(), on_refresh=lambda node: self._refreshed_behind(cache, node)
-        )
+        cache = default_cache(on_refresh=lambda node: self._refreshed_behind(cache, node))
         self.catalog_cache = cache
         self._catalog_root: CatalogNode | None = None
         self._catalog_project: Project | None = None
@@ -274,6 +272,7 @@ class LiveHost:
     def loaded(self, project: Project) -> None:
         """The notebook opened (or reopened with ``o``) and compiled."""
         self._adopt(project)
+        self._warm(project)
         self._emit("compiled", hash=project.source_hash, cells=list(project.order), changed=[])
         self._settle(project.source_hash, "paused" if not self.armed else "nothing_to_rerun")
 
@@ -287,6 +286,7 @@ class LiveHost:
         self._emit("compiled", hash=h, cells=list(project.order), changed=planned)
         # a save changes the top level and where outputs land, never a warehouse
         self._catalog_changed("save", top_level=True, scopes=outputs | set(project.order))
+        self._warm(project)  # it may name a table the last one didn't
         if not self.armed:
             self._settle(h, "paused", changed=planned)
             return []
@@ -475,6 +475,14 @@ class LiveHost:
         scopes = {row["name"] for row in top.iter_rows(named=True)
                   if row["kind"] == "context" and row["engine"] in engines}
         return scopes | {c.name for c in ran}
+
+    def _warm(self, project: Project) -> None:
+        """Load ahead, behind the loop, the tables the notebook's cells read
+        that aren't fresh (``catalog.named_tables``): the first read of each,
+        by the agent, the Catalog tab or the LSP, costs no round trip."""
+        from ..catalog import named_tables
+
+        self.catalog_cache.warm(named_tables(project))
 
     def _refreshed_behind(self, cache: CatalogCache, node: CatalogNode) -> None:
         """A refresh behind an answer changed a level (a worker thread): say
