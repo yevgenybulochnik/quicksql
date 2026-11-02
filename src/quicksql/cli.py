@@ -467,18 +467,19 @@ def _offline_head(
     return {"cell": cell, **got.to_dict(rows), "source": "offline"}
 
 
-def _print_table(columns: list[str], rows: list[list[Any]]) -> None:
-    """Rows as aligned text, each value cut at 40 characters."""
-    cells = [[_cut(v) for v in row] for row in rows]
+def _print_table(columns: list[str], rows: list[list[Any]], whole: tuple[int, ...] = ()) -> None:
+    """Rows as aligned text, each value cut at 40 characters (but the
+    ``whole`` columns')."""
+    cells = [[_cut(v, i not in whole) for i, v in enumerate(row)] for row in rows]
     widths = [max([len(c)] + [len(r[i]) for r in cells]) for i, c in enumerate(columns)]
     typer.echo("  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip())
     for row in cells:
         typer.echo("  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip())
 
 
-def _cut(value: Any) -> str:
+def _cut(value: Any, cut: bool = True) -> str:
     text = "NULL" if value is None else str(value)
-    return text if len(text) <= 40 else text[:39] + "…"
+    return text if not cut or len(text) <= 40 else text[:39] + "…"
 
 
 @app.command()
@@ -909,11 +910,17 @@ def live_catalog(
     shown = len(got["rows"])
     span = f"{got['offset'] + 1}–{got['offset'] + shown} of {got['total']}" if shown else f"0 of {got['total']}"
     typer.secho(f"{got['title']} · {span}" + (" · cached" if got["cached"] else ""), bold=True)
-    table_columns, table_rows = got["columns"], got["rows"]
-    if got["names"] is not None and "name" not in table_columns:
-        table_columns = ["name", *table_columns]  # what to type to go deeper
-        table_rows = [[name, *row] for name, row in zip(got["names"], table_rows)]
-    _print_table(table_columns, table_rows)
+    table_columns, table_rows, whole = got["columns"], got["rows"], ()
+    names = got["names"]
+    if names is not None:  # what to type to go deeper: shown whole, once
+        held = [i for i in range(len(table_columns)) if [r[i] for r in table_rows] == names]
+        if held:
+            whole = (held[0],)
+        else:
+            table_columns = ["name", *table_columns]
+            table_rows = [[name, *row] for name, row in zip(names, table_rows)]
+            whole = (0,)
+    _print_table(table_columns, table_rows, whole)
     if got["next_offset"] is not None:
         typer.echo(f"more: --offset {got['next_offset']}")
 
