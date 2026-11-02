@@ -959,6 +959,68 @@ def test_project_root_node_stamps_each_subtree_with_its_rows_name(tmp_path) -> N
     assert root.scope is None
 
 
+# ---------- what persists (Phase 3) ----------
+
+
+def test_remote_engines_declare_that_their_catalogs_persist() -> None:
+    assert BigQueryExecutor.catalog_persists and PostgresExecutor.catalog_persists
+    assert not DuckDBExecutor.catalog_persists and not SQLiteExecutor.catalog_persists
+
+
+def test_project_root_node_stamps_persistence_from_each_rows_engine(tmp_path) -> None:
+    project = compile_text(
+        "/*@ catalog: { bigquery: [other.ds] } */\n"
+        "-- @cell bq\n-- @engine: bigquery\n/*@ input: { bigquery: p } */\nSELECT 1 AS x;\n\n"
+        "-- @cell pg\n-- @engine: postgres\n/*@ input: { postgres: 'postgresql://u@h/db' } */\n"
+        "SELECT 1 AS x;\n\n"
+        "-- @cell local\n/*@ input: { sqlite: s.db } */\nSELECT 1 AS x;\n",
+        root=tmp_path,
+    )
+    root = project_root_node(project)
+    rows = {row["name"]: row for row in root.load().iter_rows(named=True)}
+    bq = root.child(rows["bigquery:p"])
+    leaf = bq.child({"dataset": "ds"}).child({"table": "t"})
+    assert bq.persist and leaf.persist and leaf.scope == "bigquery:p"
+    target = root.child(rows["bigquery:other/ds"])
+    assert target.persist and target.child({"table": "t"}).persist
+    pg = root.child(rows["postgres:postgresql://u@h/db"])
+    assert pg.persist and pg.child({"schema": "public"}).child({"table": "t"}).persist
+    local = root.child(rows[next(n for n in rows if n.startswith("sqlite:"))])
+    assert not local.persist and not local.child({"table": "t"}).persist
+    assert not root.child(rows["duckdb::memory:"]).persist
+    assert not any(root.child(rows[cell]).persist for cell in ("bq", "pg", "local"))  # outputs
+    assert not root.persist
+
+
+def test_stamp_marks_a_tree_built_outside_the_root(monkeypatch) -> None:
+    """The LSP builds a leaf with ``catalog_table``: stamped, it reads and
+    writes the same disk level as the Catalog tab's."""
+    from quicksql.catalog import stamp
+
+    node = stamp(BigQueryExecutor().context_node({"project": "p"}), scope="bigquery:p", persist=True)
+    leaf = node.child({"dataset": "ds"}).child({"table": "t"})
+    assert (leaf.scope, leaf.persist) == ("bigquery:p", True)
+    assert stamp(None, scope="s", persist=True) is None
+
+
+def test_bigquery_keys_name_the_endpoint_they_were_read_from() -> None:
+    """Two emulators can hold a project of the same name: on disk, across
+    sessions, their levels must not meet."""
+    def keys(spec: dict) -> list[str]:
+        node = BigQueryExecutor().context_node(spec)
+        tables = node.child({"dataset": "ds"})
+        return [node.cache_key, tables.cache_key, tables.child({"table": "t"}).cache_key]
+
+    real = keys({"project": "p"})
+    assert real == ["bigquery:p", "bigquery:p/ds", "bigquery:p/ds.t"]
+    one = keys({"project": "p", "endpoint": "http://localhost:9050"})
+    two = keys({"project": "p", "endpoint": "http://localhost:9052"})
+    assert len({*real, *one, *two}) == 9
+    # the title, what the person sees, stays the project's
+    node = BigQueryExecutor().context_node({"project": "p", "endpoint": "http://localhost:9050"})
+    assert node.title == "bigquery:p" and node.child({"dataset": "ds"}).title == "bigquery:p/ds"
+
+
 def test_the_cache_keeps_the_most_recently_used_within_its_cap() -> None:
     frame = pl.DataFrame({"s": ["x" * 1000] * 100})
     nodes = {k: CatalogNode(title=k, load=lambda: frame) for k in "abc"}
