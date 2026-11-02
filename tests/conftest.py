@@ -179,6 +179,7 @@ class FakeDriver:
         self.focused: list[tuple[str, str | None]] = []
         self.toasts: list[tuple[str, str]] = []
         self.posted = 0
+        self.refreshed: list = []  # the catalog levels it was told changed
 
     def start_run(self, select, closure):
         self.gen = max(self.gen, self.host.latest_run) + 1  # monotonic, like the TUI's
@@ -220,6 +221,9 @@ class FakeDriver:
         """Run ``fn`` where the host runs (the TUI's loop): here, at once."""
         self.posted += 1
         fn()
+
+    def catalog_refreshed(self, node) -> None:
+        self.refreshed.append(node)
 
 
 @pytest.fixture

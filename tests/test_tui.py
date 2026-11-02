@@ -955,6 +955,87 @@ async def test_digit_keys_jump_to_tabs_and_5_resumes_the_catalog_dive(deep_catal
             assert _same_sheets(app.catalog_stack, kept), key
 
 
+@pytest.fixture
+def persisting_sqlite(monkeypatch):
+    """SQLite's catalog levels kept on disk and aged like a remote engine's,
+    so a read past revalidation refreshes the level behind its answer."""
+    from quicksql.executors.sqlite_exec import SQLiteExecutor
+
+    monkeypatch.setattr(SQLiteExecutor, "catalog_persists", True)
+
+
+def _alter(deep_catalog, sql: str) -> None:
+    import sqlite3
+
+    con = sqlite3.connect(deep_catalog.parent / "nums.db")
+    con.execute(sql)
+    con.commit()
+    con.close()
+
+
+async def _until(pilot, done, timeout: float = 5.0) -> None:
+    """Pause until ``done()``: a refresh behind lands on the loop on its own time."""
+    for _ in range(int(timeout / 0.05)):
+        if done():
+            return
+        await pilot.pause(0.05)
+    assert done()
+
+
+async def test_a_refresh_behind_repaints_the_catalog_level_on_screen(deep_catalog, persisting_sqlite) -> None:
+    """An agent reads the level the tab shows and finds it due: what the
+    refresh behind that answer finds shows on the tab, cursor on the same table."""
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.press("S")
+        await _settle(app, pilot)
+        names = app.catalog_stack[-1].frame["name"].to_list()
+        await pilot.press(*["j"] * names.index("sqlite:nums.db"), "enter")
+        await _settle(app, pilot)
+        await pilot.press("j")  # alpha, [wide]
+        tables = app.catalog_stack[-1]
+        assert tables.frame["table"].to_list() == ["alpha", "wide"]
+        _alter(deep_catalog, "CREATE TABLE aardvark (a INTEGER)")
+        cache = app.host.catalog_cache
+        cache.revalidate_after = -1  # everything it holds is due
+        assert cache.read(tables.drill).stale  # the agent's answer, refreshed behind
+        await _until(pilot, lambda: app.catalog_stack[-1].frame.height == 3)
+        top = app.catalog_stack[-1]
+        assert top.frame["table"].to_list() == ["aardvark", "alpha", "wide"]
+        assert top.cursor[0] == 2  # still on wide
+        table = app.query_one("#catalog", DataTable)
+        assert (table.row_count, table.cursor_row) == (3, 2)
+
+
+async def test_a_refresh_behind_reaches_a_catalog_level_beneath_the_top(deep_catalog, persisting_sqlite) -> None:
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)  # root → nums.db's tables → wide
+        _alter(deep_catalog, "CREATE TABLE aardvark (a INTEGER)")
+        cache = app.host.catalog_cache
+        cache.revalidate_after = -1
+        cache.read(app.catalog_stack[1].drill)
+        await _until(pilot, lambda: app.catalog_stack[1].frame.height == 3)
+        assert app.catalog_stack[-1].title == "sqlite:nums.db/wide"  # the top stays
+        await pilot.press("q")
+        assert app.catalog_stack[-1].cursor[0] == 2  # on wide, as it was
+        assert app.query_one("#catalog", DataTable).row_count == 3
+
+
+async def test_redrilling_a_due_catalog_level_ends_on_what_its_refresh_found(
+    deep_catalog, persisting_sqlite
+) -> None:
+    app = QsqlApp(path=deep_catalog, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _dive_three_levels(app, pilot)
+        _alter(deep_catalog, "ALTER TABLE wide ADD COLUMN c40 INTEGER")
+        app.host.catalog_cache.revalidate_after = -1
+        await pilot.press("q", "enter")  # wide again: answered at once, refreshed behind
+        await _settle(app, pilot)
+        await _until(pilot, lambda: app.catalog_stack[-1].frame.height == 41)
+        assert len(app.catalog_stack) == 3
+
+
 async def test_5_without_a_dive_loads_and_dives_into_the_root(notebook) -> None:
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
     async with app.run_test(size=(100, 40)) as pilot:

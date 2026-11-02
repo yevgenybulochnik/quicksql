@@ -468,7 +468,22 @@ def test_a_refresh_behind_that_changed_a_level_is_an_event(host) -> None:
     assert cache.peek(_remote_level("bigquery:p", calls, state))["n"].to_list() == [2]
 
 
-def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb) -> None:
+def test_a_refresh_behind_that_changed_a_level_tells_the_driver_which(host, fake_driver) -> None:
+    """So the Catalog tab can repaint the level wherever it shows it."""
+    calls, state = [], {"n": 1}
+    cache = host.catalog_cache
+    cache.load(_remote_level("bigquery:p", calls, state))
+    cache.revalidate_after = -1
+    cache.read(_remote_level("bigquery:p", calls, state))  # due, but nothing changed
+    assert cache.wait_refreshes(5)
+    assert fake_driver.refreshed == []
+    state["n"] = 2
+    cache.read(_remote_level("bigquery:p", calls, state))
+    assert cache.wait_refreshes(5)
+    assert [node.cache_key for node in fake_driver.refreshed] == ["bigquery:p/t"]
+
+
+def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb, fake_driver) -> None:
     calls, state = [], {"n": 1}
     old = host.catalog_cache
     old.load(_remote_level("bigquery:p", calls, state))
@@ -480,6 +495,7 @@ def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb) -> Non
     old.read(_remote_level("bigquery:p", calls, state))
     assert old.wait_refreshes(5)
     assert _invalidated(host, since) == []
+    assert fake_driver.refreshed == []  # the Catalog tab shows the new notebook
 
 
 # ---------- warming (Phase 4) ----------

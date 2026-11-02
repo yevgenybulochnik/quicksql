@@ -107,6 +107,33 @@ def test_filtered_invalid_or_empty_pattern_returns_self() -> None:
     assert sheet.filtered("") is sheet
 
 
+def _by_name(row: dict) -> str:
+    return row["name"]
+
+
+def test_reloaded_keeps_the_sort_the_hidden_columns_and_the_named_row() -> None:
+    # sorted by score, descending: ada 3, cyd 2, bob 1, bob 1; cursor on cyd's score
+    sheet = Sheet(FRAME, drill="level").move(0, 2).hide_current().sort(desc=True)
+    sheet = sheet.move(1, 0).toggle_select()
+    assert (sheet.frame["name"][sheet.cursor[0]], sheet.current_column) == ("cyd", "score")
+    new = pl.DataFrame({"name": ["bob", "cyd", "dee"], "score": [1, 2, 5], "active": [True] * 3})
+    got = sheet.reloaded(new, key=_by_name)
+    assert got.frame["name"].to_list() == ["dee", "cyd", "bob"]  # the sort, re-applied
+    assert got.hidden == ("active",)
+    assert (got.frame["name"][got.cursor[0]], got.current_column) == ("cyd", "score")
+    assert got.selected == frozenset()  # it named rows by position
+    assert (got.drill, got.title) == ("level", sheet.title)
+
+
+def test_reloaded_without_the_named_row_keeps_the_position() -> None:
+    sheet = Sheet(FRAME).move(3, 2).hide_current()  # hide "active", on bob's score
+    new = pl.DataFrame({"name": ["ada", "cyd"], "score": [3, 2]})
+    got = sheet.reloaded(new, key=_by_name)
+    assert got.cursor == (1, 1)  # the last row, the same column
+    assert got.hidden == ()  # "active" is gone
+    assert Sheet(FRAME).move(2, 0).reloaded(new).cursor == (1, 0)  # no key: by position
+
+
 def test_a_sample_carries_through_every_derived_sheet() -> None:
     # a sheet over an output's first rows: whatever is computed from it is too
     s = Sheet(pl.DataFrame({"a": [1, 2, 2], "b": ["x", "y", "z"]}), sample=3)
