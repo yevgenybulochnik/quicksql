@@ -98,13 +98,17 @@ A cell's `"status"`: `queued`, `running`, `ok`, `failed`, `skipped`, `stale` or 
 {"path": ["bigquery:proj", "sales"], "title": "bigquery:proj/sales", "leaf": false,
  "columns": ["table", "type"], "rows": [["orders", "TABLE"], ["orders_2024", "VIEW"]],
  "names": ["orders", "orders_2024"], "total": 412, "offset": 0, "next_offset": 200,
- "cached": false}
+ "cached": true, "age": 7200, "stale": true}
 ```
 
 - `names` holds each row's next path segment; it's `null` at a leaf.
 - A leaf's columns are `column`, `field_path`, `type`, `mode` and `description`.
 - `next_offset` is `null` on the last page.
-- `cached` says the level came from the shared cache.
+- `cached` says the level came from the cache (the TUI's, or the disk an earlier session
+  left) rather than a load of its own.
+- `age` is how many seconds ago the level was loaded from its engine. `stale` means a
+  BigQuery or Postgres level is past revalidation (15 minutes): it's refreshing behind
+  this answer, and a `catalog_invalidated` with reason `refreshed` follows if it changed.
 - `total` counts the rows after `--match` and `--top-level`.
 
 ## Events

@@ -1,10 +1,80 @@
 # Plan: the schema catalog for agents, fast on big warehouses
 
-**Status:** Phases 0–2 done (2026-11-02, branch `feat/live-catalog`), so issue #11
-(`quicksql live catalog`) is implemented. The stress harness and baseline are in
-`stress/catalog/`, the catalog core is in `catalog.py`, and the live side is in
-`live/host.py`, `live/server.py` and the CLI. Phases 3–5 are a follow-up issue: keeping
-the remote catalog across sessions, and warming it.
+**Status:** Phases 0–3 done (2026-11-02, branch `feat/live-catalog`), so issue #11
+(`quicksql live catalog`) is implemented and the remote catalog persists across sessions.
+The stress harness and baseline are in `stress/catalog/`, the catalog core is in
+`catalog.py`, the disk store in `catalog_store.py`, and the live side is in
+`live/host.py`, `live/server.py` and the CLI. Every stress scenario meets its budget; no
+xfail is left. Phases 4–5 (warming, an offline `quicksql catalog`) are a follow-up issue.
+
+Phase 3 as built, where it differs from the plan below:
+- **One file per level, not two.** `$QSQL_HOME/catalog/<sha256(key)>.level` holds a JSON
+  header line (format version, when the load began, scope, title) and then the frame as
+  zstd Arrow IPC, so one rename publishes both. The directories are 0700, the files 0600,
+  writes go through a temp file and `os.replace`, and the least recently read go past a
+  256 MiB cap (one level bigger than the cap is kept alone). An unreadable or
+  other-version file is a miss and is deleted. Any disk failure is a miss, never an error.
+- **A scoped clear makes its levels misses, not stale.** A run may have changed them, so
+  serving the old listing right after the run, even marked stale, would show the agent
+  what the run replaced. A scope gets a marker, `scopes/<sha256(scope)>`, when a level is
+  first stored under it (made whole and linked into place, so it never overwrites a
+  concurrent clear). A clear writes its time there, and a level saved before it is a miss
+  in this session and the next. A scope nothing was stored under, such as a cell's
+  output, writes nothing, so saves leave no files. The reader's scope decides, so the LSP
+  reading a level the TUI wrote checks the cell's context.
+- **A clear of everything** (`invalidate()`) passes over what the disk had, for that cache
+  only. A refetch (`invalidate(node)`, ctrl+r, `--refresh`) deletes the level's file.
+- **Ages apply to persisted levels only,** in memory too: a memory hit past
+  `revalidate_after` refreshes behind as a disk hit does. DuckDB, SQLite and output levels
+  behave as in Phase 2, since a background reload could reach a session a notebook switch
+  is closing.
+- **Defaults:** `revalidate_after` 15 minutes, `max_age` 7 days, 4 refresh threads per
+  cache. The threads are daemons that end when idle, so quitting never waits on one.
+  `QSQL_CATALOG_PERSIST=0` (also `false`, `no`, `off`) is in; the other settings stay in
+  Phase 4.2.
+- **Refreshes behind** load like an owner of the level, so a second asker shares the load
+  and a clear that overtakes it means it isn't kept. A failed refresh keeps the level it
+  had. `on_refresh(node)` fires when the frame changed, after its waiters are released;
+  the host turns it into `catalog_invalidated` with reason `refreshed` through the new
+  `Driver.post` (`AppDriver`: `call_from_thread`), dropped when the cache belongs to an
+  earlier notebook.
+- **The API:** `CatalogCache.read(node)` returns a `Hit` (`frame`, `cached`, `age`,
+  `stale`); `load` still returns `(frame, cached)`. `Resolved` gains `age` and `stale`, the
+  socket response `age` (whole seconds) and `stale`, and the CLI's header says
+  `cached 2 h ago, refreshing`.
+- **What persists:** `Executor.catalog_persists` (BigQuery, Postgres) and
+  `CatalogNode.persist`, stamped down each subtree by `catalog.stamp` (which replaced
+  `_scoped`). Outputs never persist.
+- **BigQuery keys name their endpoint** (`bigquery:p@http://localhost:9052/ds.t`), so two
+  emulators holding a project of the same name never share a level on disk. Titles are
+  unchanged.
+- **The LSP:** `SchemaCache` loads table leaves through a `CatalogCache` over the default
+  store, scoped to the cell's context, so a BigQuery run's clear reaches them. Its own
+  per-process memo still sits on top, so within one LSP process a table's columns don't
+  refresh. FROM/JOIN name completion (`catalog_relations`) doesn't go through the store.
+- **Stress:** S8, S9, S10 and S11 meet their budgets, and so does S12, since persistence
+  alone loads each named table once. Phase 4's warming moves those loads to the open; it
+  doesn't change how many there are. S8 now reopens through real `LiveHost`s and also
+  reopens with every level due: the answer costs 0 round trips, and the refreshes behind
+  it cost BigQuery 3, Postgres 12. The meter counts a refresh thread's trips apart
+  (`behind.`).
+  - S8, reopen: BigQuery 3 → 0 round trips, Postgres 12 → 0.
+  - S9, the LSP after a restart: BigQuery 1 → 0, Postgres 4 → 0 (212 → 1.2 ms).
+  - S12, second open: BigQuery 30 → 0, Postgres 120 → 0.
+  - S10a also scans every file under the store for the password.
+- **Verified end to end:**
+  - A TUI on the stress emulator loaded a BigQuery level and quit. A new TUI's first
+    `live catalog` answered it `cached` and 32 s old, and its Catalog tab drilled the same
+    level.
+  - An LSP process completed the 2050-column wide table (413 ms). A second process with
+    BigQuery unreachable completed all 2050 columns from disk (17 ms). With an empty
+    `QSQL_HOME` it got none.
+- **Gaps:**
+  - The Catalog tab doesn't repaint on a `refreshed` event; ctrl+r or drilling again
+    shows the refreshed level.
+  - A clear in one process can come before another process's first store under that
+    scope, from a load that began before the clear. That level then reads as fresh until
+    it revalidates. Within one process the load's own clear flag covers this.
 
 Phase 2 as built, where it differs from the plan below:
 - **The host owns the catalog.** `LiveHost.catalog_cache` (a fresh one per notebook) and
@@ -307,7 +377,7 @@ So the stress setup is:
 **Stress gate:** S1–S7 and S10 within budget; `/verify` with the Catalog tab and
 `live catalog` side by side.
 
-## Phase 3: a persistent catalog (follow-up issue)
+## Phase 3: a persistent catalog
 
 1. **Disk store (M):** `$QSQL_HOME/catalog/`, one Arrow IPC file per entry, named by the
    sha256 of its key, plus a small JSON metadata file (saved at, scope, engine).

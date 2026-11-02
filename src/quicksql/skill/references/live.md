@@ -129,8 +129,15 @@ notebook reaches. Its credentials stay in the TUI.
   unreachable warehouse) exits 1.
 - Levels are cached, and the cache is shared with the TUI. A save drops the top level and
   the outputs; a run drops the contexts on the engines it ran on and its outputs; each
-  drop is a `catalog_invalidated` event. Anything else, such as a table another pipeline
-  created, needs `--refresh`.
+  drop is a `catalog_invalidated` event.
+- BigQuery and Postgres levels are also kept on disk (`~/.quicksql/catalog/`, private
+  to the user: names, types and column descriptions; `QSQL_CATALOG_PERSIST=0` keeps them
+  in memory), so a reopened TUI, and the LSP after a restart, answer without a round trip. Each answer
+  says its `age`. Past 15 minutes a level still answers at once, marked `stale` (text:
+  `cached 2 h ago, refreshing`), and refreshes behind the answer; if it changed, a
+  `catalog_invalidated` event with reason `refreshed` follows, so read it again. Past 7
+  days it loads afresh. A change made outside quicksql, such as a table another pipeline
+  created, shows after its refresh; `--refresh` loads it now.
 - A slow load answers `timeout` (exit 4) after `--timeout` seconds (60) but carries on.
   Ask again and it's there.
 
@@ -161,7 +168,7 @@ to catch up between turns. The kinds:
 | `note` | `detail` | something the runner wants said (a reopened session, a cancel) |
 | `settled` | `hash`, `state` | a save's outcome is ready (what `live wait` waits for) |
 | `controls_changed` | `armed`, `autorun_global`, `autorun_off`, `by` (`keys` or `agent`) | a switch changed |
-| `catalog_invalidated` | `reason` (`save` or `run`), `run_id`, `top_level`, `scopes` (top-level row names) | cached catalog levels went stale |
+| `catalog_invalidated` | `reason` (`save`, `run`, or `refreshed`: a refresh behind an answer found a change), `run_id`, `top_level`, `scopes` (top-level row names) | cached catalog levels went stale or changed |
 | `notebook_closed` | `notebook` | the TUI opened another notebook or quit |
 
 A watcher that falls too far behind gets `events_lost` (exit 4): read
