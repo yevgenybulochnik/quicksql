@@ -121,7 +121,8 @@ first `@cell`) inherited by every cell.
   `catalog_persists` (BigQuery, Postgres; never outputs) are kept across sessions, one 0600
   file per level named by its key's sha256 (keys can carry a DSN). They age from their load:
   past 15 min they answer `stale` and refresh behind (≤4 threads; a change posts
-  `catalog_invalidated` reason `refreshed` through `Driver.post`), past 7 days they're a
+  `catalog_invalidated` reason `refreshed` through `Driver.post`, and the Catalog tab
+  repaints that level in place via `Driver.catalog_refreshed`), past 7 days they're a
   miss. A scope's clear is a marker file, so a later session misses what a run changed; the
   LSP's `SchemaCache` reads the same disk (`QSQL_CATALOG_PERSIST=0` turns it all off).
   On open and each save the host warms (`catalog.named_tables` → `CatalogCache.warm`, its

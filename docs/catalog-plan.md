@@ -107,8 +107,11 @@ Phase 3 as built, where it differs from the plan below:
     BigQuery unreachable completed all 2050 columns from disk (17 ms). With an empty
     `QSQL_HOME` it got none.
 - **Gaps:**
-  - The Catalog tab doesn't repaint on a `refreshed` event; ctrl+r or drilling again
-    shows the refreshed level.
+  - The Catalog tab didn't repaint on a `refreshed` event. Fixed after Phase 4: the
+    host also tells its driver which level changed (`Driver.catalog_refreshed`), and every
+    sheet showing it takes the new frame, keeping the cursor on the row of the same name,
+    the sort and the hidden columns (`Sheet.reloaded`). A filtered view stays as built;
+    the sheet beneath it is refreshed.
   - A clear in one process can come before another process's first store under that
     scope, from a load that began before the clear. That level then reads as fresh until
     it revalidates. Within one process the load's own clear flag covers this.
