@@ -106,6 +106,7 @@ forbidden_modules = [
     # front-ends, and bootstrap: the composition root
     "quicksql.bootstrap",
     "quicksql.catalog",
+    "quicksql.catalog_store",
     "quicksql.cli",
     "quicksql.lsp",
     "quicksql.live",
@@ -144,6 +145,7 @@ forbidden_modules = [
     "quicksql.runner",
     "quicksql.bootstrap",
     "quicksql.catalog",
+    "quicksql.catalog_store",
     "quicksql.cli",
     "quicksql.lsp",
     "quicksql.live",
