@@ -241,6 +241,30 @@ def test_catalog_without_a_tui_exits_4(nb) -> None:
     assert cli("live", "catalog", str(nb)).exit_code == 4
 
 
+def test_catalog_text_shows_each_name_once_and_whole(tmp_path, fake_driver) -> None:
+    """A row's name is what to type next: never cut, and not repeated in a
+    column of its own when a column already holds it."""
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "s.db")
+    con.execute("CREATE TABLE t (x INTEGER)")
+    con.close()
+    dsn = "postgresql://reader:pw@a-rather-long-hostname.example.internal:5432/warehouse"
+    nb = tmp_path / "nb.qsql"
+    nb.write_text(
+        f"/*@ catalog: {{ postgres: ['{dsn}'] }} */\n"
+        "-- @cell a\n-- @engine: sqlite\n/*@ input: { sqlite: s.db } */\nSELECT 1 AS x;\n"
+    )
+    session = Live(nb, fake_driver)
+    try:
+        top = cli("live", "catalog", str(nb)).output
+        assert "postgres:postgresql://reader:***@a-rather-long-hostname.example.internal:5432/warehouse" in top
+        level = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()
+        assert level[1].split() == ["table"]  # the names are the table column itself
+    finally:
+        session.close()
+
+
 # ---------- the client loads neither Polars nor Textual ----------
 
 WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"
