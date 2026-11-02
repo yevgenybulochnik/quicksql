@@ -7,7 +7,7 @@ so they unit-test without any terminal.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 
@@ -25,6 +25,8 @@ class Sheet:
     # the frame is only the first `sample` rows of a larger output (the TUI's
     # preview); every sheet computed from it carries that on
     sample: int | None = None
+    # the last sort, (column, descending): a reload of the frame re-applies it
+    order: tuple[str, bool] | None = None
 
     @property
     def columns(self) -> list[str]:
@@ -52,7 +54,28 @@ class Sheet:
         return replace(self, cursor=self._clamp(self.frame.height - 1, self.cursor[1]))
 
     def sort(self, desc: bool = False) -> Sheet:
-        return replace(self, frame=self.frame.sort(self.current_column, descending=desc))
+        col = self.current_column
+        return replace(self, frame=self.frame.sort(col, descending=desc), order=(col, desc))
+
+    def reloaded(self, frame: pl.DataFrame, key: Callable[[dict[str, Any]], Any] | None = None) -> Sheet:
+        """This sheet over ``frame``, a fresh load of what it shows: its sort
+        re-applied, the hidden columns still there kept hidden, the cursor on
+        the same column and on the row ``key`` names as it did (else the same
+        position). The selection named rows by position, so it goes."""
+        order = self.order if self.order and self.order[0] in frame.columns else None
+        if order:
+            frame = frame.sort(order[0], descending=order[1])
+        hidden = tuple(c for c in self.hidden if c in frame.columns)
+        if len(hidden) == frame.width:
+            hidden = ()
+        row = self.cursor[0]
+        if key is not None and self.frame.height:
+            name = key(self.frame.row(row, named=True))
+            row = next((i for i, r in enumerate(frame.iter_rows(named=True)) if key(r) == name), row)
+        out = replace(self, frame=frame, hidden=hidden, selected=frozenset(), order=order)
+        was = self.current_column if self.columns else None
+        col = out.columns.index(was) if was in out.columns else self.cursor[1]
+        return replace(out, cursor=out._clamp(row, col))
 
     def hide_current(self) -> Sheet:
         if len(self.columns) <= 1:

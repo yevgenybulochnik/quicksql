@@ -1,13 +1,14 @@
 """The TUI's side of the live session: what the live host asks of the app
 (``live.host.Driver``) — start or cancel a run, read through the session,
 repaint the controls, log, focus a cell, show a toast, run something on the
-app's loop from a worker thread."""
+app's loop from a worker thread, repaint a catalog level a refresh changed."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, ContextManager, Optional
 
 if TYPE_CHECKING:
+    from ..catalog import CatalogNode
     from .app import QsqlApp
 
 
@@ -44,3 +45,6 @@ class AppDriver:
             self.app.call_from_thread(fn)
         except RuntimeError:
             pass  # the app has stopped: nobody is left to tell
+
+    def catalog_refreshed(self, node: CatalogNode) -> None:
+        self.app.catalog.refreshed(node)

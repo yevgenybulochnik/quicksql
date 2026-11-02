@@ -82,6 +82,10 @@ class Driver(Protocol):
         """Run ``fn`` on the host's thread (the TUI's loop) soon: how a
         worker thread reaches the host, e.g. the catalog's refreshes behind."""
 
+    def catalog_refreshed(self, node: CatalogNode) -> None:
+        """A refresh behind an answer changed ``node``'s level in the host's
+        catalog cache: repaint it wherever it shows."""
+
 
 class Subscriber(Protocol):
     def offer(self, event: dict[str, Any]) -> bool:
@@ -486,13 +490,15 @@ class LiveHost:
 
     def _refreshed_behind(self, cache: CatalogCache, node: CatalogNode) -> None:
         """A refresh behind an answer changed a level (a worker thread): say
-        so on the loop, unless that cache is an earlier notebook's."""
+        so on the loop, to the agent and the driver, unless that cache is an
+        earlier notebook's."""
 
         def emit() -> None:
             if cache is self.catalog_cache:
                 scopes = [node.scope] if node.scope is not None else []
                 self._emit("catalog_invalidated", reason="refreshed", run_id=None,
                            top_level=False, scopes=scopes)
+                self.driver.catalog_refreshed(node)
 
         self.driver.post(emit)
 
