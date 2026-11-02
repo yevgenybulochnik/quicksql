@@ -209,6 +209,95 @@ def test_run_and_watch_refuse_while_a_tui_has_the_notebook(live) -> None:
     assert cli("watch", str(live.nb)).exit_code == 5
 
 
+# ---------- the catalog ----------
+
+
+def test_catalog_prints_a_level_and_reads_a_leaf(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb))
+    assert result.exit_code == 0, result.output
+    assert "duckdb::memory:" in result.output and "output" in result.output
+    doc = json.loads(cli("live", "catalog", str(landed.nb), "a", "--json").stdout)
+    assert doc["leaf"] is True and doc["path"] == ["a"] and doc["rows"][0][1] == "x"
+
+
+def test_catalog_pages_with_rows_and_offset(landed) -> None:
+    doc = json.loads(cli("live", "catalog", str(landed.nb), "-n", "1", "--offset", "1", "--json").stdout)
+    assert doc["names"] == ["a"] and doc["next_offset"] == 2
+    assert "--offset 1" in cli("live", "catalog", str(landed.nb), "-n", "1").output  # the next page
+
+
+def test_catalog_match_and_columns(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb), "--match", "A", "--columns", "kind,name", "--json")
+    doc = json.loads(result.stdout)  # any case: only "a" has an a ("duckdb::memory:" hasn't)
+    assert doc["columns"] == ["kind", "name"] and doc["names"] == ["a"]
+
+
+def test_an_unknown_catalog_path_exits_3(landed) -> None:
+    result = cli("live", "catalog", str(landed.nb), "nope")
+    assert result.exit_code == 3 and "nope" in result.output
+
+
+def test_catalog_without_a_tui_exits_4(nb) -> None:
+    assert cli("live", "catalog", str(nb)).exit_code == 4
+
+
+def test_catalog_text_shows_each_name_once_and_whole(tmp_path, fake_driver) -> None:
+    """A row's name is what to type next: never cut, and not repeated in a
+    column of its own when a column already holds it."""
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "s.db")
+    con.execute("CREATE TABLE t (x INTEGER)")
+    con.close()
+    dsn = "postgresql://reader:pw@a-rather-long-hostname.example.internal:5432/warehouse"
+    nb = tmp_path / "nb.qsql"
+    nb.write_text(
+        f"/*@ catalog: {{ postgres: ['{dsn}'] }} */\n"
+        "-- @cell a\n-- @engine: sqlite\n/*@ input: { sqlite: s.db } */\nSELECT 1 AS x;\n"
+    )
+    session = Live(nb, fake_driver)
+    try:
+        top = cli("live", "catalog", str(nb)).output
+        assert "postgres:postgresql://reader:***@a-rather-long-hostname.example.internal:5432/warehouse" in top
+        level = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()
+        assert level[1].split() == ["table"]  # the names are the table column itself
+    finally:
+        session.close()
+
+
+def test_catalog_text_says_how_old_a_cached_level_is_and_that_it_refreshes(
+    tmp_path, fake_driver, monkeypatch
+) -> None:
+    """A level read back from an earlier load says when that was; past its
+    revalidation it says it's being refreshed behind the answer."""
+    import sqlite3
+
+    from quicksql.executors.sqlite_exec import SQLiteExecutor
+
+    monkeypatch.setattr(SQLiteExecutor, "catalog_persists", True)  # a stand-in remote
+    con = sqlite3.connect(tmp_path / "s.db")
+    con.execute("CREATE TABLE t (x INTEGER)")
+    con.close()
+    nb = tmp_path / "nb.qsql"
+    nb.write_text("-- @cell a\n-- @engine: sqlite\n/*@ input: { sqlite: s.db } */\nSELECT 1 AS x;\n")
+    session = Live(nb, fake_driver)
+    try:
+        first = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert "cached" not in first
+        cache = session.host.catalog_cache
+        now = cache.clock()
+        cache.clock = lambda: now + 7200
+        cache.revalidate_after = 3600
+        header = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert header.endswith("· cached 2 h ago, refreshing")
+        cache.wait_refreshes(5)
+        cache.clock = lambda: now + 7200 + 300
+        header = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert header.endswith("· cached 5 min ago")
+    finally:
+        session.close()
+
+
 # ---------- the client loads neither Polars nor Textual ----------
 
 WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"
@@ -217,7 +306,7 @@ WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quick
 def test_live_commands_need_neither_polars_nor_textual(live) -> None:
     env = {**os.environ}
     for args in (["live", "arm", str(live.nb)], ["live", "wait", str(live.nb), "--json"],
-                 ["status", str(live.nb), "--json"]):
+                 ["status", str(live.nb), "--json"], ["live", "catalog", str(live.nb), "--json"]):
         done = subprocess.run(
             [sys.executable, "-c", WITHOUT, *args], capture_output=True, text=True, env=env,
             timeout=60,

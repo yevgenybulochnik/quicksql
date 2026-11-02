@@ -215,6 +215,10 @@ class Executor(ABC):
     # ---- the catalog: optional; an engine without one is listed, not browsed.
     # Nodes load lazily, so building one connects to nothing.
 
+    # whether its catalog's levels are kept on disk across sessions
+    # (catalog_store): worth it where a load is a round trip to a server
+    catalog_persists: ClassVar[bool] = False
+
     def catalog(self, config: Any, root: Path) -> CatalogNode | None:
         """The browsable tree of the context ``config`` names (the TUI's
         catalog), or None when it can't be browsed."""
@@ -232,6 +236,12 @@ class Executor(ABC):
         dotted name, qualifiers first; unqualified parts fall back to the
         engine's defaults (a default schema). None when there's no such table."""
         return None
+
+    def redact(self, text: str) -> str:
+        """``text`` with this engine's secrets hidden (a DSN's password in an
+        error message, say), before the catalog shows it. Free text: hide only
+        what is certainly a secret."""
+        return text
 
     def catalog_relations(self, config: Any, root: Path, parts: list[str]) -> list[tuple[str, str]]:
         """(name, detail) candidates for the next segment of a partial dotted

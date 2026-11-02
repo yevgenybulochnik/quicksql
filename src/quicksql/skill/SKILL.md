@@ -60,7 +60,9 @@ quicksql status NOTEBOOK --json         # ok / failed / skipped / stale / new pe
 
 1. **Arm** reruns once: `quicksql live arm NOTEBOOK`. A TUI opens paused, and saves only
    recompile until it's armed. Ask first if the person may not want reruns.
-2. **Edit** the cell in the file, and save.
+2. **Edit** the cell in the file, and save. Writing against an unfamiliar table? Read its
+   exact columns and types first:
+   `quicksql live catalog NOTEBOOK CONTEXT SCHEMA TABLE --json` (no path: the contexts).
 3. **Wait** for that save: `quicksql live wait NOTEBOOK --json` returns the outcome of
    exactly the text you saved: `ran` (each cell's result; a failure carries `error`,
    `statement_sql` and its `line`/`line_end` in the file), `compile_failed` (exit 3),

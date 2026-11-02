@@ -100,6 +100,54 @@ quicksql live query "SELECT … FROM cell …" NOTEBOOK [--rows 20] [--json]
 - A database output this session hasn't attached yet (nothing ran it since the TUI
   opened) can't be read through it: run the cell once.
 
+## Reading the catalog
+
+```
+quicksql live catalog NOTEBOOK [PATH...] [--match TEXT] [--columns a,b] [--top-level]
+                      [-n 200] [--offset N] [--refresh] [--json]
+```
+
+The schema tree the TUI's Catalog tab shows, a level at a time, for every engine the
+notebook reaches. Its credentials stay in the TUI.
+
+- The top level (no path) lists the notebook's contexts (`duckdb:wh.db`,
+  `postgres:postgresql://u:***@host/db`, `bigquery:proj`), its `@catalog` targets and
+  its cells' outputs.
+- Each row's **name** is the next path segment. In JSON it's `names`, one per row; text
+  output shows it as the first column. A context leads to its schemas or datasets, then
+  their tables. DuckDB lists `schema.table` in one level.
+- A table (or an output) is a leaf. Its rows are its columns as field paths (`event`,
+  `event.params`, `event.params.key`), with type, mode and description.
+- Name a table exactly and only that table loads:
+  `quicksql live catalog NOTEBOOK bigquery:proj sales orders --json` is one BigQuery
+  call, however many datasets the project has.
+- A wide table pages: up to 1000 rows a page, then `next_offset` (`more: --offset N`).
+  Cut it down first: `--match customer` keeps the rows whose name (at a table, field path)
+  contains it, any case. `--top-level` drops nested field paths, and
+  `--columns field_path,type` drops descriptions.
+- A path that leads nowhere exits 3 and names the closest rows. A load that fails (an
+  unreachable warehouse) exits 1.
+- Levels are cached, and the cache is shared with the TUI. A save drops the top level and
+  the outputs; a run drops the contexts on the engines it ran on and its outputs; each
+  drop is a `catalog_invalidated` event.
+- BigQuery and Postgres levels are also kept on disk (`~/.quicksql/catalog/`, private
+  to the user: names, types and column descriptions; `QSQL_CATALOG_PERSIST=0` keeps them
+  in memory), so a reopened TUI, and the LSP after a restart, answer without a round trip. Each answer
+  says its `age`. Past 15 minutes a level still answers at once, marked `stale` (text:
+  `cached 2 h ago, refreshing`), and refreshes behind the answer; if it changed, a
+  `catalog_invalidated` event with reason `refreshed` follows, so read it again. Past 7
+  days it loads afresh. A change made outside quicksql, such as a table another pipeline
+  created, shows after its refresh; `--refresh` loads it now.
+- The TUI warms the tables the notebook's cells name in FROM/JOIN, BigQuery and Postgres
+  only, when it opens and after each save. Loading them runs in the background, so reading
+  one soon after is usually `cached`. Settings: `QSQL_CATALOG_WARM=0` turns warming off;
+  `QSQL_CATALOG_REVALIDATE_AFTER` and `QSQL_CATALOG_MAX_AGE` (`15m`, `7d`);
+  `QSQL_CATALOG_SIZE_MB` caps the disk.
+- A slow load answers `timeout` (exit 4) after `--timeout` seconds (60) but carries on.
+  Ask again and it's there.
+
+Metadata only, never table contents: to read rows, use `head` or `live query`.
+
 ## Watching
 
 ```
@@ -125,6 +173,7 @@ to catch up between turns. The kinds:
 | `note` | `detail` | something the runner wants said (a reopened session, a cancel) |
 | `settled` | `hash`, `state` | a save's outcome is ready (what `live wait` waits for) |
 | `controls_changed` | `armed`, `autorun_global`, `autorun_off`, `by` (`keys` or `agent`) | a switch changed |
+| `catalog_invalidated` | `reason` (`save`, `run`, or `refreshed`: a refresh behind an answer found a change), `run_id`, `top_level`, `scopes` (top-level row names) | cached catalog levels went stale or changed |
 | `notebook_closed` | `notebook` | the TUI opened another notebook or quit |
 
 A watcher that falls too far behind gets `events_lost` (exit 4): read

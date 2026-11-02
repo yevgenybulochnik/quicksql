@@ -186,6 +186,7 @@ class LiveServer:
             "wait": self._wait,
             "head": self._head,
             "query": self._query,
+            "catalog": self._catalog,
             "arm": lambda p: host.set_armed(True, by="agent"),
             "disarm": lambda p: host.set_armed(False, by="agent"),
             "autorun": self._autorun,
@@ -244,6 +245,38 @@ class LiveServer:
         sql = _str(params, "sql")
         views = self.host.views()
         return await asyncio.to_thread(self.host.query, sql, views, _int(params, "rows", 20))
+
+    async def _catalog(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A page of a catalog level, read on a worker. Past ``timeout`` it
+        answers ``timeout``; the load carries on and lands in the cache, so
+        asking again finds it."""
+        path = params.get("path", [])
+        if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
+            raise LiveError(INVALID, "path is a list of names, a row name per level")
+        match, columns = params.get("match"), params.get("columns")
+        if match is not None and not isinstance(match, str):
+            raise LiveError(INVALID, "match is a string")
+        if columns is not None and (
+            not isinstance(columns, list) or not all(isinstance(c, str) for c in columns)
+        ):
+            raise LiveError(INVALID, "columns is a list of column names")
+        top_level, refresh = params.get("top_level", False), params.get("refresh", False)
+        if not isinstance(top_level, bool) or not isinstance(refresh, bool):
+            raise LiveError(INVALID, "top_level and refresh are true or false")
+        offset, rows = _int(params, "offset", 0), _int(params, "rows", 200)
+        timeout = _timeout(params, default=60)
+        root, cache = self.host.catalog_scope()  # on the loop: no_project
+        work = asyncio.to_thread(
+            self.host.browse, root, cache, path, offset=offset, rows=rows, match=match,
+            columns=columns, top_level=top_level, refresh=refresh,
+        )
+        try:
+            return await asyncio.wait_for(work, timeout)
+        except asyncio.TimeoutError:
+            raise LiveError(
+                TIMEOUT, f"still loading after {timeout:g} s: ask again, the load carries on "
+                "and lands in the cache",
+            ) from None
 
     async def _wait(self, params: dict[str, Any]) -> dict[str, Any]:
         """How the save of the text with ``hash`` settled: waits for the
@@ -398,8 +431,8 @@ def _cells(params: dict[str, Any]) -> list[str] | None:
     return cells
 
 
-def _timeout(params: dict[str, Any]) -> float:
-    value = params.get("timeout", 600)
+def _timeout(params: dict[str, Any], default: float = 600) -> float:
+    value = params.get("timeout", default)
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         raise LiveError(INVALID, "timeout is a positive number of seconds")
     return min(float(value), MAX_WAIT)

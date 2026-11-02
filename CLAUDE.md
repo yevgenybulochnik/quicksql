@@ -97,8 +97,9 @@ first `@cell`) inherited by every cell.
   ran it with, or first saw it at via `see`), plus downstream through autorun cells.
   Each run writes the notebook's state file under `~/.quicksql/state/` (status + what each
   landed output was built from; `RunSession.landed` is seeded from it) for
-  `quicksql status`; it never skips a run. `$QSQL_HOME` moves `~/.quicksql` (state and user
-  templates); an autouse fixture gives every test its own, so tests never touch the real one.
+  `quicksql status`; it never skips a run. `$QSQL_HOME` moves `~/.quicksql` (state, user
+  templates, the catalog store); an autouse fixture gives every test its own, so tests never
+  touch the real one.
   Third-party plugins load via `--plugins mod.or.path.py` or a `quicksqlrc.py` next to the file.
   The TUI runs one run at a time per session: a new run, `o` or quitting cancels the one
   under way, which stops between cells (`run_project(cancel=)`), and the next waits for it.
@@ -111,8 +112,23 @@ first `@cell`) inherited by every cell.
   subscriber queues (`events_lost`, never unbounded growth). `quicksql tui` serves it on a
   per-notebook 0600 Unix socket (`live.protocol.socket_path`: `$QSQL_HOME/run/`, or the
   runtime dir when too long) from the TUI's own loop (`live/server.py`), so requests and
-  keys share one thread; DuckDB reads (`head`, `query`) run on a worker through
-  `RunController.reading()`, which holds the session open. `quicksql live …` is the
+  keys share one thread; DuckDB reads (`head`, `query`) and catalog loads (`catalog`) run
+  on a worker through `RunController.reading()`, which holds the session open. The host
+  owns the schema catalog (`catalog_cache`, one `catalog_root` per project), shared by
+  the Catalog tab and `quicksql live catalog`; a save drops the top level and outputs, a
+  run the contexts on engines it ran on or landed in (`catalog_invalidated`). The cache reads
+  through the disk (`catalog_store`, `$QSQL_HOME/catalog/`): levels of engines that declare
+  `catalog_persists` (BigQuery, Postgres; never outputs) are kept across sessions, one 0600
+  file per level named by its key's sha256 (keys can carry a DSN). They age from their load:
+  past 15 min they answer `stale` and refresh behind (≤4 threads; a change posts
+  `catalog_invalidated` reason `refreshed` through `Driver.post`, and the Catalog tab
+  repaints that level in place via `Driver.catalog_refreshed`), past 7 days they're a
+  miss. A scope's clear is a marker file, so a later session misses what a run changed; the
+  LSP's `SchemaCache` reads the same disk (`QSQL_CATALOG_PERSIST=0` turns it all off).
+  On open and each save the host warms (`catalog.named_tables` → `CatalogCache.warm`, its
+  own 4 threads) the remote tables cells name in FROM/JOIN that aren't fresh;
+  `QSQL_CATALOG_{WARM,REVALIDATE_AFTER,MAX_AGE,SIZE_MB}` via `catalog.default_cache`.
+  `quicksql live …` is the
   stdlib client (no Textual/Polars). Still reflect-only for the file: the socket never
   writes it. `quicksql run`/`watch` refuse while a TUI hosts the notebook (one runner per
   notebook); `QsqlApp(live=False)` by default, so tests opt in.
@@ -141,12 +157,18 @@ first `@cell`) inherited by every cell.
   — an explicit `-m` overrides the default deselection. The standalone demo stack
   `demo/kitchen-sink/docker-compose.yml` runs on offset ports (5433/9051) and can
   stay up alongside this one.
+- Catalog stress (`stress/catalog/README.md`): `uv run python stress/catalog/stack.py up`
+  (a second emulator, compose profile `stress` on :9052, plus `stress_*` schemas in
+  Postgres's `quicksql`), then `uv run --extra postgres --extra bigquery pytest -m stress`
+  under the MemoryMax scope below. Budgets are round trips; a budget not met yet is
+  `xfail(strict=True)` naming its phase in `docs/catalog-plan.md`. Never delete a big
+  dataset on the emulator (it panics): `stack.py up` recreates it instead.
 - `uv run lint-imports` — the layering gate, which `tests/test_layering.py` runs in every
   `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
   `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
   `compile` | `status` | `head <cell>` | `directives` | `skill` | `live …` (arm, disarm, autorun, run,
-  cancel, wait, events, query, focus, notify) — default file `base.qsql`;
+  cancel, wait, events, query, catalog, focus, notify) — default file `base.qsql`;
   `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile /
   unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
   with a missing file opens a notebook picker: existing .qsql/.qsql.sql files plus
@@ -177,7 +199,10 @@ first `@cell`) inherited by every cell.
 - `conduit.py` — the DuckDB conduit's target, the duckdb engine's session on it, and
   reading through it (extensions, previews, field paths)
 - `catalog.py` — the TUI's schema catalog: each context's tree from its executor,
-  `@catalog` targets, landed outputs read back through DuckDB
+  `@catalog` targets, landed outputs read back through DuckDB; `CatalogCache` (shared
+  loads, scopes, a cap, read-through to the disk with refresh behind)
+- `catalog_store.py` — the catalog on disk: one file per level (header + Arrow IPC),
+  atomic writes, LRU cap, per-scope clear markers
 - `executors/`, `sinks/` — strategy leaves (duckdb/sqlite/postgres/bigquery, each
   opening an `EngineSession` and declaring its dialect and catalog; parquet/duckdb/postgres)
 - `scaffold.py`, `cli.py`, `watcher.py` — CLI, watch loop

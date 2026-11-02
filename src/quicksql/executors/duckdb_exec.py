@@ -74,4 +74,6 @@ class DuckDBExecutor(Executor):
 
             return CatalogNode(title=f"duckdb:{path}/{schema}.{table}", load=fields_load)
 
-        return CatalogNode(title=f"duckdb:{path}", load=load, child=child)
+        return CatalogNode(
+            title=f"duckdb:{path}", load=load, child=child, name_columns=("schema", "table")
+        )

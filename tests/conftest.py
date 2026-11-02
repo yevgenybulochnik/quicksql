@@ -178,6 +178,8 @@ class FakeDriver:
         self.repaints = 0
         self.focused: list[tuple[str, str | None]] = []
         self.toasts: list[tuple[str, str]] = []
+        self.posted = 0
+        self.refreshed: list = []  # the catalog levels it was told changed
 
     def start_run(self, select, closure):
         self.gen = max(self.gen, self.host.latest_run) + 1  # monotonic, like the TUI's
@@ -198,6 +200,11 @@ class FakeDriver:
         finally:
             conn.close()
 
+    def connect(self):
+        import duckdb
+
+        return duckdb.connect()
+
     def controls_changed(self) -> None:
         self.repaints += 1
 
@@ -209,6 +216,14 @@ class FakeDriver:
 
     def toast(self, message: str, severity: str) -> None:
         self.toasts.append((message, severity))
+
+    def post(self, fn) -> None:
+        """Run ``fn`` where the host runs (the TUI's loop): here, at once."""
+        self.posted += 1
+        fn()
+
+    def catalog_refreshed(self, node) -> None:
+        self.refreshed.append(node)
 
 
 @pytest.fixture

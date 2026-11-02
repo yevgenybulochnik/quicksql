@@ -2,10 +2,14 @@
 through a fake driver (no Textual, no socket)."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import polars as pl
 import pytest
 
 from quicksql.bootstrap import compile_file
+from quicksql.catalog import CatalogCache, CatalogNode
+from quicksql.executors.postgres_exec import PostgresExecutor
 from quicksql.live.host import LiveHost
 from quicksql.live.protocol import LiveError
 from quicksql.models import RunEvent, RunResult
@@ -325,3 +329,366 @@ def test_saving_the_same_text_again_keeps_what_its_run_found(host) -> None:
     outcome = host.outcomes[project.source_hash]
     assert outcome["state"] == "ran" and outcome["summary"]["failed"] == 1
     assert host.since(0)[-1]["kind"] == "settled"  # a waiter still hears it settle
+
+
+# ---------- the catalog cache (docs/catalog-plan.md, Phase 2) ----------
+
+
+def _cached_level(host: LiveHost, scope: str) -> CatalogNode:
+    """A level under the top-level row ``scope``, loaded into the host's cache."""
+    frame = pl.DataFrame({"n": [1]})
+    node = CatalogNode(title=f"under {scope}", load=lambda: frame, scope=scope)
+    host.catalog_cache.load(node)
+    return node
+
+
+def _invalidated(host: LiveHost, since: int) -> list[dict]:
+    return [e for e in host.since(since) if e["kind"] == "catalog_invalidated"]
+
+
+def test_the_host_keeps_a_catalog_cache_per_notebook(host, nb) -> None:
+    cache = host.catalog_cache
+    assert isinstance(cache, CatalogCache)
+    host.switch(nb)
+    assert host.catalog_cache is not cache
+
+
+def test_the_host_builds_one_catalog_root_per_project(host, nb) -> None:
+    """One root per compiled project: its engines' clients live across requests."""
+    root = host.catalog_root()
+    assert host.catalog_root() is root
+    assert root.load()["name"].to_list()[0] == "duckdb::memory:"
+    host.recompiled(compile_file(nb), [])
+    assert host.catalog_root() is not root
+
+
+def test_a_save_clears_the_top_level_and_the_outputs_but_keeps_warehouses(host, nb) -> None:
+    root = host.catalog_root()
+    host.catalog_cache.load(root)
+    warehouse, output = _cached_level(host, "bigquery:p"), _cached_level(host, "a")
+    since = host.seq
+    host.recompiled(compile_file(nb), [])
+    cache = host.catalog_cache
+    assert cache.peek(root) is None and cache.peek(output) is None  # what a save can change
+    assert cache.peek(warehouse) is not None  # a save changes no warehouse
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["top_level"], event["scopes"]) == ("save", True, ["a", "b", "manual"])
+
+
+def test_a_run_clears_the_contexts_it_ran_in_and_the_outputs_it_landed(host) -> None:
+    root = host.catalog_root()
+    host.catalog_cache.load(root)
+    levels = {s: _cached_level(host, s) for s in ("duckdb::memory:", "bigquery:p", "a", "b", "manual")}
+    since = host.seq
+    host.run_requested(1, None)
+    skipped = RunResult(cell="b", status="skipped", error="a failed")
+    run_through(host, 1, host.project, [ok("a"), skipped])
+    kept = {scope for scope, node in levels.items() if host.catalog_cache.peek(node) is not None}
+    assert kept == {"bigquery:p", "b", "manual"}  # b was skipped: it never ran
+    assert host.catalog_cache.peek(root) is not None  # a run adds no top-level row
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["run_id"], event["top_level"], event["scopes"]) == (
+        "run", 1, False, ["a", "duckdb::memory:"],
+    )
+
+
+def test_a_run_clears_the_engine_its_cells_land_in(tmp_path, fake_driver) -> None:
+    """A sqlite cell landing in a duckdb sink changes duckdb's catalog too."""
+    nb = tmp_path / "nb.qsql"
+    nb.write_text(
+        "-- @cell lake\nSELECT 1 AS x;\n\n"
+        "-- @cell src\n-- @engine: sqlite\n"
+        "/*@\ninput: { sqlite: s.db }\noutput: { type: duckdb, path: out.db }\n*/\nSELECT 1 AS y;\n"
+    )
+    host = LiveHost(fake_driver, nb)
+    fake_driver.host = host
+    host.loaded(compile_file(nb))
+    lake, other = _cached_level(host, "duckdb::memory:"), _cached_level(host, "bigquery:p")
+    host.run_requested(1, None)
+    run_through(host, 1, host.project, [ok("src")])
+    assert host.catalog_cache.peek(lake) is None
+    assert host.catalog_cache.peek(other) is not None
+
+
+def test_a_run_that_ran_nothing_clears_nothing(host) -> None:
+    level = _cached_level(host, "duckdb::memory:")
+    since = host.seq
+    host.run_requested(1, None)
+    run_through(host, 1, host.project, [])
+    assert host.catalog_cache.peek(level) is not None
+    assert _invalidated(host, since) == []
+
+
+# ---------- the catalog on disk (Phase 3) ----------
+
+
+def _remote_level(scope: str, calls: list, state: dict) -> CatalogNode:
+    def load() -> pl.DataFrame:
+        calls.append(scope)
+        return pl.DataFrame({"n": [state["n"]]})
+
+    return CatalogNode(title=f"under {scope}", load=load, key=f"{scope}/t", scope=scope, persist=True)
+
+
+def test_the_next_notebooks_cache_reads_what_the_last_one_kept_on_disk(host, nb) -> None:
+    calls, state = [], {"n": 1}
+    host.catalog_cache.load(_remote_level("bigquery:p", calls, state))
+    host.switch(nb)  # a fresh cache, as a reopened TUI has
+    host.loaded(compile_file(nb))
+    assert host.catalog_cache.read(_remote_level("bigquery:p", calls, state)).cached
+    assert calls == ["bigquery:p"]
+
+
+def test_persistence_off_keeps_the_hosts_catalog_in_memory(nb, fake_driver, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_PERSIST", "0")
+    host = LiveHost(fake_driver, nb)
+    assert host.catalog_cache.store is None
+
+
+def test_the_hosts_catalog_ages_levels_as_the_environment_says(nb, fake_driver, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_REVALIDATE_AFTER", "1m")
+    monkeypatch.setenv("QSQL_CATALOG_MAX_AGE", "2d")
+    cache = LiveHost(fake_driver, nb).catalog_cache
+    assert (cache.revalidate_after, cache.max_age) == (60, 2 * 24 * 3600)
+
+
+def test_a_refresh_behind_that_changed_a_level_is_an_event(host) -> None:
+    calls, state = [], {"n": 1}
+    cache = host.catalog_cache
+    cache.load(_remote_level("bigquery:p", calls, state))
+    cache.revalidate_after = -1  # everything it holds is due
+    state["n"] = 2
+    since = host.seq
+    assert cache.read(_remote_level("bigquery:p", calls, state)).stale
+    assert cache.wait_refreshes(5)
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["run_id"], event["top_level"], event["scopes"]) == (
+        "refreshed", None, False, ["bigquery:p"],
+    )
+    assert cache.peek(_remote_level("bigquery:p", calls, state))["n"].to_list() == [2]
+
+
+def test_a_refresh_behind_that_changed_a_level_tells_the_driver_which(host, fake_driver) -> None:
+    """So the Catalog tab can repaint the level wherever it shows it."""
+    calls, state = [], {"n": 1}
+    cache = host.catalog_cache
+    cache.load(_remote_level("bigquery:p", calls, state))
+    cache.revalidate_after = -1
+    cache.read(_remote_level("bigquery:p", calls, state))  # due, but nothing changed
+    assert cache.wait_refreshes(5)
+    assert fake_driver.refreshed == []
+    state["n"] = 2
+    cache.read(_remote_level("bigquery:p", calls, state))
+    assert cache.wait_refreshes(5)
+    assert [node.cache_key for node in fake_driver.refreshed] == ["bigquery:p/t"]
+
+
+def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb, fake_driver) -> None:
+    calls, state = [], {"n": 1}
+    old = host.catalog_cache
+    old.load(_remote_level("bigquery:p", calls, state))
+    old.revalidate_after = -1
+    host.switch(nb)
+    host.loaded(compile_file(nb))
+    since = host.seq
+    state["n"] = 2
+    old.read(_remote_level("bigquery:p", calls, state))
+    assert old.wait_refreshes(5)
+    assert _invalidated(host, since) == []
+    assert fake_driver.refreshed == []  # the Catalog tab shows the new notebook
+
+
+# ---------- warming (Phase 4) ----------
+
+
+class PgColumns:
+    """A Postgres where every table has one column; it records each table
+    whose columns it's asked for."""
+
+    def __init__(self, asked: list[str]) -> None:
+        self.asked = asked
+
+    def execute(self, sql, params=None):
+        if "information_schema.columns" in sql:
+            self.asked.append(".".join(params))
+            return SimpleNamespace(fetchall=lambda: [("id", "integer", "NO", None)])
+        return SimpleNamespace(fetchall=lambda: [])
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def pg_asked(monkeypatch) -> list[str]:
+    asked: list[str] = []
+    monkeypatch.setattr(PostgresExecutor, "make_connection", lambda self, dsn: PgColumns(asked))
+    return asked
+
+
+def _pg_notebook(path: Path, tables: str) -> Path:
+    path.write_text(
+        "-- @cell local\nSELECT 1 AS x;\n\n"
+        "-- @cell pg\n-- @engine: postgres\n/*@ input: { postgres: 'postgresql://x' } */\n"
+        f"SELECT * FROM {tables};\n"
+    )
+    return path
+
+
+def _opened(path: Path, driver) -> LiveHost:
+    host = LiveHost(driver, path)
+    driver.host = host
+    host.loaded(compile_file(path))
+    return host
+
+
+def test_opening_a_notebook_warms_the_tables_its_cells_name(tmp_path, fake_driver, pg_asked) -> None:
+    host = _opened(_pg_notebook(tmp_path / "nb.qsql", "s.a JOIN s.b ON true"), fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    assert sorted(pg_asked) == ["s.a", "s.b"]
+
+
+def test_a_save_warms_what_it_newly_names(tmp_path, fake_driver, pg_asked) -> None:
+    nb = _pg_notebook(tmp_path / "nb.qsql", "s.a")
+    host = _opened(nb, fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    _pg_notebook(nb, "s.a JOIN s.c ON true")
+    host.recompiled(compile_file(nb), ["pg"])
+    assert host.catalog_cache.wait_warm(5)
+    assert pg_asked == ["s.a", "s.c"]  # s.a is still fresh
+
+
+def test_with_warming_off_nothing_loads_ahead(tmp_path, fake_driver, pg_asked, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_WARM", "0")
+    host = _opened(_pg_notebook(tmp_path / "nb.qsql", "s.a"), fake_driver)
+    assert host.catalog_cache.wait_warm(5)
+    assert pg_asked == []
+
+
+# ---------- browsing the catalog (quicksql live catalog) ----------
+
+
+def _wide_root(rows: int, description: str = "") -> CatalogNode:
+    """A root holding one table, ``wide``, whose leaf has ``rows`` field paths."""
+    from quicksql.executors.base import field_path_frame
+
+    fields = field_path_frame([(f"c{i}", f"c{i}", "STRING", "", description) for i in range(rows)])
+    leaf = CatalogNode(title="wh.wide", load=lambda: fields, key="wh.wide")
+    tables = pl.DataFrame({"table": ["wide"]})
+    return CatalogNode(title="wh", load=lambda: tables, child=lambda row: leaf, name_columns=("table",))
+
+
+def test_browse_the_top_level_names_each_row(host) -> None:
+    root, cache = host.catalog_scope()
+    got = host.browse(root, cache, [], offset=0, rows=200)
+    assert (got["title"], got["leaf"], got["path"]) == ("catalog", False, [])
+    assert got["names"] == ["duckdb::memory:", "a", "b", "manual"]
+    assert (got["total"], got["offset"], got["next_offset"]) == (4, 0, None)
+
+
+def test_browse_a_landed_output(host) -> None:
+    from quicksql.runner import run_project
+
+    assert all(r.ok for r in run_project(host.project))
+    root, cache = host.catalog_scope()
+    got = host.browse(root, cache, ["a"], offset=0, rows=200)
+    assert got["leaf"] is True and got["names"] is None
+    assert [row[1] for row in got["rows"]] == ["x"]  # field_path
+
+
+def test_browse_an_unknown_path_names_the_segment(host) -> None:
+    root, cache = host.catalog_scope()
+    with pytest.raises(LiveError) as err:
+        host.browse(root, cache, ["aa"], offset=0, rows=10)
+    assert err.value.code == "unknown_path" and "'aa'" in err.value.message
+    with pytest.raises(LiveError) as err:  # an in-memory context has nothing beneath it
+        host.browse(root, cache, ["duckdb::memory:", "x"], offset=0, rows=10)
+    assert err.value.code == "unknown_path"
+
+
+def test_browse_a_failing_load_says_why_without_the_password(host) -> None:
+    def boom():
+        raise RuntimeError("connection to postgresql://u:hunter2@h/db failed")
+
+    root = CatalogNode(title="root", load=boom)
+    with pytest.raises(LiveError) as err:
+        host.browse(root, CatalogCache(), [], offset=0, rows=10)
+    assert err.value.code == "load_failed"
+    assert "hunter2" not in err.value.message and "postgresql://u:***@h/db" in err.value.message
+
+
+def test_browse_redacts_what_it_shows(host) -> None:
+    frame = pl.DataFrame({"name": ["postgres:postgresql://u:hunter2@h/db"]})
+    root = CatalogNode(title="root", load=lambda: frame, child=lambda row: None)
+    got = host.browse(root, CatalogCache(), [], offset=0, rows=10)
+    assert "hunter2" not in repr(got)
+
+
+def test_browse_pages_a_wide_leaf_and_filters_it(host) -> None:
+    root, cache = _wide_root(2500), CatalogCache()
+    first = host.browse(root, cache, ["wide"], offset=0, rows=1000)
+    assert (len(first["rows"]), first["total"], first["next_offset"]) == (1000, 2500, 1000)
+    assert first["cached"] is False
+    last = host.browse(root, cache, ["wide"], offset=2000, rows=1000)
+    assert (len(last["rows"]), last["next_offset"]) == (500, None)
+    assert len(host.browse(root, cache, ["wide"], offset=0, rows=5000)["rows"]) == 1000  # MAX_ROWS
+    matched = host.browse(root, cache, ["wide"], offset=0, rows=200, match="C24", columns=["field_path"])
+    assert matched["columns"] == ["field_path"] and matched["cached"] is True
+    assert matched["total"] == 111  # c24, c240–c249, c2400–c2499
+
+
+def test_browse_shrinks_a_page_to_fit_one_message(host, monkeypatch) -> None:
+    from quicksql.live.protocol import encode
+
+    monkeypatch.setattr("quicksql.live.host.MAX_LINE", 60_000)
+    got = host.browse(_wide_root(1000, description="d" * 200), CatalogCache(), ["wide"], offset=0, rows=1000)
+    assert len(encode({"id": 1, "result": got})) <= 60_000
+    assert 0 < len(got["rows"]) < 1000 and got["next_offset"] == len(got["rows"])
+
+
+def test_browse_refresh_reloads_the_level(host) -> None:
+    loads: list[int] = []
+    frame = pl.DataFrame({"name": ["x"]})
+
+    def load():
+        loads.append(1)
+        return frame
+
+    root, cache = CatalogNode(title="root", load=load), CatalogCache()
+    host.browse(root, cache, [], offset=0, rows=10)
+    assert host.browse(root, cache, [], offset=0, rows=10)["cached"] is True and loads == [1]
+    assert host.browse(root, cache, [], offset=0, rows=10, refresh=True)["cached"] is False
+    assert loads == [1, 1]
+
+
+def test_browse_says_how_old_a_level_is_and_whether_it_refreshes(host) -> None:
+    calls, state = [], {"n": 1}
+    leaf = _remote_level("bigquery:p", calls, state)
+    root = CatalogNode(title="root", load=lambda: pl.DataFrame({"name": ["t"]}), child=lambda row: leaf)
+    cache = host.catalog_cache
+    fresh = host.browse(root, cache, ["t"], offset=0, rows=10)
+    assert (fresh["age"], fresh["stale"]) == (0, False)
+    cache.revalidate_after = -1
+    now = cache.clock()
+    cache.clock = lambda: now + 7200
+    old = host.browse(root, cache, ["t"], offset=0, rows=10)
+    assert (old["cached"], old["age"], old["stale"]) == (True, 7200, True)
+    assert cache.wait_refreshes(5)
+
+
+def test_browse_rejects_bad_params(host) -> None:
+    root, cache = host.catalog_scope()
+    for kwargs in ({"offset": -1, "rows": 10}, {"offset": 0, "rows": 0}):
+        with pytest.raises(LiveError) as err:
+            host.browse(root, cache, [], **kwargs)
+        assert err.value.code == "invalid"
+    with pytest.raises(LiveError) as err:
+        host.browse(root, cache, [], offset=0, rows=10, columns=["nope"])
+    assert err.value.code == "invalid" and "kind" in err.value.message  # names what there is
+
+
+def test_the_catalog_needs_a_compiled_notebook(nb, fake_driver) -> None:
+    host = LiveHost(fake_driver, nb)
+    fake_driver.host = host
+    with pytest.raises(LiveError) as err:
+        host.catalog_scope()
+    assert err.value.code == "no_project"

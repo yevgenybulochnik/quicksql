@@ -1,10 +1,14 @@
 """The Catalog tab: the project-wide schema browser, on its own drilling stack.
 
-`CatalogView` loads the notebook's catalog (`catalog.project_root_node`) one
+`CatalogView` loads the notebook's catalog (the live host's `catalog_root`) one
 level at a time on a thread worker, into a stack of Sheets whose ``drill`` is
 the CatalogNode each came from; Enter drills a row into its child node. Frames
-are cached by node (`catalog.CatalogCache`) and dropped when a run, a save or
-a notebook switch changes what they describe; ctrl+r refetches one level.
+are cached in the live host's `catalog_cache`, shared with an agent's
+``quicksql live catalog``: the host drops what a run or a save changed, and a
+notebook switch starts a fresh one; ctrl+r refetches one level. A remote
+level past revalidation answers at once and is refreshed behind; when that
+refresh changes it, the host says so (``refreshed``) and every sheet showing
+the level takes the new frame in place, its cursor, sort and hidden columns kept.
 The stack is kept across tab switches: each Sheet holds its own
 cursor/sort/filter for S / Enter to resume. A notebook switch bumps the
 view's generation and starts a fresh cache: a load still running for the old
@@ -13,12 +17,13 @@ notebook then lands nowhere, neither on the stack nor in the cache.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
 from textual.widgets import DataTable
 
-from ..catalog import CatalogCache, CatalogNode, project_root_node
+from ..catalog import CatalogCache, CatalogNode
 from ..sheet import Sheet
 from .panes import SheetTable, Surface
 
@@ -31,7 +36,6 @@ class CatalogView(Surface):
         super().__init__(app)
         self.stack: list[Sheet] = []
         self.subtitle = ""  # the top sheet's
-        self.cache = CatalogCache()
         self.loading: str | None = None  # the title of a load in flight
         self.dive_pending = False  # S pressed while the root loads
         self._root_loading = False  # a root load is in flight
@@ -62,11 +66,10 @@ class CatalogView(Surface):
         self.app.refresh_subtitle()
 
     def reset(self) -> None:
-        """A notebook switch: no stack, nothing cached or pending. The old
-        cache is left to the old notebook's loads still running."""
+        """A notebook switch: no stack, nothing pending (the host starts a
+        fresh cache; the old one is left to the old notebook's loads)."""
         self._gen += 1
         self.stack = []
-        self.cache = CatalogCache()
         self.loading = None
         self.dive_pending = False
         self._root_loading = False
@@ -91,7 +94,7 @@ class CatalogView(Surface):
         if self.stack or self._root_loading or not project:
             return
         self._root_loading = True
-        self._load(project_root_node(project, connect=self.app.runs.connect))
+        self._load(self.app.host.catalog_root(project))
 
     def drill(self) -> None:
         """Enter on a row: load the level beneath it (a leaf has none)."""
@@ -108,13 +111,36 @@ class CatalogView(Surface):
         node: CatalogNode | None = self.stack[-1].drill if self.stack else None
         if node is None:
             return
-        self.cache.invalidate(node)
+        self.app.host.catalog_cache.invalidate(node)
         self._load(node, replace=True)
+
+    def refreshed(self, node: CatalogNode) -> None:
+        """A refresh behind an answer changed ``node``'s level (the host says
+        so, on the loop, for this notebook's cache): each sheet showing it as
+        loaded, sorted or not, takes the new frame, its cursor on the row of
+        the same name. A filtered view stays as it was built; the sheet
+        beneath it is refreshed, so q goes back to the new listing."""
+        frame = self.app.host.catalog_cache.peek(node)
+        if frame is None:
+            return  # dropped since (a clear, the cap): the next read loads
+
+        def renewed(sheet: Sheet) -> Sheet:
+            level: CatalogNode | None = sheet.drill
+            if level is None or level.cache_key != node.cache_key or sheet.title != level.title:
+                return sheet
+            return sheet.reloaded(frame, key=level.row_name)
+
+        top = self.stack[-1] if self.stack else None
+        self.stack[:] = [renewed(sheet) for sheet in self.stack]
+        if self.filter_base is not None:  # mid-filter: the next keystroke filters the new one
+            self.filter_base = renewed(self.filter_base)
+        if self.stack and self.stack[-1] is not top:
+            self.refresh()
 
     def _load(self, node: CatalogNode, replace: bool = False) -> None:
         # not `exclusive`: Textual would only flag the old thread cancelled;
         # the generation is what keeps an older notebook's load off the stack
-        work = partial(self._fetch, node, replace, self._gen, self.cache)
+        work = partial(self._fetch, node, replace, self._gen, self.app.host.catalog_cache)
         self.app.run_worker(work, thread=True, group="catalog")
 
     def _fetch(self, node: CatalogNode, replace: bool, gen: int, cache: CatalogCache) -> None:
@@ -150,11 +176,18 @@ class CatalogView(Surface):
         self._root_loading = False
         self._ended()  # drop the loading… note
 
+    def _latest(self, sheet: Sheet) -> Sheet:
+        """``sheet`` with its level's frame as the cache holds it now: a
+        refresh behind the load may have landed before the sheet did, and its
+        ``refreshed`` then found nothing showing the level."""
+        frame = self.app.host.catalog_cache.peek(sheet.drill)
+        return sheet if frame is None or frame is sheet.frame else replace(sheet, frame=frame)
+
     def _push(self, gen: int, sheet: Sheet) -> None:
         if gen != self._gen:
             return  # the previous notebook's listing
         self._root_loading = False  # a root push lands on an empty stack
-        self.stack.append(sheet)
+        self.stack.append(self._latest(sheet))
         if self.dive_pending:  # S while the root was loading
             self.dive_pending = False
             self.app.mode = "catalog"
@@ -165,7 +198,7 @@ class CatalogView(Surface):
         if gen != self._gen:
             return
         if self.stack:
-            self.stack[-1] = sheet
+            self.stack[-1] = self._latest(sheet)
             self.refresh()
             self._ended()
         else:

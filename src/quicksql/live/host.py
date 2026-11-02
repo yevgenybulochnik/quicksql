@@ -12,8 +12,10 @@ is asked for.
 
 Every method runs on one thread, the TUI's event loop, which is where key
 handlers, run events (``call_from_thread``) and socket requests all arrive;
-only ``read`` and ``query`` run on a worker thread, through the driver's
-``reading`` handle, and touch no host state.
+only ``read``, ``query`` and ``browse`` run on a worker thread, through the
+driver's ``reading`` handle, and touch no host state. The catalog's
+refreshes behind an answer, and what its warming changed, reach the host
+through the driver's ``post``.
 """
 
 from __future__ import annotations
@@ -31,16 +33,21 @@ from ..watcher import should_rerun
 from .protocol import (
     BUSY,
     INVALID,
+    LOAD_FAILED,
+    MAX_LINE,
     MAX_ROWS,
     NO_PROJECT,
     NOT_READABLE,
     QUERY_FAILED,
     REFUSED,
     UNKNOWN_CELL,
+    UNKNOWN_PATH,
     LiveError,
+    encode,
 )
 
 if TYPE_CHECKING:
+    from ..catalog import CatalogCache, CatalogNode, Resolved
     from ..compiler import Project
 
 
@@ -58,6 +65,10 @@ class Driver(Protocol):
         """A DuckDB handle that reads what the session landed, held in use
         (a notebook switch waits for it) until the block ends."""
 
+    def connect(self) -> Any:
+        """A DuckDB handle that reads what the session landed (the catalog
+        reads cell outputs through it); the caller closes it."""
+
     def controls_changed(self) -> None:
         """Repaint whatever shows the controls."""
 
@@ -66,6 +77,14 @@ class Driver(Protocol):
     def focus_cell(self, cell: str, tab: Optional[str]) -> None: ...
 
     def toast(self, message: str, severity: str) -> None: ...
+
+    def post(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` on the host's thread (the TUI's loop) soon: how a
+        worker thread reaches the host, e.g. the catalog's refreshes behind."""
+
+    def catalog_refreshed(self, node: CatalogNode) -> None:
+        """A refresh behind an answer changed ``node``'s level in the host's
+        catalog cache: repaint it wherever it shows."""
 
 
 class Subscriber(Protocol):
@@ -111,6 +130,14 @@ class LiveHost:
         self.seen_at: dict[str, float] = {}  # source hash -> when it last compiled
         self._settles: dict[int, tuple[str, list[str]]] = {}  # run -> (hash, changed)
         self._awaiting: tuple[str, list[str]] | None = None  # a save's rerun, not yet requested
+        # the schema catalog: the Catalog tab's and an agent's, one per
+        # notebook, read through the disk (remote engines' levels outlive it)
+        from ..catalog import default_cache
+
+        cache = default_cache(on_refresh=lambda node: self._refreshed_behind(cache, node))
+        self.catalog_cache = cache
+        self._catalog_root: CatalogNode | None = None
+        self._catalog_project: Project | None = None
 
     def switch(self, path: Path) -> None:
         """A notebook opened (first, or another with ``o``): forget the last
@@ -249,6 +276,7 @@ class LiveHost:
     def loaded(self, project: Project) -> None:
         """The notebook opened (or reopened with ``o``) and compiled."""
         self._adopt(project)
+        self._warm(project)
         self._emit("compiled", hash=project.source_hash, cells=list(project.order), changed=[])
         self._settle(project.source_hash, "paused" if not self.armed else "nothing_to_rerun")
 
@@ -256,9 +284,13 @@ class LiveHost:
         """A save compiled; ``planned`` is what changed (``plan_rerun``).
         Returns the cells to rerun now. The save settles here, unless a rerun
         follows: then that run's end settles it."""
+        outputs = set(self.project.order) if self.project is not None else set()
         self._adopt(project)
         h = project.source_hash
         self._emit("compiled", hash=h, cells=list(project.order), changed=planned)
+        # a save changes the top level and where outputs land, never a warehouse
+        self._catalog_changed("save", top_level=True, scopes=outputs | set(project.order))
+        self._warm(project)  # it may name a table the last one didn't
         if not self.armed:
             self._settle(h, "paused", changed=planned)
             return []
@@ -334,6 +366,7 @@ class LiveHost:
 
     def run_ended(self, run: int, results: list[RunResult]) -> None:
         """The run's thread finished (the controller's ``apply``)."""
+        self._catalog_changed("run", run=run, scopes=self._run_scopes(results))
         record = self.runs.get(run)
         if record is None:
             return
@@ -363,6 +396,124 @@ class LiveHost:
 
     def busy(self) -> bool:
         return any(r["state"] in ACTIVE for r in self.runs.values())
+
+    # ---------- the schema catalog ----------
+
+    def catalog_root(self, project: Project | None = None) -> CatalogNode:
+        """The catalog's top level for ``project`` (the host's by default),
+        built once per project: its engines' clients live across requests."""
+        project = project or self._need_project()
+        if self._catalog_project is not project:
+            from ..catalog import project_root_node
+
+            self._catalog_root = project_root_node(project, connect=self.driver.connect)
+            self._catalog_project = project
+        return self._catalog_root
+
+    def catalog_scope(self) -> tuple[CatalogNode, CatalogCache]:
+        """The top level and the cache a ``browse`` reads, taken on the loop
+        thread before a worker reads them."""
+        return self.catalog_root(self._need_project()), self.catalog_cache
+
+    def browse(
+        self,
+        root: CatalogNode,
+        cache: CatalogCache,
+        path: list[str],
+        *,
+        offset: int,
+        rows: int,
+        match: str | None = None,
+        columns: list[str] | None = None,
+        top_level: bool = False,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """One page of the catalog level ``path`` names (a worker thread):
+        walked and loaded through ``cache``, filtered, each row named for the
+        next segment, everything shown redacted, and cut to fit one message."""
+        from ..catalog import CatalogPathError, narrow, resolve
+
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise LiveError(INVALID, "offset is a non-negative integer")
+        rows = _rows(rows)
+        registries = self._registries()
+        with self.driver.reading():  # held in use: a notebook switch waits for the load
+            try:
+                got = resolve(root, path, cache, refresh=refresh)
+            except CatalogPathError as err:
+                raise LiveError(UNKNOWN_PATH, _redact(str(err), registries)) from None
+            except Exception as exc:
+                message = _redact(f"{type(exc).__name__}: {exc}", registries)
+                raise LiveError(LOAD_FAILED, f"loading {' / '.join(path) or 'the catalog'}: {message}") from None
+        try:
+            frame = narrow(got.node, got.frame, match=match, columns=columns, top_level=top_level)
+        except ValueError as exc:
+            raise LiveError(INVALID, str(exc)) from None
+        budget = MAX_LINE - 4096  # the envelope's room
+        while True:
+            doc = _catalog_page(got, frame, offset, rows, path, registries)
+            if rows == 1 or len(encode({"id": 0, "result": doc})) <= budget:
+                return doc
+            rows = max(1, rows // 2)
+
+    def _registries(self) -> Any:
+        if self.project is not None:
+            return self.project.registries
+        from ..bootstrap import builtin_registries
+
+        return builtin_registries()
+
+    def _run_scopes(self, results: Iterable[RunResult]) -> set[str]:
+        """The top-level rows a run's results may have changed: the contexts
+        on every engine its cells ran on or landed in, and their outputs. A
+        skipped cell never ran."""
+        project = self.project
+        if project is None:
+            return set()
+        ran = [project.cells[r.cell] for r in results
+               if r.cell in project.cells and r.status != "skipped"]
+        if not ran:
+            return set()
+        engines = {c.engine for c in ran} | {c.sink_type for c in ran}
+        top = self.catalog_root(project).load()
+        scopes = {row["name"] for row in top.iter_rows(named=True)
+                  if row["kind"] == "context" and row["engine"] in engines}
+        return scopes | {c.name for c in ran}
+
+    def _warm(self, project: Project) -> None:
+        """Load ahead, behind the loop, the tables the notebook's cells read
+        that aren't fresh (``catalog.named_tables``): the first read of each,
+        by the agent, the Catalog tab or the LSP, costs no round trip."""
+        from ..catalog import named_tables
+
+        self.catalog_cache.warm(named_tables(project))
+
+    def _refreshed_behind(self, cache: CatalogCache, node: CatalogNode) -> None:
+        """A refresh behind an answer changed a level (a worker thread): say
+        so on the loop, to the agent and the driver, unless that cache is an
+        earlier notebook's."""
+
+        def emit() -> None:
+            if cache is self.catalog_cache:
+                scopes = [node.scope] if node.scope is not None else []
+                self._emit("catalog_invalidated", reason="refreshed", run_id=None,
+                           top_level=False, scopes=scopes)
+                self.driver.catalog_refreshed(node)
+
+        self.driver.post(emit)
+
+    def _catalog_changed(
+        self, reason: str, *, run: int | None = None, top_level: bool = False,
+        scopes: Iterable[str] = (),
+    ) -> None:
+        scopes = sorted(scopes)
+        if not top_level and not scopes:
+            return
+        if top_level and self.project is not None:
+            self.catalog_cache.invalidate(self.catalog_root())
+        if scopes:
+            self.catalog_cache.invalidate(scopes=scopes)
+        self._emit("catalog_invalidated", reason=reason, run_id=run, top_level=top_level, scopes=scopes)
 
     # ---------- outcomes ----------
 
@@ -640,6 +791,40 @@ class LiveHost:
 def _summary(results: Iterable[RunResult]) -> dict[str, int]:
     counts = Counter(r.status for r in results)
     return {s: counts[s] for s in ("ok", "failed", "skipped")}
+
+
+def _redact(text: str, registries: Any) -> str:
+    from ..catalog import redact
+
+    return redact(text, registries)
+
+
+def _catalog_page(
+    got: Resolved, frame: Any, offset: int, rows: int, path: list[str], registries: Any
+) -> dict[str, Any]:
+    """A page of a resolved level, as the socket sends it: every string
+    shown through the engines' redaction."""
+    from ..catalog import page
+
+    doc = page(got.node, frame, offset, rows)
+
+    def shown(value: Any) -> Any:
+        return _redact(value, registries) if isinstance(value, str) else value
+
+    return {
+        "path": [shown(p) for p in path],
+        "title": shown(doc["title"]),
+        "leaf": doc["leaf"],
+        "columns": [shown(c) for c in doc["columns"]],
+        "rows": [[shown(v) for v in row] for row in doc["rows"]],
+        "names": None if doc["names"] is None else [shown(n) for n in doc["names"]],
+        "total": doc["total"],
+        "offset": doc["offset"],
+        "next_offset": doc["next_offset"],
+        "cached": got.cached,
+        "age": round(got.age),  # seconds since it was loaded from its engine
+        "stale": got.stale,  # past revalidation: a refresh is under way behind it
+    }
 
 
 def _rows(rows: int) -> int:

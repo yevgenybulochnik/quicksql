@@ -15,3 +15,5 @@ data/
 warehouse.db
 stress/stress.db
 stress/data/
+stress/catalog/.seed/
+stress/catalog/report.json

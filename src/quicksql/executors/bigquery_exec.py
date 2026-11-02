@@ -111,6 +111,10 @@ class BigQueryExecutor(Executor):
     # and a script can't be the body of CREATE TEMP TABLE AS.
     supports_multistatement_materialization = False
     input_shorthand = "project"
+    # listings ask for full pages: the API's own default page is smaller, and
+    # each page is a round trip
+    page_size = 1000
+    catalog_persists = True
 
     def split_statements(self, sql: str) -> list[str]:
         return [strip_trailing_semicolon(sql)]
@@ -217,10 +221,14 @@ class BigQueryExecutor(Executor):
             return holder["client"]
 
         title = f"bigquery:{spec.get('project')}"
+        # the key names the endpoint too: two emulators can hold a project of
+        # the same name, and the disk keeps levels across sessions
+        endpoint = spec.get("endpoint")
+        base = f"{title}@{endpoint}" if endpoint else title
 
         def dataset_node(ds: str) -> CatalogNode:
             def tables_load() -> pl.DataFrame:
-                tables = list(client().list_tables(ds))
+                tables = list(client().list_tables(ds, page_size=self.page_size))
                 return pl.DataFrame(
                     {
                         "table": [t.table_id for t in tables],
@@ -234,19 +242,25 @@ class BigQueryExecutor(Executor):
                 return CatalogNode(
                     title=f"{ds}.{table}",
                     load=lambda: bq_field_paths(client().get_table(f"{ds}.{table}").schema),
-                    key=f"{title}/{ds}.{table}",
+                    key=f"{base}/{ds}.{table}",
                 )
 
-            return CatalogNode(title=f"{title}/{ds}", load=tables_load, child=tables_child)
+            return CatalogNode(
+                title=f"{title}/{ds}",
+                load=tables_load,
+                child=tables_child,
+                key=f"{base}/{ds}",
+                name_columns=("table",),
+            )
 
         if dataset is not None:
             return dataset_node(dataset)
 
         def load() -> pl.DataFrame:
-            datasets = [d.dataset_id for d in client().list_datasets()]
+            datasets = [d.dataset_id for d in client().list_datasets(page_size=self.page_size)]
             return pl.DataFrame({"dataset": datasets}, schema={"dataset": pl.Utf8})
 
         def child(row: dict[str, Any]) -> CatalogNode:
             return dataset_node(row["dataset"])
 
-        return CatalogNode(title=title, load=load, child=child)
+        return CatalogNode(title=title, load=load, child=child, key=base, name_columns=("dataset",))
