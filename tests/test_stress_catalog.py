@@ -677,7 +677,6 @@ def test_s8_reopen_answers_without_round_trips(engine, request, stress_project, 
     assert due["round_trips"] == behind > 0  # every trip was behind the answer
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 3: the LSP reads the persisted catalog")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
 def test_s9_lsp_completes_after_a_restart_without_round_trips(engine, request, stress_project) -> None:
     shape, meter = backend(request, engine)
@@ -782,18 +781,17 @@ def _rss_mb() -> float:
 # ---------- S12: the tables a notebook names ----------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="phases 3–4: named tables are warmed once and persist")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
 def test_s12_named_tables_load_once(engine, request, stress_project) -> None:
     """A notebook naming 30 tables, opened twice: 30 loads the first time,
-    none the second while they're fresh."""
+    none the second while they're fresh (Phase 3's disk; Phase 4's warming
+    moves the first loads to the open, not their count)."""
     shape, meter = backend(request, engine)
     project = stress_project()
     cell = project.cells[shape.cell]
 
     def session() -> list[list[Any]]:
-        cache = SchemaCache()  # each session (TUI, LSP) starts its own today
+        cache = SchemaCache()  # each session starts its own, over the shared disk
         return [columns_for(project, cell, t, cache) for t in shape.named]
 
     with measuring(meter) as first:

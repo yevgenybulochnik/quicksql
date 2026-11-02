@@ -11,7 +11,10 @@ Three relation kinds, mirroring what shows up in a cell's FROM/JOIN:
 * a ``source('file')`` — the file's columns via its DuckDB reader (`sources.py`).
 
 Introspection is only ever run on a completion request (never per keystroke) and
-memoized in a `SchemaCache`; remote engines are the reason the cache exists.
+memoized in a `SchemaCache`; remote engines are the reason the cache exists. A
+table's leaf loads through the schema catalog's cache (`catalog.CatalogCache`)
+over the disk store (`catalog_store`), so a restarted LSP completes a remote
+table the TUI, or its own last process, already loaded, without a round trip.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import polars as pl
 from dataclasses import dataclass
 
 from .. import catalog
+from ..catalog_store import default_store
 from ..conduit import load_extension
 from ..sources import reader_for
 
@@ -40,10 +44,15 @@ class Projection:
 
 
 class SchemaCache:
-    """Memoize columns by an opaque key; ``invalidate()`` drops everything."""
+    """Memoize columns by an opaque key; ``invalidate()`` drops everything.
 
-    def __init__(self) -> None:
+    Table leaves load through ``catalog``: by default a catalog cache over
+    the disk store (none when ``QSQL_CATALOG_PERSIST`` is off), shared on
+    disk with the TUI's."""
+
+    def __init__(self, catalog: catalog.CatalogCache | None = None) -> None:
         self._by_key: dict[Any, list[Column]] = {}
+        self.catalog = catalog if catalog is not None else _default_catalog()
 
     def get(self, key: Any, compute: Callable[[], list[Column]]) -> list[Column]:
         if key not in self._by_key:
@@ -52,6 +61,11 @@ class SchemaCache:
 
     def invalidate(self) -> None:
         self._by_key.clear()
+        self.catalog.invalidate()
+
+
+def _default_catalog() -> catalog.CatalogCache:
+    return catalog.CatalogCache(store=default_store())
 
 
 def _cols(frame: pl.DataFrame) -> list[Column]:
@@ -95,20 +109,31 @@ def source_columns(project: Any, spec: str | None) -> list[Column]:
         return []
 
 
-def _table_frame(project: Any, cell: Any, name: str) -> pl.DataFrame | None:
+def _table_frame(
+    project: Any, cell: Any, name: str, cache: catalog.CatalogCache | None = None
+) -> pl.DataFrame | None:
     """The field-path frame of table ``name`` (maybe qualified) in the cell's
-    context, from its engine's catalog; None when unknown or unreachable."""
+    context, from its engine's catalog, through ``cache`` when given; None
+    when unknown or unreachable. The leaf sits under the cell's context as
+    the Catalog tab's would, so a run's clear of that context reaches it."""
     executor = project.registries.executors.get(cell.engine)
     parts = name.replace('"', "").split(".")
     try:
         leaf = executor.catalog_table(cell.config, project.root, parts)
-        return leaf.load() if leaf is not None else None
+        if leaf is None:
+            return None
+        leaf = catalog.stamp(
+            leaf, scope=executor.context_key(cell.config), persist=executor.catalog_persists
+        )
+        return cache.load(leaf)[0] if cache is not None else leaf.load()
     except Exception:
         return None
 
 
-def table_columns(project: Any, cell: Any, name: str) -> list[Column]:
-    frame = _table_frame(project, cell, name)
+def table_columns(
+    project: Any, cell: Any, name: str, cache: catalog.CatalogCache | None = None
+) -> list[Column]:
+    frame = _table_frame(project, cell, name, cache)
     return _cols(frame) if frame is not None else []
 
 
@@ -145,5 +170,6 @@ def columns_for(
         key, fn = ("source", relation.spec), lambda: source_columns(project, relation.spec)
     else:
         key = ("table", getattr(cell, "context", ""), relation)
-        fn = lambda: table_columns(project, cell, relation)  # noqa: E731
+        leaves = cache.catalog if cache is not None else None
+        fn = lambda: table_columns(project, cell, relation, leaves)  # noqa: E731
     return cache.get(key, fn) if cache is not None else fn()
