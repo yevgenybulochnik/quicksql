@@ -417,6 +417,62 @@ def test_a_run_that_ran_nothing_clears_nothing(host) -> None:
     assert _invalidated(host, since) == []
 
 
+# ---------- the catalog on disk (Phase 3) ----------
+
+
+def _remote_level(scope: str, calls: list, state: dict) -> CatalogNode:
+    def load() -> pl.DataFrame:
+        calls.append(scope)
+        return pl.DataFrame({"n": [state["n"]]})
+
+    return CatalogNode(title=f"under {scope}", load=load, key=f"{scope}/t", scope=scope, persist=True)
+
+
+def test_the_next_notebooks_cache_reads_what_the_last_one_kept_on_disk(host, nb) -> None:
+    calls, state = [], {"n": 1}
+    host.catalog_cache.load(_remote_level("bigquery:p", calls, state))
+    host.switch(nb)  # a fresh cache, as a reopened TUI has
+    host.loaded(compile_file(nb))
+    assert host.catalog_cache.read(_remote_level("bigquery:p", calls, state)).cached
+    assert calls == ["bigquery:p"]
+
+
+def test_persistence_off_keeps_the_hosts_catalog_in_memory(nb, fake_driver, monkeypatch) -> None:
+    monkeypatch.setenv("QSQL_CATALOG_PERSIST", "0")
+    host = LiveHost(fake_driver, nb)
+    assert host.catalog_cache.store is None
+
+
+def test_a_refresh_behind_that_changed_a_level_is_an_event(host) -> None:
+    calls, state = [], {"n": 1}
+    cache = host.catalog_cache
+    cache.load(_remote_level("bigquery:p", calls, state))
+    cache.revalidate_after = -1  # everything it holds is due
+    state["n"] = 2
+    since = host.seq
+    assert cache.read(_remote_level("bigquery:p", calls, state)).stale
+    assert cache.wait_refreshes(5)
+    [event] = _invalidated(host, since)
+    assert (event["reason"], event["run_id"], event["top_level"], event["scopes"]) == (
+        "refreshed", None, False, ["bigquery:p"],
+    )
+    assert cache.peek(_remote_level("bigquery:p", calls, state))["n"].to_list() == [2]
+
+
+def test_a_refresh_for_the_last_notebook_is_not_this_ones_event(host, nb) -> None:
+    calls, state = [], {"n": 1}
+    old = host.catalog_cache
+    old.load(_remote_level("bigquery:p", calls, state))
+    old.revalidate_after = -1
+    host.switch(nb)
+    host.loaded(compile_file(nb))
+    since = host.seq
+    state["n"] = 2
+    old.read(_remote_level("bigquery:p", calls, state))
+    assert old.wait_refreshes(5)
+    assert _invalidated(host, since) == []
+
+
 # ---------- browsing the catalog (quicksql live catalog) ----------
 
 
@@ -511,6 +567,21 @@ def test_browse_refresh_reloads_the_level(host) -> None:
     assert host.browse(root, cache, [], offset=0, rows=10)["cached"] is True and loads == [1]
     assert host.browse(root, cache, [], offset=0, rows=10, refresh=True)["cached"] is False
     assert loads == [1, 1]
+
+
+def test_browse_says_how_old_a_level_is_and_whether_it_refreshes(host) -> None:
+    calls, state = [], {"n": 1}
+    leaf = _remote_level("bigquery:p", calls, state)
+    root = CatalogNode(title="root", load=lambda: pl.DataFrame({"name": ["t"]}), child=lambda row: leaf)
+    cache = host.catalog_cache
+    fresh = host.browse(root, cache, ["t"], offset=0, rows=10)
+    assert (fresh["age"], fresh["stale"]) == (0, False)
+    cache.revalidate_after = -1
+    now = cache.clock()
+    cache.clock = lambda: now + 7200
+    old = host.browse(root, cache, ["t"], offset=0, rows=10)
+    assert (old["cached"], old["age"], old["stale"]) == (True, 7200, True)
+    assert cache.wait_refreshes(5)
 
 
 def test_browse_rejects_bad_params(host) -> None:

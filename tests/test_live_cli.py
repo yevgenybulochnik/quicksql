@@ -265,6 +265,39 @@ def test_catalog_text_shows_each_name_once_and_whole(tmp_path, fake_driver) -> N
         session.close()
 
 
+def test_catalog_text_says_how_old_a_cached_level_is_and_that_it_refreshes(
+    tmp_path, fake_driver, monkeypatch
+) -> None:
+    """A level read back from an earlier load says when that was; past its
+    revalidation it says it's being refreshed behind the answer."""
+    import sqlite3
+
+    from quicksql.executors.sqlite_exec import SQLiteExecutor
+
+    monkeypatch.setattr(SQLiteExecutor, "catalog_persists", True)  # a stand-in remote
+    con = sqlite3.connect(tmp_path / "s.db")
+    con.execute("CREATE TABLE t (x INTEGER)")
+    con.close()
+    nb = tmp_path / "nb.qsql"
+    nb.write_text("-- @cell a\n-- @engine: sqlite\n/*@ input: { sqlite: s.db } */\nSELECT 1 AS x;\n")
+    session = Live(nb, fake_driver)
+    try:
+        first = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert "cached" not in first
+        cache = session.host.catalog_cache
+        now = cache.clock()
+        cache.clock = lambda: now + 7200
+        cache.revalidate_after = 3600
+        header = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert header.endswith("· cached 2 h ago, refreshing")
+        cache.wait_refreshes(5)
+        cache.clock = lambda: now + 7200 + 300
+        header = cli("live", "catalog", str(nb), "sqlite:s.db").output.splitlines()[0]
+        assert header.endswith("· cached 5 min ago")
+    finally:
+        session.close()
+
+
 # ---------- the client loads neither Polars nor Textual ----------
 
 WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"

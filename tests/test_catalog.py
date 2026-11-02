@@ -1020,6 +1020,241 @@ def test_bigquery_keys_name_the_endpoint_they_were_read_from() -> None:
     assert node.title == "bigquery:p" and node.child({"dataset": "ds"}).title == "bigquery:p/ds"
 
 
+# ---------- the disk behind the cache (Phase 3) ----------
+
+
+class Clock:
+    def __init__(self, now: float = 10_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _remote(key: str, calls: list[str], state: dict | None = None, scope: str = "bigquery:p",
+            gate: threading.Event | None = None) -> CatalogNode:
+    """A persisting level whose load is counted; ``state["n"]`` is what the
+    engine holds now, ``state["fail"]`` makes it unreachable."""
+    state = state if state is not None else {"n": 1}
+
+    def load() -> pl.DataFrame:
+        calls.append(key)
+        if gate is not None:
+            gate.wait(5)
+        if state.get("fail"):
+            raise RuntimeError("offline")
+        return pl.DataFrame({"n": [state["n"]]})
+
+    return CatalogNode(title=key, load=load, key=key, scope=scope, persist=True)
+
+
+@pytest.fixture
+def disk(tmp_path):
+    """A fresh session's cache over one store directory: call it per session."""
+    from quicksql.catalog_store import CatalogStore
+
+    clock = Clock()
+
+    def session(**kw) -> CatalogCache:
+        return CatalogCache(store=CatalogStore(tmp_path / "catalog", clock=clock), clock=clock, **kw)
+
+    session.clock = clock
+    session.root = tmp_path / "catalog"
+    return session
+
+
+def test_a_new_session_answers_a_persisted_level_from_disk(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("k", calls))
+    disk.clock.now += 60
+    hit = disk().read(_remote("k", calls))
+    assert calls == ["k"]
+    assert hit.frame["n"].to_list() == [1] and hit.cached
+    assert (hit.age, hit.stale) == (60, False)
+
+
+def test_a_level_that_doesnt_persist_never_reaches_the_disk(disk) -> None:
+    calls: list[int] = []
+    disk().load(_counting_node("local", 1, calls))
+    disk().load(_counting_node("local", 1, calls))
+    assert calls == [1, 1]
+    assert not disk.root.exists() or not any(disk.root.iterdir())
+
+
+def test_without_a_store_a_persisting_level_stays_in_memory() -> None:
+    calls: list[str] = []
+    cache = CatalogCache()
+    cache.load(_remote("k", calls))
+    assert cache.read(_remote("k", calls)).cached and calls == ["k"]
+
+
+def test_past_revalidate_after_a_level_answers_at_once_and_refreshes_behind(disk) -> None:
+    calls, state, refreshed = [], {"n": 1}, []
+    disk().load(_remote("k", calls, state))
+    disk.clock.now += 1000
+    state["n"] = 2  # the table changed while no session was open
+    cache = disk(revalidate_after=100, on_refresh=refreshed.append)
+    hit = cache.read(_remote("k", calls, state))
+    assert hit.frame["n"].to_list() == [1] and hit.cached and hit.stale and hit.age == 1000
+    assert cache.wait_refreshes(5)
+    assert calls == ["k", "k"]
+    again = cache.read(_remote("k", calls, state))
+    assert again.frame["n"].to_list() == [2] and not again.stale and again.age == 0
+    assert [n.cache_key for n in refreshed] == ["k"]
+    assert disk().read(_remote("k", calls, state)).frame["n"].to_list() == [2]  # on disk too
+    assert calls == ["k", "k"]
+
+
+def test_a_refresh_that_finds_nothing_new_says_nothing_but_resets_the_age(disk) -> None:
+    calls, refreshed = [], []
+    disk().load(_remote("k", calls))
+    disk.clock.now += 1000
+    cache = disk(revalidate_after=100, on_refresh=refreshed.append)
+    assert cache.read(_remote("k", calls)).stale
+    assert cache.wait_refreshes(5)
+    assert refreshed == []
+    assert disk(revalidate_after=100).read(_remote("k", calls)).age == 0
+
+
+def test_past_max_age_a_stored_level_is_a_miss(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("k", calls))
+    disk.clock.now += 2000
+    hit = disk(max_age=1000).read(_remote("k", calls))
+    assert calls == ["k", "k"] and not hit.cached and not hit.stale
+
+
+def test_a_level_in_memory_ages_too_and_refreshes_once(disk) -> None:
+    calls, gate = [], threading.Event()
+    cache = disk(revalidate_after=100)
+    cache.load(_remote("k", calls))
+    disk.clock.now += 200
+    slow = _remote("k", calls, gate=gate)
+    assert cache.read(slow).stale
+    assert cache.read(slow).stale  # the refresh under way covers this one too
+    gate.set()
+    assert cache.wait_refreshes(5)
+    assert calls == ["k", "k"]
+    assert not cache.read(slow).stale
+
+
+def test_refreshes_behind_run_at_most_four_at_once(disk) -> None:
+    lock, running, peak, calls = threading.Lock(), [0], [0], []
+
+    def node(i: int) -> CatalogNode:
+        def load() -> pl.DataFrame:
+            with lock:
+                calls.append(i)
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            time.sleep(0.05)
+            with lock:
+                running[0] -= 1
+            return pl.DataFrame({"n": [i]})
+
+        return CatalogNode(title=f"t{i}", load=load, key=f"t{i}", scope="bigquery:p", persist=True)
+
+    cache = disk(revalidate_after=100)
+    for i in range(10):
+        cache.load(node(i))
+    disk.clock.now += 200
+    peak[0] = 0
+    for i in range(10):
+        assert cache.read(node(i)).stale
+    assert cache.wait_refreshes(10)
+    assert len(calls) == 20 and 1 <= peak[0] <= 4
+
+
+def test_clearing_a_scope_misses_its_levels_in_the_next_session_too(disk) -> None:
+    """A run ended on bigquery: what this session and the next read under
+    it loads afresh; another engine's levels stand."""
+    calls: list[str] = []
+    cache = disk()
+    cache.load(_remote("a", calls, scope="bigquery:p"))
+    cache.load(_remote("b", calls, scope="postgres:h"))
+    disk.clock.now += 1
+    cache.invalidate(scopes={"bigquery:p"})
+    disk.clock.now += 1
+    later = disk()
+    assert not later.read(_remote("a", calls, scope="bigquery:p")).cached
+    assert later.read(_remote("b", calls, scope="postgres:h")).cached
+    assert calls == ["a", "b", "a"]
+
+
+def test_a_refetch_drops_the_level_from_disk(disk) -> None:
+    calls: list[str] = []
+    cache = disk()
+    cache.load(_remote("k", calls))
+    cache.invalidate(_remote("k", calls))
+    assert not disk().read(_remote("k", calls)).cached
+
+
+def test_clearing_everything_misses_what_the_disk_had_before(disk) -> None:
+    calls: list[str] = []
+    cache = disk()
+    cache.load(_remote("k", calls))
+    disk.clock.now += 1
+    cache.invalidate()
+    assert not cache.read(_remote("k", calls)).cached
+    assert calls == ["k", "k"]
+
+
+def test_a_load_that_straddles_a_clear_isnt_kept_on_disk_either(disk) -> None:
+    calls, gate, out = [], threading.Event(), []
+    cache = disk()
+    thread = threading.Thread(target=lambda: out.append(cache.load(_remote("k", calls, gate=gate))))
+    thread.start()
+    for _ in range(500):
+        if calls:
+            break
+        time.sleep(0.01)
+    disk.clock.now += 1
+    cache.invalidate(scopes={"bigquery:p"})
+    gate.set()
+    thread.join(5)
+    assert out and not disk().read(_remote("k", calls)).cached
+
+
+def test_a_refresh_that_fails_keeps_the_level_it_had(disk) -> None:
+    calls, state, refreshed = [], {"n": 1}, []
+    cache = disk(revalidate_after=100, on_refresh=refreshed.append)
+    cache.load(_remote("k", calls, state))
+    disk.clock.now += 200
+    state["fail"] = True
+    assert cache.read(_remote("k", calls, state)).stale
+    assert cache.wait_refreshes(5)
+    hit = cache.read(_remote("k", calls, state))
+    assert hit.frame["n"].to_list() == [1] and refreshed == []
+
+
+def test_a_refresh_a_clear_overtakes_isnt_kept(disk) -> None:
+    calls, gate, state, refreshed = [], threading.Event(), {"n": 1}, []
+    cache = disk(revalidate_after=100, on_refresh=refreshed.append)
+    cache.load(_remote("k", calls, state))
+    disk.clock.now += 200
+    state["n"] = 2
+    assert cache.read(_remote("k", calls, state, gate=gate)).stale
+    for _ in range(500):
+        if len(calls) == 2:
+            break
+        time.sleep(0.01)
+    disk.clock.now += 1
+    cache.invalidate(scopes={"bigquery:p"})  # a run ended while it refreshed
+    gate.set()
+    assert cache.wait_refreshes(5)
+    assert refreshed == [] and cache.peek(_remote("k", calls)) is None
+
+
+def test_resolve_says_how_old_its_level_is_and_whether_it_refreshes(disk) -> None:
+    calls: list[str] = []
+    leaf = _remote("leaf", calls)
+    root = CatalogNode(title="root", load=lambda: pl.DataFrame({"name": ["t"]}), child=lambda row: leaf)
+    disk().load(leaf)
+    disk.clock.now += 500
+    got = resolve(root, ["t"], disk(revalidate_after=100))
+    assert (got.cached, got.age, got.stale) == (True, 500, True)
+
+
 def test_the_cache_keeps_the_most_recently_used_within_its_cap() -> None:
     frame = pl.DataFrame({"s": ["x" * 1000] * 100})
     nodes = {k: CatalogNode(title=k, load=lambda: frame) for k in "abc"}

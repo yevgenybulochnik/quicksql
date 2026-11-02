@@ -107,6 +107,17 @@ def test_clearing_a_scope_misses_its_levels_saved_before_and_survives_a_new_stor
     assert again.get("other", scope="bigquery:p") is None
 
 
+def test_clearing_a_scope_nothing_was_stored_under_writes_nothing(tmp_path) -> None:
+    """A save clears its cells' outputs, which never persist: no marker
+    file per cell per save."""
+    root = tmp_path / "catalog"
+    store = CatalogStore(root)
+    store.put("k", frame(), saved_at=1.0, scope="bigquery:p")
+    files = sorted(p for p in root.rglob("*") if p.is_file())
+    store.clear(["a", "b", "manual"], at=2.0)
+    assert sorted(p for p in root.rglob("*") if p.is_file()) == files
+
+
 def test_an_older_clear_never_undoes_a_newer_one(tmp_path) -> None:
     store = CatalogStore(tmp_path / "catalog")
     store.put("k", frame(), saved_at=15.0, scope="s")

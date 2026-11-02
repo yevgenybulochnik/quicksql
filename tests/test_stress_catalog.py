@@ -44,6 +44,7 @@ import pytest
 
 from quicksql.bootstrap import compile_file
 from quicksql.catalog import CatalogCache, CatalogNode, project_root_node, redact, resolve
+from quicksql.catalog_store import default_store
 from quicksql.compiler import Project
 from quicksql.executors.bigquery_exec import BigQueryExecutor
 from quicksql.executors.postgres_exec import PostgresExecutor
@@ -87,6 +88,8 @@ class Meter:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def hit(self, kind: str) -> None:
+        if threading.current_thread().name.startswith("catalog-refresh"):
+            kind = f"behind.{kind}"  # a refresh behind an answer, not before it
         with self.lock:
             self.calls[kind] += 1
         if self.latency:
@@ -652,13 +655,27 @@ def test_s7_wide_leaf_fits_the_socket(engine, request, stress_project, fake_driv
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 3: the catalog persists across sessions")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
-def test_s8_reopen_answers_without_round_trips(engine, request, stress_project) -> None:
+def test_s8_reopen_answers_without_round_trips(engine, request, stress_project, fake_driver) -> None:
+    """Close and reopen the TUI: the wide table comes back from disk with no
+    round trip. Reopened with every level due for revalidation, it answers
+    as fast and refreshes behind the answer, at most 4 at once."""
     shape, meter = backend(request, engine)
-    walk_to_wide(CatalogCache(), stress_project(), shape)
-    with measuring(meter) as m:
-        walk_to_wide(CatalogCache(), stress_project(), shape)  # a new TUI: a new cache
-    record("S8", engine, m)
-    assert m["round_trips"] == 0
+    host_walk(live_host(fake_driver, stress_project()), shape)  # the last session
+    with measuring(meter) as fresh:
+        host_walk(live_host(fake_driver, stress_project()), shape)  # a new TUI: a new cache
+    record("S8", f"{engine}/reopen", fresh)
+    host = live_host(fake_driver, stress_project())
+    host.catalog_cache.revalidate_after = -1  # everything on disk is due
+    with measuring(meter) as due:
+        _, frames, _ = host_walk(host, shape)
+        if not host.catalog_cache.wait_refreshes(120):
+            pytest.fail("the refreshes behind never finished")
+    behind = sum(n * rtts(k[len("behind."):]) for k, n in due["calls"].items() if k.startswith("behind."))
+    record("S8", f"{engine}/reopen, all due", {**due, "behind_round_trips": behind})
+    if frames[-1].height != shape.wide_rows:
+        pytest.fail(f"wide leaf has {frames[-1].height} rows, not {shape.wide_rows}")
+    assert fresh["round_trips"] == 0
+    assert due["round_trips"] == behind > 0  # every trip was behind the answer
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 3: the LSP reads the persisted catalog")
@@ -682,8 +699,9 @@ def test_s9_lsp_completes_after_a_restart_without_round_trips(engine, request, s
 
 
 def test_s10a_no_secret_in_names_or_titles(pg_live, stress_project) -> None:
-    """Every name and title the catalog would show is free of the password."""
-    project, cache = stress_project(), CatalogCache()
+    """Every name and title the catalog would show is free of the password,
+    and so is every file the catalog keeps on disk."""
+    project, cache = stress_project(), CatalogCache(store=default_store())
     root = project_root_node(project)
     frame, _ = cache.load(root)
     ctx = root.child(pick(frame, {"kind": "context", "engine": "postgres"}))
@@ -696,8 +714,11 @@ def test_s10a_no_secret_in_names_or_titles(pg_live, stress_project) -> None:
         "leaked": len(leaked),
         # keys are never shown, but Phase 3 writes them to disk: it must hash them
         "secret_in_cache_keys": any(SECRET in n.cache_key for n in (ctx, leaf)),
+        "disk_files": len(files := [p for p in cache.store.root.rglob("*") if p.is_file()]),
+        "secret_in_disk_files": sum(SECRET.encode() in p.read_bytes() for p in files),
     })
     assert not leaked
+    assert files and not any(SECRET.encode() in p.read_bytes() for p in files)
 
 
 BAD_TARGETS = {
