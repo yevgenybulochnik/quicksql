@@ -859,6 +859,21 @@ def live_query(
         _print_table(got["columns"], got["rows"])
 
 
+def _freshness(got: dict[str, Any]) -> str:
+    """How a catalog page says where its level came from: `` · cached 2 h
+    ago, refreshing`` (a TUI that predates ages says only cached)."""
+    if not got.get("cached"):
+        return ""
+    age = got.get("age") or 0
+    for unit, seconds in (("d", 86400), ("h", 3600), ("min", 60)):
+        if age >= seconds:
+            note = f" · cached {age // seconds} {unit} ago"
+            break
+    else:
+        note = " · cached"
+    return note + (", refreshing" if got.get("stale") else "")
+
+
 @live_app.command("catalog")
 def live_catalog(
     file: Path = FILE_ARG,
@@ -909,7 +924,7 @@ def live_catalog(
         return
     shown = len(got["rows"])
     span = f"{got['offset'] + 1}–{got['offset'] + shown} of {got['total']}" if shown else f"0 of {got['total']}"
-    typer.secho(f"{got['title']} · {span}" + (" · cached" if got["cached"] else ""), bold=True)
+    typer.secho(f"{got['title']} · {span}{_freshness(got)}", bold=True)
     table_columns, table_rows, whole = got["columns"], got["rows"], ()
     names = got["names"]
     if names is not None:  # what to type to go deeper: shown whole, once

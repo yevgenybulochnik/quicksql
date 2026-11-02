@@ -9,9 +9,11 @@ title) followed by the frame as Arrow IPC, so one rename publishes both. The
 TUI and the LSP both write, so every write goes to a temp file that is
 renamed into place. Past ``max_bytes`` the least recently read levels go.
 
-Clearing a scope (a run ended on its engine) leaves a marker,
-``cleared/<sha256(scope)>``, holding when; a level saved under that scope
-before then is a miss, for this session and the next.
+Each scope a level was stored under has a marker, ``scopes/<sha256(scope)>``,
+holding when it was last cleared (0: never). Clearing a scope (a run ended
+on its engine) writes the time there, so a level saved under it before then
+is a miss, for this session and the next; a scope nothing was stored under
+(a cell's output) writes nothing.
 
 The disk is a cache: a failure to read or write it is a miss, never an
 error. Policy (how old is too old) is ``catalog.CatalogCache``'s.
@@ -101,6 +103,8 @@ class CatalogStore:
             frame.write_ipc(buf, compression="zstd")
         except Exception:
             return
+        if scope is not None:
+            self._mark(scope)  # before the level: a clear from now on finds it
         path = self._level(key)
         if self._write(path, buf.getvalue()):
             self._touch(path)
@@ -113,8 +117,9 @@ class CatalogStore:
         """Levels saved under ``scopes`` before ``at`` are misses from now
         on, here and in any later session."""
         for scope in scopes:
-            if (self._cleared_at(scope) or 0.0) >= at:
-                continue  # a newer clear stands
+            cleared = self._cleared_at(scope)
+            if cleared is None or cleared >= at:
+                continue  # nothing stored under it, or a newer clear stands
             self._write(self._marker(scope), repr(at).encode())
 
     def size_bytes(self) -> int:
@@ -126,7 +131,24 @@ class CatalogStore:
         return self.root / f"{_digest(key)}{_SUFFIX}"
 
     def _marker(self, scope: str) -> Path:
-        return self.root / "cleared" / _digest(scope)
+        return self.root / "scopes" / _digest(scope)
+
+    def _mark(self, scope: str) -> None:
+        """Give ``scope`` its marker (never cleared) unless it has one: made
+        whole beside it and linked into place, so a clear another process
+        writes meanwhile is never overwritten."""
+        marker = self._marker(scope)
+        if marker.exists():
+            return
+        tmp = self._temp(b"0", marker.parent)
+        if tmp is None:
+            return
+        try:
+            os.link(tmp, marker)
+        except OSError:
+            pass  # FileExistsError: another writer made it first
+        finally:
+            self._unlink(tmp)
 
     def _cleared_at(self, scope: str | None) -> float | None:
         if scope is None:
@@ -137,23 +159,36 @@ class CatalogStore:
             return None
 
     def _write(self, path: Path, data: bytes) -> bool:
-        """``data`` to ``path`` through a temp file renamed into place (0600,
-        the directories 0700); False when the disk said no."""
-        try:
-            for directory in (self.root, path.parent):
-                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.chmod(directory, 0o700)  # mkdir's mode goes through the umask
-            fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".tmp-")  # 0600
-        except OSError:
+        """``data`` to ``path`` through a temp file renamed into place;
+        False when the disk said no."""
+        tmp = self._temp(data, path.parent)
+        if tmp is None:
             return False
         try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(data)
             os.replace(tmp, path)
             return True
         except OSError:
-            self._unlink(Path(tmp))
+            self._unlink(tmp)
             return False
+
+    def _temp(self, data: bytes, directory: Path) -> Path | None:
+        """A 0600 temp file holding ``data`` in the store (``directory``, and
+        the store, made 0700), or None when the disk said no."""
+        try:
+            for d in (self.root, directory):
+                d.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chmod(d, 0o700)  # mkdir's mode goes through the umask
+            fd, name = tempfile.mkstemp(dir=self.root, prefix=".tmp-")  # 0600
+        except OSError:
+            return None
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+        except OSError:
+            self._unlink(tmp)
+            return None
+        return tmp
 
     def _levels(self) -> list[tuple[float, Path, int]]:
         """(last read, path, bytes) for every level."""

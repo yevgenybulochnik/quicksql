@@ -76,7 +76,7 @@ CACHE_CAP_MB = 64  # the in-memory cap Phase 1 introduces
 
 
 def rtts(kind: str) -> int:
-    return PG_CONNECT_RTT if kind == "pg.connect" else 1
+    return PG_CONNECT_RTT if kind.removeprefix("behind.") == "pg.connect" else 1
 
 
 @dataclass
@@ -653,7 +653,6 @@ def test_s7_wide_leaf_fits_the_socket(engine, request, stress_project, fake_driv
 # ---------- S8–S9: a new session ----------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="phase 3: the catalog persists across sessions")
 @pytest.mark.parametrize("engine", ["bq", "pg"])
 def test_s8_reopen_answers_without_round_trips(engine, request, stress_project, fake_driver) -> None:
     """Close and reopen the TUI: the wide table comes back from disk with no
@@ -670,7 +669,7 @@ def test_s8_reopen_answers_without_round_trips(engine, request, stress_project, 
         _, frames, _ = host_walk(host, shape)
         if not host.catalog_cache.wait_refreshes(120):
             pytest.fail("the refreshes behind never finished")
-    behind = sum(n * rtts(k[len("behind."):]) for k, n in due["calls"].items() if k.startswith("behind."))
+    behind = sum(n * rtts(k) for k, n in due["calls"].items() if k.startswith("behind."))
     record("S8", f"{engine}/reopen, all due", {**due, "behind_round_trips": behind})
     if frames[-1].height != shape.wide_rows:
         pytest.fail(f"wide leaf has {frames[-1].height} rows, not {shape.wide_rows}")

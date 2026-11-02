@@ -12,8 +12,9 @@ is asked for.
 
 Every method runs on one thread, the TUI's event loop, which is where key
 handlers, run events (``call_from_thread``) and socket requests all arrive;
-only ``read`` and ``query`` run on a worker thread, through the driver's
-``reading`` handle, and touch no host state.
+only ``read``, ``query`` and ``browse`` run on a worker thread, through the
+driver's ``reading`` handle, and touch no host state. The catalog's
+refreshes behind an answer reach the host through the driver's ``post``.
 """
 
 from __future__ import annotations
@@ -76,6 +77,10 @@ class Driver(Protocol):
 
     def toast(self, message: str, severity: str) -> None: ...
 
+    def post(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` on the host's thread (the TUI's loop) soon: how a
+        worker thread reaches the host, e.g. the catalog's refreshes behind."""
+
 
 class Subscriber(Protocol):
     def offer(self, event: dict[str, Any]) -> bool:
@@ -120,10 +125,15 @@ class LiveHost:
         self.seen_at: dict[str, float] = {}  # source hash -> when it last compiled
         self._settles: dict[int, tuple[str, list[str]]] = {}  # run -> (hash, changed)
         self._awaiting: tuple[str, list[str]] | None = None  # a save's rerun, not yet requested
-        # the schema catalog: the Catalog tab's and an agent's, one per notebook
+        # the schema catalog: the Catalog tab's and an agent's, one per
+        # notebook, read through the disk (remote engines' levels outlive it)
         from ..catalog import CatalogCache
+        from ..catalog_store import default_store
 
-        self.catalog_cache = CatalogCache()
+        cache = CatalogCache(
+            store=default_store(), on_refresh=lambda node: self._refreshed_behind(cache, node)
+        )
+        self.catalog_cache = cache
         self._catalog_root: CatalogNode | None = None
         self._catalog_project: Project | None = None
 
@@ -466,6 +476,18 @@ class LiveHost:
                   if row["kind"] == "context" and row["engine"] in engines}
         return scopes | {c.name for c in ran}
 
+    def _refreshed_behind(self, cache: CatalogCache, node: CatalogNode) -> None:
+        """A refresh behind an answer changed a level (a worker thread): say
+        so on the loop, unless that cache is an earlier notebook's."""
+
+        def emit() -> None:
+            if cache is self.catalog_cache:
+                scopes = [node.scope] if node.scope is not None else []
+                self._emit("catalog_invalidated", reason="refreshed", run_id=None,
+                           top_level=False, scopes=scopes)
+
+        self.driver.post(emit)
+
     def _catalog_changed(
         self, reason: str, *, run: int | None = None, top_level: bool = False,
         scopes: Iterable[str] = (),
@@ -786,6 +808,8 @@ def _catalog_page(
         "offset": doc["offset"],
         "next_offset": doc["next_offset"],
         "cached": got.cached,
+        "age": round(got.age),  # seconds since it was loaded from its engine
+        "stale": got.stale,  # past revalidation: a refresh is under way behind it
     }
 
 
