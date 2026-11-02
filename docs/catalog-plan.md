@@ -1,11 +1,48 @@
 # Plan: the schema catalog for agents, fast on big warehouses
 
-**Status:** Phases 0–3 done (2026-11-02, branch `feat/live-catalog`), so issue #11
-(`quicksql live catalog`) is implemented and the remote catalog persists across sessions.
-The stress harness and baseline are in `stress/catalog/`, the catalog core is in
-`catalog.py`, the disk store in `catalog_store.py`, and the live side is in
-`live/host.py`, `live/server.py` and the CLI. Every stress scenario meets its budget; no
-xfail is left. Phases 4–5 (warming, an offline `quicksql catalog`) are a follow-up issue.
+**Status:** Phases 0–4 done (2026-11-02, branch `feat/live-catalog`), so issue #11
+(`quicksql live catalog`) is implemented, the remote catalog persists across sessions, and
+the tables a notebook names are warmed behind its open and saves. The stress harness and
+baseline are in `stress/catalog/`, the catalog core is in `catalog.py`, the disk store in
+`catalog_store.py`, and the live side is in `live/host.py`, `live/server.py` and the CLI.
+Every stress scenario meets its budget; no xfail is left. Phase 5 (an offline
+`quicksql catalog`) is optional.
+
+Phase 4 as built, where it differs from the plan below:
+- **`catalog.named_tables(project)`** yields the leaves (from `Executor.catalog_table`,
+  stamped like the LSP's: the cell's context) of the tables remote cells read in FROM or
+  JOIN, parsed over the LSP's Jinja mask. Not a CTE, a `ref()`, an unknown `var()` or a
+  table the cell creates or writes into. A `var()` whose value the mask writes in does
+  count, as it does for the LSP's completion. It's a generator, listed on a warming thread.
+- **`CatalogCache.warm(nodes)`** loads, on its own pool (`catalog-warm`, 4 by default),
+  the persisted levels not fresh in memory or on disk. `CatalogStore.saved_at` reads only
+  the header, and a fresh level on disk isn't pulled into memory. An asker shares a warm
+  load, and a clear that overtakes one means it isn't kept. Only a change to a level the
+  cache held fires `on_refresh`, so warming new levels sends no events. `wait_warm` is for
+  tests.
+- **The host warms on `loaded` and `recompiled`.** It doesn't warm after a run: a run on
+  BigQuery or Postgres clears that context, so the next read loads.
+- **Settings** go through `catalog.settings()` / `catalog.default_cache()` (the host and
+  the LSP):
+  - `QSQL_CATALOG_REVALIDATE_AFTER` and `QSQL_CATALOG_MAX_AGE` take seconds or
+    `90s`/`15m`/`2h`/`7d`.
+  - `QSQL_CATALOG_WARM` sets the worker count; `0`/`off` turns warming off.
+  - `QSQL_CATALOG_SIZE_MB` is the **disk's** cap (256); memory stays 64 MiB.
+  - A value that doesn't read keeps its default.
+- **Stress:** the other scenarios run with warming off, so each counts only its own path.
+  S12 opens a 30-table notebook through a `LiveHost`:
+  - the open makes no round trip (1.6 ms, 1.5 ms without warming);
+  - 30 loads happen behind it (BigQuery 30 calls, Postgres 120 round trips);
+  - the LSP afterwards, and a second open, cost 0.
+- **Verified in tmux:**
+  - the TUI opened a BigQuery + Postgres notebook as before;
+  - its five named tables landed on disk, with no password in any file;
+  - `live catalog` answered them `cached`;
+  - a save warmed only the two tables it newly named.
+- **Gaps:**
+  - Each `catalog_table` leaf builds its own BigQuery client, so on real GCP each warmed
+    table may also pay for a token fetch.
+  - A sqlglot fallback warning goes to stderr; Textual captures it while it runs.
 
 Phase 3 as built, where it differs from the plan below:
 - **One file per level, not two.** `$QSQL_HOME/catalog/<sha256(key)>.level` holds a JSON

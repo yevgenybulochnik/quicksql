@@ -138,6 +138,11 @@ notebook reaches. Its credentials stay in the TUI.
   `catalog_invalidated` event with reason `refreshed` follows, so read it again. Past 7
   days it loads afresh. A change made outside quicksql, such as a table another pipeline
   created, shows after its refresh; `--refresh` loads it now.
+- The TUI warms the tables the notebook's cells name in FROM/JOIN, BigQuery and Postgres
+  only, when it opens and after each save. Loading them runs in the background, so reading
+  one soon after is usually `cached`. Settings: `QSQL_CATALOG_WARM=0` turns warming off;
+  `QSQL_CATALOG_REVALIDATE_AFTER` and `QSQL_CATALOG_MAX_AGE` (`15m`, `7d`);
+  `QSQL_CATALOG_SIZE_MB` caps the disk.
 - A slow load answers `timeout` (exit 4) after `--timeout` seconds (60) but carries on.
   Ask again and it's there.
 

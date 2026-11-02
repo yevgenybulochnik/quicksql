@@ -124,6 +124,9 @@ first `@cell`) inherited by every cell.
   `catalog_invalidated` reason `refreshed` through `Driver.post`), past 7 days they're a
   miss. A scope's clear is a marker file, so a later session misses what a run changed; the
   LSP's `SchemaCache` reads the same disk (`QSQL_CATALOG_PERSIST=0` turns it all off).
+  On open and each save the host warms (`catalog.named_tables` → `CatalogCache.warm`, its
+  own 4 threads) the remote tables cells name in FROM/JOIN that aren't fresh;
+  `QSQL_CATALOG_{WARM,REVALIDATE_AFTER,MAX_AGE,SIZE_MB}` via `catalog.default_cache`.
   `quicksql live …` is the
   stdlib client (no Textual/Polars). Still reflect-only for the file: the socket never
   writes it. `quicksql run`/`watch` refuse while a TUI hosts the notebook (one runner per
