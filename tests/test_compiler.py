@@ -231,3 +231,21 @@ def test_a_project_records_the_hash_of_the_text_it_compiled(tmp_path, registries
     nb.write_text("-- @cell a\nSELECT 1 AS x;\n")
     project = compile_file(nb, registries=registries)
     assert project.source_hash == source_hash(nb.read_text())
+
+
+def test_compile_file_names_a_missing_notebook(tmp_path, registries) -> None:
+    from quicksql import compiler
+    from quicksql.errors import QsqlError
+
+    missing = tmp_path / "nope.qsql"
+    with pytest.raises(QsqlError) as info:
+        compiler.compile_file(missing, registries=registries)
+    assert str(info.value) == f"no such notebook: {missing}"
+
+
+def test_compile_file_names_a_notebook_it_cant_read(tmp_path, registries) -> None:
+    from quicksql import compiler
+    from quicksql.errors import QsqlError
+
+    with pytest.raises(QsqlError, match=r"^can't read notebook .*: Is a directory$"):
+        compiler.compile_file(tmp_path, registries=registries)

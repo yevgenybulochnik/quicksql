@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from quicksql.cli import app
@@ -571,3 +572,44 @@ def test_skill_install_updates_an_older_install_without_force(tmp_path) -> None:
     result = runner.invoke(app, ["skill", "--install", "--dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert (installed / "references" / "live.md").read_text() != old
+
+
+# head and show take the cell, then the file
+_ON_A_NOTEBOOK = [["status"], ["list"], ["show", "a"], ["compile"], ["explain"], ["watch"],
+                  ["run"], ["head", "a"]]
+
+
+@pytest.mark.parametrize("command", _ON_A_NOTEBOOK, ids=lambda c: c[0])
+def test_a_missing_notebook_is_one_line_and_exit_3(tmp_path, command) -> None:
+    missing = tmp_path / "nope.qsql"
+    result = runner.invoke(app, [*command, str(missing)])
+    assert result.exit_code == 3, result.output
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 1 and lines[0].endswith(f"no such notebook: {missing}")
+
+
+@pytest.mark.parametrize("command", [["status"], ["run"]], ids=lambda c: c[0])
+def test_a_missing_notebook_under_json_is_one_document(tmp_path, command) -> None:
+    missing = tmp_path / "nope.qsql"
+    result = runner.invoke(app, [*command, str(missing), "--json"])
+    assert result.exit_code == 3, result.output
+    doc = json.loads(result.stdout)
+    assert doc["file"] == str(missing) and doc["cells"] == []
+    assert doc["errors"] == [{"cell": None, "line": None, "message": f"no such notebook: {missing}"}]
+
+
+def test_head_json_on_a_missing_notebook_is_an_error_document(tmp_path) -> None:
+    missing = tmp_path / "nope.qsql"
+    result = runner.invoke(app, ["head", "a", str(missing), "--json"])
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stdout) == {
+        "error": {"code": "no_project", "message": f"no such notebook: {missing}"}
+    }
+
+
+def test_head_json_on_a_notebook_that_doesnt_compile_is_an_error_document(tmp_path) -> None:
+    f = tmp_path / "base.qsql"
+    f.write_text("-- @cell a\nSELECT * FROM {{ ref('ghost') }};\n")
+    result = runner.invoke(app, ["head", "a", str(f), "--json"])
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "no_project"
