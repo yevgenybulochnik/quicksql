@@ -95,7 +95,7 @@ a background watcher), and the TUI's switches are `live disarm`, `live autorun`,
 | 0 | ok |
 | 1 | a cell failed, a query failed, or an output can't be read |
 | 2 | usage error |
-| 3 | the notebook didn't compile, or an unknown cell |
+| 3 | the notebook is missing or didn't compile, or an unknown cell |
 | 4 | no TUI has the notebook open (or it timed out, or speaks another protocol: restart it) |
 | 5 | refused: a run is under way, the file says otherwise, your run was replaced, or `run` while a TUI is open |
 

@@ -11,6 +11,10 @@ def describe(exc: BaseException, self_describing: tuple[type[BaseException], ...
     return f"{type(exc).__name__}: {exc}"
 
 
+class NotebookError(QsqlError):
+    """The notebook file is missing, or can't be read."""
+
+
 class ParseError(QsqlError):
     """The .qsql/.sql file could not be parsed into blocks."""
 

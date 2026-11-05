@@ -169,8 +169,8 @@ first `@cell`) inherited by every cell.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
   `compile` | `status` | `head <cell>` | `directives` | `skill` | `live …` (arm, disarm, autorun, run,
   cancel, wait, events, query, catalog, focus, notify) — default file `base.qsql`;
-  `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile /
-  unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
+  `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile (or
+  missing notebook) / unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
   with a missing file opens a notebook picker: existing .qsql/.qsql.sql files plus
   starter templates (builtin `base` + user templates from `~/.quicksql/templates/*.qsql`);
   `o` in the TUI switches notebooks.

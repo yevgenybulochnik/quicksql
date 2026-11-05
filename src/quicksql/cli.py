@@ -38,7 +38,7 @@ PLUGINS_OPT = typer.Option(
 
 # 2 is click's usage error
 EXIT_FAILED = 1  # a cell failed (a skip always has a failed root), or another runtime failure
-EXIT_COMPILE = 3  # the notebook didn't compile, or the selection names an unknown cell
+EXIT_COMPILE = 3  # the notebook is missing or didn't compile, or an unknown cell selected
 EXIT_NO_SESSION = 4  # no TUI has the notebook open (or a protocol mismatch, or a timeout)
 EXIT_REFUSED = 5  # the live session refused: busy, the file says otherwise, a replaced run
 
@@ -138,7 +138,7 @@ def run(
 ) -> None:
     """Compile and run cells in dependency order, landing each via its sink.
 
-    Exit codes: 0 all ok, 1 a cell failed, 3 the notebook didn't compile or
+    Exit codes: 0 all ok, 1 a cell failed, 3 the notebook is missing or didn't compile or
     --select names an unknown cell (2 is a usage error)."""
     if rows and not json_out:
         raise typer.BadParameter("only applies with --json", param_hint="'--rows'")
@@ -449,7 +449,10 @@ def _offline_head(
 
     from .conduit import landed_relation, read_landed
 
-    project = _project(file, sets, plugins)
+    try:
+        project = _compile(file, sets, plugins)
+    except QsqlError as exc:  # missing, or doesn't compile: there's no output to name
+        _live_fail(LiveError(live_protocol.NO_PROJECT, str(exc)), json_out)
     if cell not in project.cells:
         _live_fail(LiveError(live_protocol.UNKNOWN_CELL, f"unknown cell: {cell}"), json_out)
     relation = landed_relation(project, cell)

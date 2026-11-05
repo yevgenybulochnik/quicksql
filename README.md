@@ -136,7 +136,7 @@ Every command exits with one of these codes:
 | 0 | Success: every cell ran ok. |
 | 1 | A cell failed. A skipped cell never causes it alone, since every skip has a failed upstream in the same run. Also other runtime failures, such as `init` refusing to overwrite. |
 | 2 | Usage error: an unknown option or a bad value. |
-| 3 | The notebook didn't compile (a parse, config or cycle error), or the selection names an unknown cell (`run --select`, `compile --select`, `show`). |
+| 3 | The notebook is missing or didn't compile (a parse, config or cycle error), or the selection names an unknown cell (`run --select`, `compile --select`, `show`). |
 | 4 | `quicksql live`: no TUI has the notebook open (or it timed out, or speaks another protocol version: restart the TUI). |
 | 5 | Refused: `quicksql live` asked for something the session won't do (a run while one is under way, autorun on for a cell the file switches off), or `run`/`watch` while a TUI has the notebook open. |
 
