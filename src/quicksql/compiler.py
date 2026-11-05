@@ -8,7 +8,7 @@ from typing import Any
 
 from . import conduit
 from .config import make_sink, resolve_cell, resolve_engine, resolve_global, resolve_sink_type
-from .errors import CellError, ConfigError, ConfigErrorGroup
+from .errors import CellError, ConfigError, ConfigErrorGroup, NotebookError
 from .executors.base import split_statements
 from .graph import topo_sort
 from .models import RawBlock, RenderedCell, RunResult, source_hash
@@ -230,6 +230,10 @@ def compile_file(
     path: Path | str, overrides: dict[str, Any] | None = None, *, registries: Registries
 ) -> Project:
     p = Path(path)
-    return compile_text(
-        p.read_text(), root=p.parent, path=p, overrides=overrides, registries=registries
-    )
+    try:
+        text = p.read_text()
+    except FileNotFoundError:
+        raise NotebookError(f"no such notebook: {p}") from None
+    except OSError as exc:
+        raise NotebookError(f"can't read notebook {p}: {exc.strerror or exc}") from None
+    return compile_text(text, root=p.parent, path=p, overrides=overrides, registries=registries)

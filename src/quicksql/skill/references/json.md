@@ -38,8 +38,8 @@ as exact text, NaN as `"nan"`.
  "errors": [], "cells": [ ...results... ]}
 ```
 
-`"status"`: `ok`, `failed`, `compile_error` (then `"cells"` is empty and `"errors"` lists
-`{"cell", "line", "message"}`), `error` (something stopped the run before any cell, such as
+`"status"`: `ok`, `failed`, `compile_error` (the notebook is missing or didn't compile; then
+`"cells"` is empty and `"errors"` lists `{"cell", "line", "message"}`), `error` (something stopped the run before any cell, such as
 a plugin that won't import), or `refused` (a TUI has the notebook open). `quicksql live run
 --wait --json` prints the same document, plus `"run_id"`, with `"status"` also `replaced`
 or `dropped` when another run took its place.
@@ -88,7 +88,8 @@ A cell's `"status"`: `queued`, `running`, `ok`, `failed`, `skipped`, `stale` or 
 
 `quicksql head CELL --json`:
 `{"cell": "orders", "columns": ["id", "total"], "rows": [[1, "9.50"]], "source": "live"}`
-(`"source"` is `offline` without a TUI).
+(`"source"` is `offline` without a TUI). Its errors are a `live` command's (below):
+`no_project` when the notebook is missing or doesn't compile, `unknown_cell`, `not_readable`.
 
 `quicksql live query SQL --json`: `{"columns": [...], "rows": [[...]]}`.
 
