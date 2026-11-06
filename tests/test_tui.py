@@ -2245,7 +2245,10 @@ async def test_skipped_downstream_shows_a_distinct_status(tmp_path) -> None:
         assert _row(app, "a")[3] == "✗"
         assert _row(app, "b")[3] == "⊘"
         assert app.results["b"].status == "skipped"
-        assert _row(app, "b")[4] == ""  # nothing landed, so no row count
+        # it never ran: no row count, no ms, no time — while the failed
+        # upstream keeps its elapsed
+        assert _row(app, "b")[4:] == ("", "", "")
+        assert _row(app, "a")[5] != "" and _row(app, "a")[6].endswith(" ms")
 
 
 async def test_failed_cell_detail_log_shows_the_message_not_a_traceback(tmp_path) -> None:
