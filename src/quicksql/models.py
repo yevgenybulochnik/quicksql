@@ -149,6 +149,24 @@ class RunResult:
         return out
 
 
+def human_duration(seconds: float) -> str:
+    """A duration in seconds as compact text: ``12 ms``, ``1.4 s``,
+    ``1m 24s``, ``1h 02m``. Each unit rounds at its own precision, and a value
+    that rounds up to the next unit's threshold shows in that unit, so the
+    output is never ``1000 ms`` or ``60.0 s``."""
+    ms = round(seconds * 1000)
+    if ms < 1000:
+        return f"{ms} ms"
+    tenths = round(seconds * 10)
+    if tenths < 600:
+        return f"{tenths / 10:.1f} s"
+    whole = round(seconds)
+    if whole < 3600:
+        return f"{whole // 60}m {whole % 60:02d}s"
+    minutes = round(seconds / 60)
+    return f"{minutes // 60}h {minutes % 60:02d}m"
+
+
 def _jsonable(value: Any) -> Any:
     """One preview value as JSON: dates as ISO text, non-finite floats as
     text (JSON has no NaN), lists/structs recursively, anything else —

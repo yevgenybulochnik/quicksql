@@ -121,3 +121,46 @@ def test_a_preview_to_dict_is_json_safe_and_bounded() -> None:
     head = Preview(("d", "n"), ((date(2026, 1, 2), Decimal("1.50")), (None, Decimal("2"))))
     assert head.to_dict(1) == {"columns": ["d", "n"], "rows": [["2026-01-02", "1.50"]]}
     json.dumps(head.to_dict(10))
+
+
+def test_human_duration_shows_milliseconds_under_a_second() -> None:
+    from quicksql.models import human_duration
+
+    assert human_duration(0.0) == "0 ms"
+    assert human_duration(0.012) == "12 ms"
+    assert human_duration(0.999) == "999 ms"
+    assert human_duration(0.9994) == "999 ms"
+
+
+def test_human_duration_rounding_carries_into_the_next_unit() -> None:
+    """Each unit rounds at its own precision; a value that rounds up to the
+    next unit's threshold shows in that unit, never as `1000 ms` or `60.0 s`."""
+    from quicksql.models import human_duration
+
+    assert human_duration(0.9996) == "1.0 s"
+    assert human_duration(59.96) == "1m 00s"
+    assert human_duration(3599.6) == "1h 00m"
+
+
+def test_human_duration_shows_tenths_of_a_second_under_a_minute() -> None:
+    from quicksql.models import human_duration
+
+    assert human_duration(1.0) == "1.0 s"
+    assert human_duration(1.44) == "1.4 s"
+    assert human_duration(59.9) == "59.9 s"
+
+
+def test_human_duration_shows_minutes_and_seconds_under_an_hour() -> None:
+    from quicksql.models import human_duration
+
+    assert human_duration(60.0) == "1m 00s"
+    assert human_duration(84.0) == "1m 24s"
+    assert human_duration(3599.0) == "59m 59s"
+
+
+def test_human_duration_shows_hours_and_minutes_from_an_hour() -> None:
+    from quicksql.models import human_duration
+
+    assert human_duration(3600.0) == "1h 00m"
+    assert human_duration(3720.0) == "1h 02m"
+    assert human_duration(100 * 3600.0) == "100h 00m"
