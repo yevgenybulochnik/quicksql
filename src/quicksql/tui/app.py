@@ -400,14 +400,16 @@ class QsqlApp(App):
             # a pending cell must not show the previous run's rows/ms/time
             # next to its spinner; the stored result stays (display-only blanking)
             result = None if name in self.running else self.results.get(name)
+            # a skipped cell never ran: its 0.0 elapsed is no duration
+            ran = result is not None and result.status != "skipped"
             table.add_row(
                 name,
                 f"{cell.engine} → {cell.sink_type}",
                 "☑" if self.cell_autorun(name) else "☐",
                 self._status(name),
                 "" if result is None or result.rows is None else str(result.rows),
-                "" if result is None else f"{result.elapsed * 1000:.0f}",
-                "" if result is None else human_duration(result.elapsed),
+                f"{result.elapsed * 1000:.0f}" if ran else "",
+                human_duration(result.elapsed) if ran else "",
             )
         if self._row_names:
             table.move_cursor(row=min(previous, len(self._row_names) - 1))
