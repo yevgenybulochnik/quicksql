@@ -23,7 +23,7 @@ from ..errors import QsqlError, error_dicts
 from ..live.host import LiveHost
 from ..live.server import LiveServer
 from ..live.protocol import REFUSED, LiveError, file_hash
-from ..models import RunResult
+from ..models import RunResult, human_duration
 from ..registry import Registries
 from ..runner import RunSession
 from ..sheet import Sheet
@@ -209,7 +209,7 @@ class QsqlApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#cells", DataTable)
-        table.add_columns("cell", "engine → sink", "auto", "status", "rows", "ms")
+        table.add_columns("cell", "engine → sink", "auto", "status", "rows", "ms", "time")
         self.query_one("#data", DataTable).can_focus = False
         self.query_one("#data2", DataTable).can_focus = False
         self.query_one("#catalog", DataTable).can_focus = False
@@ -397,8 +397,8 @@ class QsqlApp(App):
         self._row_names = list(self.project.order) if self.project else []
         for name in self._row_names:
             cell = self.project.cells[name]
-            # a pending cell must not show the previous run's rows/ms next to
-            # its spinner; the stored result stays (display-only blanking)
+            # a pending cell must not show the previous run's rows/ms/time
+            # next to its spinner; the stored result stays (display-only blanking)
             result = None if name in self.running else self.results.get(name)
             table.add_row(
                 name,
@@ -407,6 +407,7 @@ class QsqlApp(App):
                 self._status(name),
                 "" if result is None or result.rows is None else str(result.rows),
                 "" if result is None else f"{result.elapsed * 1000:.0f}",
+                "" if result is None else human_duration(result.elapsed),
             )
         if self._row_names:
             table.move_cursor(row=min(previous, len(self._row_names) - 1))
