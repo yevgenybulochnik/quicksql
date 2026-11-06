@@ -2118,8 +2118,8 @@ async def test_stale_generation_events_do_not_touch_state(notebook) -> None:
 
 
 async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
-    """A rerunning cell must not display the previous run's rows/ms next to
-    its spinner — blank them while the cell is pending."""
+    """A rerunning cell must not display the previous run's rows/ms/time next
+    to its spinner — blank them while the cell is pending."""
     from quicksql.models import RunEvent, RunResult
 
     app = QsqlApp(path=notebook, watch=False, auto_run=False)
@@ -2128,11 +2128,31 @@ async def test_running_cell_blanks_its_stale_rows_and_ms(notebook) -> None:
         old = RunResult(cell="users", status="ok", rows=42, elapsed=1.234)
         app.runs.apply(app.runs.gen, [old])
         await pilot.pause()
-        assert _row(app, "users")[4] == "42"
+        assert _row(app, "users")[4:] == ("42", "1234", "1.2 s")
         app.runs.on_event(app.runs.gen, RunEvent("run_started", cells=("users",)))
         await pilot.pause()
         row = _row(app, "users")
-        assert row[3] == "…" and row[4] == "" and row[5] == ""
+        assert row[3] == "…" and row[4] == "" and row[5] == "" and row[6] == ""
+
+
+async def test_cell_table_shows_a_human_readable_time_after_ms(notebook) -> None:
+    """`time` sits right after the raw `ms` column and reads the same elapsed:
+    a failed cell keeps its time as it keeps its ms; a never-run cell has none."""
+    from quicksql.models import RunResult
+
+    app = QsqlApp(path=notebook, watch=False, auto_run=False)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#cells", DataTable)
+        labels = [str(c.label) for c in table.columns.values()]
+        assert labels == ["cell", "engine → sink", "auto", "status", "rows", "ms", "time"]
+        assert _row(app, "users")[5:] == ("", "")
+        ok = RunResult(cell="users", status="ok", rows=3, elapsed=84.0)
+        failed = RunResult(cell="events", status="failed", error="boom", elapsed=0.0123)
+        app.runs.apply(app.runs.gen, [ok, failed])
+        await pilot.pause()
+        assert _row(app, "users")[5:] == ("84000", "1m 24s")
+        assert _row(app, "events")[3:] == ("✗", "", "12", "12 ms")
 
 
 async def test_run_worker_failure_never_leaves_stuck_spinners(notebook, monkeypatch) -> None:
