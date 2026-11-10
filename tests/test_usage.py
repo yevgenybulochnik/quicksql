@@ -381,6 +381,50 @@ def test_engine_and_days_filter_the_report() -> None:
     assert "no usage recorded in the last 90 days" in cli("--engine", "sqlite")
 
 
+def test_table_keeps_the_tables_a_pattern_names() -> None:
+    claims_log()
+    names = lambda *args: [t["name"] for t in json.loads(cli("--json", *args))["tables"]]  # noqa: E731
+    assert names("--table", "claims") == ["public.claims"]  # a bare name: any schema's
+    assert names("--table", "public.claims") == ["public.claims"]
+    assert names("--table", "CLAIMS") == ["public.claims"]  # any case
+    assert names("--table", "public.*") == ["public.claims", "public.members"]
+    assert names("--table", "postgres:public.m*") == ["public.members"]
+    assert names("--table", "sqlite:claims") == []
+    assert names("--table", "claim") == []  # a name, not a part of one
+    assert names("--table", "plans.csv") == ["/home/me/claims/seeds/plans.csv"]
+    assert names("--table", "file:*/seeds/*") == ["/home/me/claims/seeds/plans.csv"]
+    assert names("--table", "members", "--table", "plans.csv") == [
+        "public.members",
+        "/home/me/claims/seeds/plans.csv",
+    ]
+
+
+def test_table_is_matched_before_top_cuts() -> None:
+    claims_log()
+    out = cli("--markdown", "--top", "1", "--table", "members")
+    assert out.count("\n## ") == 1 and "public.members" in out and "more table" not in out
+
+
+@pytest.mark.parametrize("flag", [None, "--markdown"])
+def test_a_table_nobody_read_says_so_and_not_that_recording_is_off(flag) -> None:
+    claims_log()
+    out = cli("--table", "nope", "--table", "nada", *([flag] if flag else []))
+    assert "no table matching nope or nada among the 3 read in the last 90 days" in out
+    assert "QSQL_USAGE" not in out
+    doc = json.loads(cli("--json", "--table", "nope"))
+    assert doc["tables"] == [] and "no table matching nope" in doc["hint"]
+
+
+def test_a_table_asked_of_an_empty_log_still_says_how_to_record() -> None:
+    assert "QSQL_USAGE=1" in cli("--table", "claims")
+
+
+def test_table_applies_to_a_notebooks_report_too(recorded) -> None:
+    every = json.loads(cli(str(recorded), "--json"))["tables"]
+    one = json.loads(cli(str(recorded), "--json", "--table", every[0]["parts"][-1]))["tables"]
+    assert [t["name"] for t in one] == [every[0]["name"]]
+
+
 @pytest.mark.parametrize(
     "args",
     [
