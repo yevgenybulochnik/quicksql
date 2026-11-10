@@ -539,3 +539,161 @@ def test_a_notebook_with_nothing_logged_on_its_contexts_says_so(tmp_path) -> Non
     path = tmp_path / "new.qsql"
     path.write_text("-- @input: {duckdb: wh.db}\n-- @cell a\nselect id from orders;\n")
     assert "no usage recorded" in cli(str(path))
+
+
+# ---- enrichment: canonical names, types and unresolved columns from the catalog
+
+from quicksql import usage as usage_report  # noqa: E402
+from quicksql.bootstrap import compile_text  # noqa: E402
+from quicksql.catalog import CatalogCache  # noqa: E402
+from quicksql.plugins.usage import context_of  # noqa: E402
+
+WH_TABLES = {
+    ("dbo", "orders"): [("id", "INT", "the order"), ("amount", "DECIMAL", ""), ("cid", "INT", "")],
+    ("dbo", "customers"): [("id", "INT", ""), ("name", "TEXT", "")],
+}
+
+
+@pytest.fixture
+def wh(registries, tmp_path):
+    """A notebook on a third-party engine ``wh`` whose catalog counts its
+    loads: (project, its context hash, the loads)."""
+    from quicksql.executors.base import EngineSession, Executor, field_path_frame
+    from quicksql.models import CatalogNode
+    from quicksql.registry import executor
+
+    loads: list[str] = []
+
+    @executor("wh")
+    class Wh(Executor):
+        def context_key(self, config):
+            return "wh:main"
+
+        def open_session(self, config, ctx):
+            return EngineSession()
+
+        def catalog_table(self, config, root, parts):
+            key = (parts[-2] if len(parts) >= 2 else "dbo", parts[-1])
+            if key not in WH_TABLES:
+                return None
+
+            def load():
+                loads.append(".".join(key))
+                return field_path_frame([(c, c, t, "", d) for c, t, d in WH_TABLES[key]])
+
+            return CatalogNode(title="wh:" + ".".join(key), load=load)
+
+    registries.add(Wh)
+    path = tmp_path / "wh.qsql"
+    path.write_text("-- @engine: wh\n-- @cell a\nselect 1;\n")
+    project = compile_text(path.read_text(), root=tmp_path, path=path, registries=registries)
+    return project, context_of(project, project.cells["a"]), loads
+
+
+def wh_table(*parts, star=False, context):
+    return table(*parts, star=star, engine="wh", context=context)
+
+
+def test_two_spellings_of_one_table_merge_with_nothing_loaded(wh) -> None:
+    project, context, loads = wh
+    log(
+        entry(tables=[wh_table("orders", context=context)], columns=[col(0, "amount")], day=NOW),
+        entry(
+            tables=[wh_table("dbo", "orders", context=context)],
+            columns=[col(0, "amount", "where"), col(0, "cid")],
+            notebook="/nb/b.qsql",
+            day=NOW,
+        ),
+    )
+    (orders,) = usage_report.report([project], cache=CatalogCache()).tables
+    assert (orders.name, orders.uses) == ("dbo.orders", 2)
+    assert [(c.name, c.uses, c.roles, c.type) for c in orders.columns] == [
+        ("amount", 2, ["select", "where"], ""),
+        ("cid", 1, ["select"], ""),
+    ]
+    assert loads == []
+
+
+def test_a_table_the_catalog_doesnt_know_stays_as_logged(wh) -> None:
+    project, context, loads = wh
+    log(entry(tables=[wh_table("nope", context=context)], columns=[col(0, "x")], day=NOW))
+    (nope,) = usage_report.report([project], cache=CatalogCache(), load=True).tables
+    assert (nope.name, nope.columns[0].missing, loads) == ("nope", False, [])
+
+
+def test_types_and_descriptions_come_from_frames_at_hand(wh) -> None:
+    project, context, loads = wh
+    log(entry(tables=[wh_table("orders", context=context)], columns=[col(0, "id")], day=NOW))
+    cache = CatalogCache()
+    (orders,) = usage_report.report([project], cache=cache).tables
+    assert (orders.columns[0].type, orders.columns[0].description, loads) == ("", "", [])
+    (orders,) = usage_report.report([project], cache=cache, load=True).tables
+    assert (orders.columns[0].type, orders.columns[0].description) == ("INT", "the order")
+    assert loads == ["dbo.orders"]
+    # loaded once: it is at hand now, with or without --load
+    (orders,) = usage_report.report([project], cache=cache).tables
+    assert (orders.columns[0].type, loads) == ("INT", ["dbo.orders"])
+
+
+def test_a_recorded_column_the_table_no_longer_has_is_flagged(wh) -> None:
+    project, context, _ = wh
+    log(
+        entry(
+            tables=[wh_table("orders", context=context)],
+            columns=[col(0, "amount"), col(0, "legacy")],
+            day=NOW,
+        )
+    )
+    found = usage_report.report([project], cache=CatalogCache(), load=True)
+    assert {c.name: c.missing for c in found.tables[0].columns} == {"amount": False, "legacy": True}
+    assert "| legacy | | 1 | select | no longer in the table |" in usage_report.to_markdown(found)
+
+
+def open_column(name, candidates, nested=False, roles=("where",)):
+    return {"column": name, "roles": list(roles), "candidates": candidates, "nested": nested}
+
+
+def test_unresolved_columns_resolve_when_every_candidate_is_known(wh) -> None:
+    project, context, _ = wh
+    both = [wh_table("orders", context=context), wh_table("customers", context=context)]
+    log(
+        entry(
+            tables=both,
+            columns=[col(0, "amount")],
+            unresolved=[
+                open_column("amount", [0, 1]),  # only orders has it
+                open_column("name", [0, 1], roles=("select",)),  # only customers
+                open_column("id", [0, 1]),  # both: can't say
+                open_column("cid", [0, 1, None]),  # a candidate nobody can check
+                open_column("id", [1, 0], nested=True, roles=("join",)),  # the innermost
+            ],
+            day=NOW,
+        )
+    )
+    cache = CatalogCache()
+    before = by_name(usage_report.report([project], cache=cache).tables)
+    assert [c.name for c in before["dbo.orders"].unresolved] == ["amount", "cid", "id", "name"]
+    after = by_name(usage_report.report([project], cache=cache, load=True).tables)
+    orders, customers = after["dbo.orders"], after["dbo.customers"]
+    assert {c.name: c.roles for c in orders.columns} == {"amount": ["select", "where"]}
+    assert {c.name: c.roles for c in customers.columns} == {"name": ["select"], "id": ["join"]}
+    assert [c.name for c in orders.unresolved] == ["cid", "id"]
+    assert [c.name for c in customers.unresolved] == ["cid", "id"]
+
+
+def test_a_duckdb_table_and_a_file_get_columns_only_with_load(recorded) -> None:
+    def types(*args):
+        doc = json.loads(cli(str(recorded), "--json", *args))
+        return {c["name"]: c["type"] for t in doc["tables"] for c in t["columns"]}
+
+    assert types() == {"amount": "", "cid": "", "name": "", "plan_id": ""}
+    assert types("--load") == {
+        "amount": "DECIMAL(2,1)",
+        "cid": "INTEGER",
+        "name": "VARCHAR",
+        "plan_id": "BIGINT",
+    }
+
+
+def test_load_without_a_notebook_is_a_usage_error() -> None:
+    assert "NOTEBOOK" in cli("--load", code=2)
