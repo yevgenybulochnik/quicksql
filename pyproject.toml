@@ -15,7 +15,7 @@ dependencies = [
     "polars>=1.0",
     "typer>=0.12",
     "watchfiles>=0.24",
-    "sqlglot>=25",  # statement splitting for multi-statement cells (core, engine-dialect aware)
+    "sqlglot>=30.12",  # statement splitting (core, dialect aware); usage attribution is pinned on 30.12
 ]
 
 [project.optional-dependencies]
@@ -79,6 +79,8 @@ source_modules = [
     "quicksql.registry",
     "quicksql.render",
     "quicksql.runner",
+    # the usage scanner: sqlglot and executors.base only
+    "quicksql.sqlscan",
     "quicksql.state",
     # the contracts extensions implement; the package __init__s are core: they only
     # re-export their base module
