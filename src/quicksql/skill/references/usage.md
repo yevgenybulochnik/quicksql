@@ -38,7 +38,7 @@ variable is set, and works while a TUI has the notebook open.
 
 ```
 quicksql usage [NOTEBOOK ...] [--set k.v=x] [--plugins MOD] [--days 90] [--top 20]
-               [--columns 15] [--engine E] [--half-life 30] [--load]
+               [--columns 15] [--engine E] [--table PATTERN ...] [--half-life 30] [--load]
                [--json | --markdown]
 ```
 
@@ -54,6 +54,11 @@ quicksql usage [NOTEBOOK ...] [--set k.v=x] [--plugins MOD] [--days 90] [--top 2
 - `--days`: how far back to read. `--top`: tables shown. `--columns`: columns per table.
   `--engine`: one engine's tables (`file`: the files). `--half-life`: days for a use to
   count half.
+- `--table PATTERN` (repeatable) looks tables up, wherever they rank: a glob, any case, on
+  a table's name or the end of it, so `claims` finds `public.claims` and `plans.csv` a file
+  by its basename; `public.*` a schema's tables; `postgres:public.claims` (`file:` for a
+  file) says which engine. One name can be a table on several contexts: each is listed.
+  When none matches, the report is empty and says how many tables were read.
 - Exit 0 with an empty report, 2 for a bad flag, 3 when a NOTEBOOK doesn't compile, 1 for
   a curation file that doesn't read.
 

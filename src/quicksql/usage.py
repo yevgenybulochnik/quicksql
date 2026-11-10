@@ -198,6 +198,8 @@ class Report:
     days: int
     half_life: float
     notebooks: list[str] = field(default_factory=list)  # the ones it was asked about
+    asked: list[str] = field(default_factory=list)  # the table patterns it was asked for
+    read: int = 0  # the tables there were before ``asked`` chose among them
 
 
 def keep(
@@ -440,6 +442,21 @@ def curate(tables: list[TableUsage], curation: Curation) -> list[TableUsage]:
     return kept
 
 
+def named(table: TableUsage, patterns: Iterable[str]) -> bool:
+    """Whether a pattern names ``table``: a glob, any case, on its name or
+    the end of it (``claims`` finds ``public.claims``, and a file by its
+    basename), with ``engine:`` in front to say where (``file:`` a file)."""
+    from fnmatch import fnmatchcase
+
+    names = [".".join(table.parts[i:]) for i in range(len(table.parts))]
+    if table.kind == "file":
+        names.append(Path(table.name).name)
+    where = (table.engine or table.kind).lower()
+    names = [name.lower() for name in names]
+    names += [f"{where}:{name}" for name in names]
+    return any(fnmatchcase(name, pattern.lower()) for pattern in patterns for name in names)
+
+
 def report(
     projects: Sequence[Any] = (),
     *,
@@ -447,6 +464,7 @@ def report(
     days: int = 90,
     half_life: float = 30.0,
     engine: str | None = None,
+    asked: Sequence[str] = (),
     load: bool = False,
     cache: Any = None,
 ) -> Report:
@@ -454,8 +472,9 @@ def report(
     (compiled notebooks): what every logged notebook read on their contexts,
     each context named by their cells on it, enriched from their catalogs
     (``enrich``; ``cache`` is a ``CatalogCache``, the default one when None).
-    Without: every context, by its hash. Logged notebooks are only read
-    about, never compiled."""
+    Without: every context, by its hash. ``asked`` keeps the tables one of
+    its patterns names (``named``). Logged notebooks are only read about,
+    never compiled."""
     from .plugins.usage import context_of
     from .usage_log import UsageLog
 
@@ -490,7 +509,10 @@ def report(
             column.missing = found is None
             column.type, column.description = found or ("", "")
     tables = curate(tables, read_curation(UsageLog().root / "curation.yaml"))
-    return Report(tables, today, days, half_life, paths)
+    read = len(tables)
+    if asked:
+        tables = [t for t in tables if named(t, asked)]
+    return Report(tables, today, days, half_life, paths, list(asked), read)
 
 
 ROLE_ORDER = ("select", "from", "join", "where", "group", "having", "window", "order")
@@ -551,7 +573,12 @@ def _unresolved(table: TableUsage) -> str:
 
 def hint(found: Report) -> str:
     """What an empty report says: nothing was recorded, and how recording
-    is turned on."""
+    is turned on; or that nothing read the tables it was asked for."""
+    if found.asked and found.read:
+        return (
+            f"no table matching {' or '.join(found.asked)} among the {found.read} read"
+            f" in the last {found.days} days"
+        )
     return (
         f"no usage recorded in the last {found.days} days: recording is opt-in, set"
         " QSQL_USAGE=1 where notebooks run (quicksql run, watch, tui)"

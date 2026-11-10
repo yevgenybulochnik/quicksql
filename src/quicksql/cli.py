@@ -617,6 +617,12 @@ def usage_cmd(
     engine: Optional[str] = typer.Option(
         None, "--engine", help="Only tables on this engine (file: the files)"
     ),
+    tables: Optional[list[str]] = typer.Option(
+        None,
+        "--table",
+        help="Only tables this names: a glob on the name or its end, any case "
+        "(claims, public.*, postgres:public.claims; repeatable)",
+    ),
     half_life: float = typer.Option(
         30.0, "--half-life", help="Days for a use to count half as much"
     ),
@@ -632,7 +638,8 @@ def usage_cmd(
 
     Ranked from the usage log, which records nothing unless QSQL_USAGE=1 is
     set where notebooks run (run, watch, tui). A use is a (notebook, day);
-    score weighs recent uses.
+    score weighs recent uses. --table looks one table up, however far down
+    the ranking it is.
 
     With NOTEBOOKS, each compiles as `run` would (--set, --plugins) and the
     report shows what every logged notebook read on their contexts, named by
@@ -650,7 +657,9 @@ def usage_cmd(
         raise typer.BadParameter("needs a NOTEBOOK: its catalogs are what loads", param_hint="--load")
     projects = [_project(notebook, sets, plugins) for notebook in notebooks or []]
     try:
-        found = usage.report(projects, days=days, half_life=half_life, engine=engine, load=load)
+        found = usage.report(
+            projects, days=days, half_life=half_life, engine=engine, asked=tables or (), load=load
+        )
     except QsqlError as exc:  # a curation file that doesn't read
         typer.secho(str(exc), fg="red")
         raise typer.Exit(EXIT_FAILED)

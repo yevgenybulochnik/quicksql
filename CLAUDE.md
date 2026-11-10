@@ -158,7 +158,8 @@ first `@cell`) inherited by every cell.
   reports: a use is a (notebook, day), score decays by half-life; with NOTEBOOKs it keeps
   their contexts, compiles only them, merges spellings by catalog leaf `cache_key`, and
   takes types from `CatalogCache.at_hand` (never loads; `--load` does);
-  `$QSQL_HOME/usage/curation.yaml` pins, hides and annotates. The attribution tests in
+  `$QSQL_HOME/usage/curation.yaml` pins, hides and annotates; `--table PATTERN` looks
+  tables up by name (`usage.named`), before `--top` cuts. The attribution tests in
   `tests/test_sqlscan.py` pin sqlglot 30.12 behaviours: a sqlglot bump that shifts one
   fails there.
 

@@ -88,8 +88,10 @@ quicksql usage NOTEBOOK --markdown
 
 It ranks the source tables notebooks have read on this notebook's databases, the columns
 read from each, and how they're joined. Prefer pinned and noted columns, then high-score
-ones, and the joins it lists. An empty report means recording is off or new (it's opt-in:
-`QSQL_USAGE=1`, the person's choice, so don't set it yourself): carry on without it.
+ones, and the joins it lists. `--table claims` (a glob on the name) looks one table up,
+however far down the ranking it is. An empty report means recording is off or new (it's
+opt-in: `QSQL_USAGE=1`, the person's choice, so don't set it yourself): carry on without
+it.
 
 ## Rules that bite
 
