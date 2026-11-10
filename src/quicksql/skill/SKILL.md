@@ -28,6 +28,8 @@ Read what the task needs:
   connect, which cells share a session, sinks, file sources.
 - [references/live.md](references/live.md): working alongside the open TUI, in depth.
 - [references/json.md](references/json.md): the JSON every `--json` command prints.
+- [references/usage.md](references/usage.md): `quicksql usage`, the tables and columns
+  notebooks actually read.
 - Notebooks that run: [examples/basics.qsql](examples/basics.qsql),
   [examples/cross-engine.qsql](examples/cross-engine.qsql),
   [examples/effect-only.qsql](examples/effect-only.qsql).
@@ -77,6 +79,17 @@ Also: `quicksql live run NOTEBOOK -s CELL --wait --json` runs as `r` does (`--al
 `quicksql live events NOTEBOOK --follow` streams every compile, cell and run as NDJSON (for
 a background watcher), and the TUI's switches are `live disarm`, `live autorun`,
 `live cancel`. Their rules are in [references/live.md](references/live.md).
+
+## Before writing SQL against a warehouse
+
+```
+quicksql usage NOTEBOOK --markdown
+```
+
+It ranks the source tables notebooks have read on this notebook's databases, the columns
+read from each, and how they're joined. Prefer pinned and noted columns, then high-score
+ones, and the joins it lists. An empty report means recording is off or new (it's opt-in:
+`QSQL_USAGE=1`, the person's choice, so don't set it yourself): carry on without it.
 
 ## Rules that bite
 
