@@ -394,3 +394,148 @@ def test_engine_and_days_filter_the_report() -> None:
 )
 def test_bad_flags_exit_2(args) -> None:
     cli(*args, code=2)
+
+
+# ---- quicksql usage NOTEBOOK: what every logged notebook read on its contexts
+
+import duckdb  # noqa: E402
+
+from quicksql.bootstrap import compile_file  # noqa: E402
+from quicksql.runner import run_project  # noqa: E402
+
+
+def warehouse(root, name="wh.db"):
+    root.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(root / name)) as con:
+        con.execute("create table orders as select 1 as id, 9.5 as amount, 7 as cid")
+        con.execute("create table customers as select 7 as id, 'ada' as name")
+
+
+def record(path, text):
+    """Write a notebook and run it with recording on, as `quicksql run` would."""
+    path.write_text(text)
+    results = run_project(compile_file(path))
+    assert all(r.ok for r in results), [r.error for r in results]
+    return path
+
+
+@pytest.fixture
+def recorded(tmp_path, monkeypatch):
+    """Three notebooks' usage: two reach one warehouse, one has its own; one
+    reads a seed file next to it."""
+    monkeypatch.setenv("QSQL_USAGE", "1")
+    shop, other = tmp_path / "shop", tmp_path / "other"
+    warehouse(shop)
+    warehouse(other)
+    (shop / "seeds").mkdir()
+    (shop / "seeds" / "plans.csv").write_text("plan_id\n1\n")
+    header = "-- @input: {duckdb: wh.db}\n"
+    sales = record(
+        shop / "sales.qsql",
+        header
+        + "-- @cell by_customer\nselect cid, sum(amount) as total from orders group by cid;\n"
+        "-- @cell plans\nselect plan_id from {{ source('seeds/plans.csv') }};\n",
+    )
+    (shop / "reports").mkdir()
+    record(
+        shop / "reports" / "names.qsql",
+        "-- @input: {duckdb: ../wh.db}\n-- @cell names\nselect name from customers;\n",
+    )
+    record(other / "theirs.qsql", header + "-- @cell t\nselect id from orders;\n")
+    monkeypatch.delenv("QSQL_USAGE")
+    return sales
+
+
+def test_a_notebooks_report_keeps_the_tables_on_its_contexts(recorded) -> None:
+    doc = json.loads(cli(str(recorded), "--json"))
+    assert doc["notebooks"] == [str(recorded)]
+    found = {t["name"]: t for t in doc["tables"]}
+    # what every logged notebook read on its warehouse; not the other warehouse's orders
+    assert sorted(found) == sorted(
+        ["orders", "customers", str(recorded.parent / "seeds" / "plans.csv")]
+    )
+    assert found["orders"]["notebooks"] == [{"path": str(recorded), "uses": 1}]
+    assert [c["name"] for c in found["orders"]["columns"]] == ["amount", "cid"]
+    assert found["customers"]["notebooks"] == [
+        {"path": str(recorded.parent / "reports" / "names.qsql"), "uses": 1}
+    ]
+    everything = json.loads(cli("--json"))
+    assert len([t for t in everything["tables"] if t["name"] == "orders"]) == 2
+
+
+def test_a_notebooks_contexts_are_named_by_its_cells(recorded) -> None:
+    out = cli(str(recorded), "--markdown")
+    assert "## duckdb · orders — context of by_customer, plans · 1 notebook, score 1.0" in out
+    assert "## file · " + str(recorded.parent / "seeds" / "plans.csv") + " · 1 notebook" in out
+    doc = json.loads(cli(str(recorded), "--json"))
+    assert {t["context_label"] for t in doc["tables"] if t["kind"] == "table"} == {
+        "context of by_customer, plans"
+    }
+
+
+def test_a_file_under_a_named_notebooks_directory_is_kept(recorded, tmp_path) -> None:
+    theirs = tmp_path / "other" / "theirs.qsql"
+    log(
+        entry(
+            "x",
+            NOW,
+            "/elsewhere/x.qsql",
+            tables=[
+                {"kind": "file", "parts": [str(theirs.parent / "data" / "in.csv")], "star": False},
+                {"kind": "file", "parts": ["/far/away.csv"], "star": False},
+            ],
+        )
+    )
+    names = {t["name"] for t in json.loads(cli(str(theirs), "--json"))["tables"]}
+    assert names == {"orders", str(theirs.parent / "data" / "in.csv")}
+
+
+def test_several_notebooks_report_the_union_of_their_contexts(recorded, tmp_path) -> None:
+    doc = json.loads(cli(str(recorded), str(tmp_path / "other" / "theirs.qsql"), "--json"))
+    assert len([t for t in doc["tables"] if t["name"] == "orders"]) == 2
+    assert len(doc["notebooks"]) == 2
+
+
+def test_set_overrides_name_the_context_the_run_had(recorded, tmp_path) -> None:
+    out = cli(str(recorded), "--set", f"input.duckdb={tmp_path / 'other' / 'wh.db'}", "--json")
+    found = {t["name"]: t for t in json.loads(out)["tables"]}
+    assert found["orders"]["notebooks"] == [
+        {"path": str(tmp_path / "other" / "theirs.qsql"), "uses": 1}
+    ]
+    assert "customers" not in found
+
+
+def test_plugins_load_for_a_named_notebook(recorded, tmp_path) -> None:
+    plug = tmp_path / "plug.py"
+    plug.write_text(
+        "from pydantic import BaseModel\n"
+        "from quicksql.plugins import Plugin, qfield\n"
+        "from quicksql.registry import plugin\n"
+        "@plugin\nclass Owner(Plugin):\n"
+        "    class Config(BaseModel):\n        owner: str | None = qfield(None)\n"
+    )
+    recorded.write_text("-- @owner: me\n" + recorded.read_text())
+    cli(str(recorded), code=3)  # an unknown directive without the plugin
+    assert "orders" in cli(str(recorded), "--plugins", str(plug))
+
+
+def test_a_notebook_that_doesnt_compile_exits_3(recorded, tmp_path) -> None:
+    bad = tmp_path / "bad.qsql"
+    bad.write_text("-- @cell a\nselect * from {{ ref('nope') }};\n")
+    assert "nope" in cli(str(bad), code=3)
+    cli(str(tmp_path / "missing.qsql"), code=3)
+
+
+def test_a_logged_notebook_nobody_named_never_compiles(recorded) -> None:
+    # its rc would raise if anything imported it
+    (recorded.parent / "reports" / "quicksqlrc.py").write_text("raise RuntimeError('rc ran')\n")
+    out = cli(str(recorded), "--markdown")
+    assert "reports/names.qsql (1)" in out
+    assert "reports/names.qsql" in cli("--markdown")
+
+
+def test_a_notebook_with_nothing_logged_on_its_contexts_says_so(tmp_path) -> None:
+    warehouse(tmp_path)
+    path = tmp_path / "new.qsql"
+    path.write_text("-- @input: {duckdb: wh.db}\n-- @cell a\nselect id from orders;\n")
+    assert "no usage recorded" in cli(str(path))
