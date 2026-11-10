@@ -738,3 +738,44 @@ def test_after_a_lost_session_every_later_cell_gets_the_temps_it_reads(tmp_path,
     finally:
         session.close()
     assert all(r.ok for r in results), [r.error for r in results]
+
+
+# ---- context identity: what a context is, whichever notebook names it
+
+
+def test_a_context_identity_is_the_context_key_by_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PG_DSN", "postgresql://quicksql:s3cret@localhost/quicksql")
+    cfg = resolve_cell({}, {"input": {"postgres": "$PG_DSN"}})
+    postgres = EXECUTORS.get("postgres")
+    assert postgres.context_identity(cfg, tmp_path) == postgres.context_key(cfg)
+    assert "s3cret" not in postgres.context_identity(cfg, tmp_path)
+    cfg = resolve_cell({}, {"input": {"bigquery": "my-proj"}})
+    assert EXECUTORS.get("bigquery").context_identity(cfg, tmp_path) == "bigquery:my-proj"
+
+
+@pytest.mark.parametrize("engine", ["duckdb", "sqlite"])
+def test_a_database_files_identity_is_its_resolved_path(engine, tmp_path) -> None:
+    executor = EXECUTORS.get(engine)
+    cfg = resolve_cell({}, {"input": {engine: "wh.db"}})
+    one, two = tmp_path / "one", tmp_path / "two"
+    # the same relative path next to two notebooks: one key, two databases
+    assert executor.context_key(cfg) == f"{engine}:wh.db"
+    assert executor.context_identity(cfg, one) == f"{engine}:{one / 'wh.db'}"
+    assert executor.context_identity(cfg, one) != executor.context_identity(cfg, two)
+    # two notebooks that reach one file agree, however each spells it
+    other = resolve_cell({}, {"input": {engine: "../one/wh.db"}})
+    assert executor.context_identity(other, two) == executor.context_identity(cfg, one)
+    absolute = resolve_cell({}, {"input": {engine: str(one / "wh.db")}})
+    assert executor.context_identity(absolute, two) == executor.context_identity(cfg, one)
+
+
+@pytest.mark.parametrize("engine", ["duckdb", "sqlite"])
+@pytest.mark.parametrize("raw", [{}, {"input": {"ENGINE": ":memory:"}}])
+def test_an_in_memory_database_has_no_identity(engine, raw, tmp_path) -> None:
+    raw = {"input": {engine: ":memory:"}} if raw else {"engine": engine}
+    cfg = resolve_cell({}, raw)
+    assert EXECUTORS.get(engine).context_identity(cfg, tmp_path) is None
+
+
+def test_a_third_party_engines_identity_is_its_context_key(tsql_engine, registries, tmp_path) -> None:
+    assert registries.executors.get("mssql").context_identity(None, tmp_path) == "mssql:wh"
