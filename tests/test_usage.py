@@ -697,3 +697,77 @@ def test_a_duckdb_table_and_a_file_get_columns_only_with_load(recorded) -> None:
 
 def test_load_without_a_notebook_is_a_usage_error() -> None:
     assert "NOTEBOOK" in cli("--load", code=2)
+
+
+# ---- curation: $QSQL_HOME/usage/curation.yaml
+
+
+def curate(qsql_home, text: str) -> None:
+    (qsql_home / "usage").mkdir(exist_ok=True)
+    (qsql_home / "usage" / "curation.yaml").write_text(text)
+
+
+def test_a_note_shows_next_to_its_column_in_every_format(qsql_home) -> None:
+    claims_log()
+    curate(
+        qsql_home,
+        "notes:\n"
+        '  "postgres:public.claims.paid_amount": net of adjustments; use for $ totals\n'
+        '  "file:*plans.csv.plan_id": the plan\n',
+    )
+    md = cli("--markdown")
+    assert "| paid_amount | | 1 | select | net of adjustments; use for $ totals |" in md
+    assert "| plan_id | | 1 | select | the plan |" in md
+    assert "net of adjustments; use for $ totals" in cli()
+    doc = json.loads(cli("--json"))
+    notes = {c["name"]: c["note"] for t in doc["tables"] for c in t["columns"]}
+    assert notes == {
+        "member_id": "",
+        "paid_amount": "net of adjustments; use for $ totals",
+        "id": "",
+        "plan_id": "the plan",
+    }
+
+
+def test_a_pinned_column_comes_first_and_says_so(qsql_home) -> None:
+    claims_log()
+    log(
+        entry(
+            "more", NOW, "/nb/z.qsql", tables=[table("public", "claims")],
+            columns=[col(0, "member_id")],
+        )
+    )  # fmt: skip
+    curate(qsql_home, 'pin: ["postgres:public.claims.paid_*"]\n')
+    doc = json.loads(cli("--json", "--columns", "1"))
+    (first,) = doc["tables"][0]["columns"]
+    assert (first["name"], first["pinned"], first["uses"]) == ("paid_amount", True, 1)
+    assert "| paid_amount | | 1 | select | pinned |" in cli("--markdown")
+
+
+def test_hide_drops_columns_and_tables(qsql_home) -> None:
+    claims_log()
+    curate(qsql_home, 'hide: ["postgres:*.member_id", "postgres:public.members", "file:*"]\n')
+    doc = json.loads(cli("--json"))
+    assert [t["name"] for t in doc["tables"]] == ["public.claims"]
+    assert [c["name"] for c in doc["tables"][0]["columns"]] == ["paid_amount"]
+
+
+def test_curation_applies_to_a_notebooks_report_too(recorded, qsql_home) -> None:
+    curate(qsql_home, 'notes: {"duckdb:orders.amount": "in dollars"}\nhide: ["duckdb:customers"]\n')
+    out = cli(str(recorded), "--markdown")
+    assert "| amount | | 1 | select | in dollars |" in out
+    assert "customers" not in out
+
+
+@pytest.mark.parametrize("text", ["pin: [unclosed\n", "- a\n- b\n", "pin: 3\n", "notes: [a]\n"])
+def test_a_curation_file_that_doesnt_read_fails_the_report(qsql_home, text) -> None:
+    claims_log()
+    curate(qsql_home, text)
+    assert "curation.yaml" in cli(code=1)
+
+
+def test_an_empty_curation_file_changes_nothing(qsql_home) -> None:
+    claims_log()
+    plain = cli("--markdown")
+    curate(qsql_home, "# nothing yet\n")
+    assert cli("--markdown") == plain
