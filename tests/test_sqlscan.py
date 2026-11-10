@@ -555,3 +555,338 @@ def test_a_refs_columns_are_kept_for_the_recorder() -> None:
         "orders.id": {"join"},
     }
     assert {use.rel for use in found.columns} == {ref("stage"), table("orders")}
+
+
+# ---- roles
+
+
+def test_a_windows_partition_and_order_are_read_as_window() -> None:
+    found = duck(
+        "select a, sum(b) over (partition by c order by d) as running from t"
+        " qualify row_number() over w = 1 window w as (partition by e order by f)"
+    )
+    assert columns(found) == {
+        "t.a": {"select"},
+        "t.b": {"select"},
+        "t.c": {"window"},
+        "t.d": {"window"},
+        "t.e": {"window"},
+        "t.f": {"window"},
+    }
+
+
+def test_a_column_read_inside_from_is_read_as_from() -> None:
+    found = duck("select i from orders o, unnest(o.items) as u(i)")
+    assert columns(found)["orders.items"] == {"from"}
+    found = duck("select g.n from orders o join generate_series(1, o.qty) g(n) on true")
+    assert columns(found) == {"orders.qty": {"from"}}
+
+
+# ---- joins
+
+
+def joins(found: Scan) -> set[tuple[str, str]]:
+    def side(end) -> str:
+        rel, column = end
+        return ".".join((*rel.parts, column))
+
+    return {(side(a), side(b)) for a, b in found.joins}
+
+
+def test_an_on_equality_is_a_join() -> None:
+    found = duck(
+        "select 1 from orders o join customers c on c.id = o.customer_id and c.live"
+        " left join payments p on (p.order_id = o.id)"
+    )
+    assert joins(found) == {
+        ("customers.id", "orders.customer_id"),
+        ("orders.id", "payments.order_id"),
+    }
+
+
+def test_a_join_is_recorded_once_whichever_way_round_it_is_written() -> None:
+    found = duck(
+        "select 1 from a join b on a.x = b.y; select 2 from b join a on b.y = a.x"
+    )
+    assert joins(found) == {("a.x", "b.y")}
+
+
+def test_a_using_column_joins_both_sides_and_a_bare_read_of_it_credits_both() -> None:
+    found = duck("select order_id from orders join payments using (order_id)")
+    assert joins(found) == {("orders.order_id", "payments.order_id")}
+    assert columns(found) == {
+        "orders.order_id": {"join", "select"},
+        "payments.order_id": {"join", "select"},
+    }
+    assert found.unresolved == ()
+
+
+def test_a_comma_joins_where_equality_is_a_join() -> None:
+    found = duck(
+        "select 1 from orders o, payments p where o.id = p.oid and o.total > 5 and o.a = o.b"
+    )
+    assert joins(found) == {("orders.id", "payments.oid")}
+    assert columns(found)["orders.id"] == {"where"}
+
+
+def test_a_correlated_equality_is_not_a_join() -> None:
+    found = duck("select 1 from orders o where exists (select 1 from payments p where p.oid = o.id)")
+    assert found.joins == ()
+
+
+def test_a_self_join_is_a_join() -> None:
+    found = duck("select 1 from emp e join emp m on e.manager_id = m.id")
+    assert joins(found) == {("emp.id", "emp.manager_id")}
+
+
+def test_a_natural_joins_columns_stay_unresolved() -> None:
+    found = duck("select a from x natural join y")
+    assert found.joins == ()
+    assert unresolved(found) == {"a": (table("x"), table("y"))}
+
+
+def test_a_join_through_a_ref_keeps_the_ref_side_for_the_recorder() -> None:
+    found = duck("select 1 from stage s join orders o on s.id = o.id", {"stage": "stage"})
+    assert found.joins == (((table("orders"), "id"), (ref("stage"), "id")),)
+
+
+# ---- pass-through inside the cell
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_column_passed_through_a_cte_is_read_where_it_is_finally_read(dialect: str) -> None:
+    found = off_conduit(
+        "with lines as (select order_id, amount * qty as revenue from order_lines)"
+        " select order_id, sum(revenue) as revenue from lines group by order_id",
+        dialect,
+    )
+    assert columns(found) == {
+        "order_lines.order_id": {"select", "group"},
+        "order_lines.amount": {"select"},
+        "order_lines.qty": {"select"},
+    }
+
+
+def test_a_renamed_column_passes_through() -> None:
+    found = duck("select amt from (select amount as amt, qty from orders) s where amt > 1")
+    assert columns(found) == {"orders.amount": {"select", "where"}, "orders.qty": {"select"}}
+
+
+def test_a_computed_column_stops_the_trace() -> None:
+    found = duck(
+        "with adj as (select amount * 1.1 as amount from orders) select amount from adj where amount > 1"
+    )
+    assert columns(found) == {"orders.amount": {"select"}}
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_columns_read_through_a_star_count_on_its_relation(dialect: str) -> None:
+    found = off_conduit(
+        "with base as (select * from orders where status = 'x') select amount, qty from base",
+        dialect,
+    )
+    assert columns(found) == {
+        "orders.status": {"where"},
+        "orders.amount": {"select"},
+        "orders.qty": {"select"},
+    }
+
+
+def test_a_chain_of_stars_and_ctes_is_followed_to_the_table() -> None:
+    found = duck(
+        "with a as (select * from orders), b as (select * from a), c as (select total as t from b)"
+        " select t from c order by t"
+    )
+    assert columns(found) == {"orders.total": {"select"}}
+
+
+def test_a_star_excludes_and_replaces() -> None:
+    found = duck(
+        "with base as (select * exclude (x) replace (a + 1 as amount) from orders)"
+        " select x, amount, qty from base"
+    )
+    assert columns(found) == {"orders.a": {"select"}, "orders.qty": {"select"}}
+    found = off_conduit(
+        "with base as (select * except (x) from orders) select x, qty from base", "bigquery"
+    )
+    assert columns(found) == {"orders.qty": {"select"}}
+
+
+def test_a_qualified_star_covers_its_relation_only() -> None:
+    found = duck(
+        "with j as (select o.*, c.name from orders o join customers c on o.cid = c.id)"
+        " select total, name from j"
+    )
+    assert columns(found) == {
+        "orders.cid": {"join"},
+        "customers.id": {"join"},
+        "customers.name": {"select"},
+        "orders.total": {"select"},
+    }
+
+
+def test_a_column_through_a_star_over_several_relations_is_unresolved() -> None:
+    found = duck(
+        "with j as (select * from orders o join customers c on o.cid = c.id) select total from j"
+    )
+    assert set(columns(found)) == {"orders.cid", "customers.id"}
+    assert found.unresolved == (
+        Unresolved("total", frozenset({"select"}), (table("orders"), table("customers"))),
+    )
+
+
+def test_a_union_cte_passes_each_branchs_column_through() -> None:
+    found = duck(
+        "with u as (select id, a as v from t1 union all select id, b from t2)"
+        " select v from u where id > 1"
+    )
+    assert columns(found) == {
+        "t1.id": {"select", "where"},
+        "t1.a": {"select"},
+        "t2.id": {"select", "where"},
+        "t2.b": {"select"},
+    }
+
+
+def test_a_recursive_cte_ends() -> None:
+    found = duck(
+        "with recursive r as (select id, parent from nodes union all"
+        " select n.id, n.parent from nodes n join r on n.parent = r.id) select id from r"
+    )
+    assert set(columns(found)) == {"nodes.id", "nodes.parent"}
+    assert found.errors == ()
+
+
+def test_a_join_through_a_cte_is_a_join_of_the_tables() -> None:
+    found = duck(
+        "with o as (select id as oid, cid from orders) select 1 from o join customers c on o.cid = c.id"
+    )
+    assert joins(found) == {("customers.id", "orders.cid")}
+    assert columns(found)["orders.cid"] == {"select", "join"}
+
+
+# ---- unresolved candidates
+
+
+def test_a_derived_relation_that_names_its_columns_is_ruled_in_or_out() -> None:
+    # `b` isn't one of c's columns, so it is u's; `a` is c's (qualify places it)
+    found = duck("with c as (select a from t) select a, b from c join u on c.k2 = u.k")
+    assert columns(found)["u.b"] == {"select"}
+    assert columns(found)["t.a"] == {"select"}
+    assert found.unresolved == ()
+
+
+def test_a_derived_relation_with_a_star_stands_for_what_its_star_covers() -> None:
+    found = duck("with c as (select * from t) select b from c join u on c.k = u.k")
+    assert unresolved(found) == {"b": (table("t"), table("u"))}
+
+
+def test_a_relation_whose_columns_arent_known_is_a_null_candidate() -> None:
+    found = duck("select a from t, unnest(t.items) as i")
+    assert unresolved(found) == {"a": (table("t"), None)}
+    found = duck("create temp table tmp as select 1 as a; select a from tmp, orders")
+    assert unresolved(found) == {"a": (None, table("orders"))}
+
+
+def test_a_ref_is_a_candidate() -> None:
+    found = duck("select amount from stage r join orders o on r.id = o.id", {"stage": "stage"})
+    assert unresolved(found) == {"amount": (ref("stage"), table("orders"))}
+
+
+def test_a_correlated_subquery_over_a_cte_that_names_the_column_resolves() -> None:
+    found = duck(
+        "with p as (select oid from payments) select o.total from orders o"
+        " where exists (select 1 from p where oid = o.id)"
+    )
+    assert columns(found) == {
+        "payments.oid": {"select", "where"},
+        "orders.total": {"select"},
+        "orders.id": {"where"},
+    }
+    assert found.unresolved == ()
+
+
+def test_a_lateral_subquerys_bare_column_is_unresolved_not_a_struct() -> None:
+    # bare, sqlglot rewrites `b` to a field of a column `u` on t
+    found = duck("select t.a from t, lateral (select b from u where u.k = t.k) l")
+    assert columns(found) == {"t.a": {"select"}, "u.k": {"where"}, "t.k": {"where"}}
+    assert [(u.column, u.candidates[:2], u.nested) for u in found.unresolved] == [
+        ("b", (table("u"), table("t")), True)
+    ]
+
+
+# ---- select *
+
+
+def test_a_star_counts_the_table_not_its_columns() -> None:
+    found = duck("select * from orders")
+    assert found.tables == ((table("orders"), True),)
+    assert found.columns == ()
+
+
+def test_a_star_that_stops_in_a_cte_doesnt_reach_the_result() -> None:
+    found = duck("with base as (select * from orders) select amount from base")
+    assert found.tables == ((table("orders"), False),)
+    found = duck("with base as (select * from orders) select * from base join c using (k)")
+    assert dict(found.tables) == {table("orders"): True, table("c"): True}
+
+
+def test_a_star_reaches_the_result_of_any_statement() -> None:
+    found = duck("create table t as select o.* from orders o join c on o.k = c.k; select 1")
+    assert dict(found.tables) == {table("orders"): True, table("c"): False}
+
+
+# ---- the terminal statement's shape, for cells that ref() this one
+
+
+def test_outputs_name_each_columns_pass_through_origin() -> None:
+    found = duck(
+        "create temp table x as select 1 as a;"
+        " select o.id, o.amount as amt, o.amount * 2 as doubled, c.name"
+        " from orders o join (select id, name from customers) c on o.cid = c.id"
+    )
+    assert found.outputs == (
+        ("id", (table("orders"), "id")),
+        ("amt", (table("orders"), "amount")),
+        ("doubled", None),
+        ("name", (table("customers"), "name")),
+    )
+    assert found.star == ()
+
+
+def test_only_the_terminal_statement_has_outputs() -> None:
+    found = duck("select a from t; create table z as select b from u")
+    assert found.outputs == (("b", (table("u"), "b")),)
+    assert duck("select a from t; drop table z").outputs == ()
+
+
+def test_a_terminal_star_names_the_relations_it_passes_through() -> None:
+    found = duck("select * exclude (ssn) replace (upper(name) as name) from members")
+    assert found.star == ((table("members"), frozenset({"ssn", "name"})),)
+    assert found.outputs == (("name", None),)
+
+
+def test_a_terminal_star_over_a_derived_relation_passes_its_columns() -> None:
+    found = duck(
+        "with base as (select id, amount * 2 as doubled from orders)"
+        " select * exclude (doubled), 1 as one from base"
+    )
+    assert found.outputs == (("id", (table("orders"), "id")), ("one", None))
+    assert found.star == ()
+    found = duck("with a as (select * exclude (x) from orders) select * exclude (y) from a")
+    assert found.star == ((table("orders"), frozenset({"x", "y"})),)
+
+
+def test_a_terminal_star_over_a_join_lists_each_relation() -> None:
+    found = duck("select * from stage s join orders o on s.id = o.id", {"stage": "stage"})
+    assert found.star == ((ref("stage"), frozenset()), (table("orders"), frozenset()))
+
+
+def test_an_output_from_a_ref_keeps_the_ref_for_the_recorder() -> None:
+    found = duck("select member_id as id from stage", {"stage": "stage"})
+    assert found.outputs == (("id", (ref("stage"), "member_id")),)
+
+
+def test_an_unresolved_or_union_output_has_no_origin() -> None:
+    assert duck("select a from x natural join y").outputs == (("a", None),)
+    assert duck("select a from t1 union all select b from t2").outputs == (("a", None),)
