@@ -311,7 +311,7 @@ def context_of(project: Any, cell: Any) -> str:
 
 def _scans(project: Any, state: _State) -> dict[str, CellScan]:
     """Every cell of the notebook, scanned (memoized) and placed on its context."""
-    from ..sqlscan import scan
+    from ..sqlscan import relation, scan
 
     registries = project.registries
     functions = frozenset(
@@ -334,7 +334,7 @@ def _scans(project: Any, state: _State) -> dict[str, CellScan]:
             _remember(state.scans, key, found)
         return found
 
-    def relation(name: str) -> str | None:
+    def read_back(name: str) -> str | None:
         """What the cell's landed output reads back as, None when it lands none."""
         try:
             sink = make_sink(project.cells[name].config, project.root, registries)
@@ -348,16 +348,15 @@ def _scans(project: Any, state: _State) -> dict[str, CellScan]:
         executor = registries.executors.get(cell.engine)
         refs = {ref: ref for ref in cell.context_refs}
         for ref in cell.external_refs:
-            expr = relation(ref)
+            expr = read_back(ref)
             if expr is not None:
                 refs[expr] = ref
         found = scanned(cell.sql, executor.dialect, refs, cell.engine == conduit.ENGINE)
         context = context_of(project, cell)
         landed = None
-        expr = relation(name)
+        expr = read_back(name)
         if expr is not None:
-            lands = scanned(f"SELECT * FROM {expr}", conduit_dialect, {}, True).tables
-            landed = lands[0][0] if lands else None
+            landed = relation(expr, conduit_dialect, functions, suffixes)
         cells[name] = CellScan(
             found, cell.engine, context, bool(getattr(cell.config, "usage", True)), landed
         )

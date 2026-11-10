@@ -894,3 +894,18 @@ def test_an_output_from_a_ref_keeps_the_ref_for_the_recorder() -> None:
 def test_an_unresolved_or_union_output_has_no_origin() -> None:
     assert duck("select a from x natural join y").outputs == (("a", None),)
     assert duck("select a from t1 union all select b from t2").outputs == (("a", None),)
+
+
+# ---- a sink's read-back expression as the relation it names
+
+
+def test_relation_names_what_an_expression_reads() -> None:
+    from quicksql.sqlscan import relation
+
+    def named(text: str) -> Rel | None:
+        return relation(text, "duckdb", FUNCTIONS, SUFFIXES)
+
+    assert named('qsql_db_1a2b3c4d."main"."Stage"') == table("qsql_db_1a2b3c4d", "main", "Stage")
+    assert named("read_parquet('/nb/data/Stage.parquet')") == file("/nb/data/Stage.parquet")
+    assert named("generate_series(1, 3)") is None
+    assert named("not ( sql") is None

@@ -14,6 +14,7 @@ import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Iterator, Literal, Mapping
 
 import sqlglot
@@ -297,6 +298,20 @@ def _as_select(stmt: exp.Expression) -> exp.Select:
     return select
 
 
+@lru_cache(maxsize=4096)
+def _ref_key(text: str, dialect: str | None) -> tuple[Any, ...] | None:
+    """The key of the relation a ``ref()`` rendered to, read the way a
+    statement's own tables are. Remembered: a notebook's cells name the same
+    few producers, run after run."""
+    try:
+        tree = sqlglot.parse_one(f"SELECT * FROM {text}", dialect=dialect)
+        tree = qualify(tree, dialect=dialect, validate_qualify_columns=False)
+    except Exception:
+        return None
+    table = tree.find(exp.Table)
+    return _table_key(table, dialect) if table is not None else None
+
+
 class _Scanner:
     """One cell's scan: what its statements add up to."""
 
@@ -312,7 +327,7 @@ class _Scanner:
         self.file_suffixes = tuple(file_suffixes)
         self.refs: dict[tuple[Any, ...], str] = {}
         for text, cell in refs.items():
-            key = self._ref_key(text)
+            key = _ref_key(text, dialect)
             if key is not None:
                 self.refs[key] = cell
         self.created: frozenset[tuple[str, ...]] = frozenset()
@@ -323,17 +338,6 @@ class _Scanner:
         self.outputs: tuple[tuple[str, tuple[Rel, str] | None], ...] = ()
         self.star: tuple[tuple[Rel, frozenset[str]], ...] = ()
         self.errors: list[tuple[int, str]] = []
-
-    def _ref_key(self, text: str) -> tuple[Any, ...] | None:
-        """The key of the relation a ``ref()`` rendered to, read the way a
-        statement's own tables are."""
-        try:
-            tree = sqlglot.parse_one(f"SELECT * FROM {text}", dialect=self.dialect)
-            tree = qualify(tree, dialect=self.dialect, validate_qualify_columns=False)
-        except Exception:
-            return None
-        table = tree.find(exp.Table)
-        return _table_key(table, self.dialect) if table is not None else None
 
     # ---- statements
 
@@ -714,6 +718,26 @@ class _Statement:
                 for rel in found:
                     self.tables[rel] = None
         return found
+
+
+@lru_cache(maxsize=4096)
+def relation(
+    text: str, dialect: str | None, file_functions: frozenset[str], file_suffixes: frozenset[str]
+) -> Rel | None:
+    """The one relation ``text`` names in FROM (a sink's ``ref_expr``): parsed,
+    not qualified, so a table's parts are as written. None when it names no
+    table or file."""
+    scanner = _Scanner(dialect, {}, file_functions, file_suffixes)
+    try:
+        with _quiet():
+            table = sqlglot.parse_one(f"SELECT * FROM {text}", dialect=dialect).find(exp.Table)
+    except Exception:
+        return None
+    if table is None:
+        return None
+    table.meta["written"] = table.name
+    found = scanner.classify(table)
+    return found[0] if isinstance(found, tuple) and found else None
 
 
 def scan(
