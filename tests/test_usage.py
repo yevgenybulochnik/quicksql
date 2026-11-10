@@ -194,3 +194,203 @@ def test_a_line_that_doesnt_fit_is_skipped() -> None:
     ]
     (usage,) = ranked(lines)
     assert (usage.uses, [c.name for c in usage.columns]) == (1, ["paid"])
+
+
+# ---- quicksql usage, without a notebook: every context, by its hash
+
+import json  # noqa: E402
+
+from typer.testing import CliRunner  # noqa: E402
+
+from quicksql.cli import app  # noqa: E402
+from quicksql.usage_log import UsageLog  # noqa: E402
+
+runner = CliRunner()
+NOW = date.today().isoformat()
+
+
+def log(*entries) -> None:
+    by_day: dict[str, list] = {}
+    for item in entries:
+        by_day.setdefault(item["day"], []).append(item)
+    for day, items in by_day.items():
+        UsageLog().append(items, day)
+
+
+def cli(*args: str, code: int = 0):
+    result = runner.invoke(app, ["usage", *args])
+    assert result.exit_code == code, result.output
+    return result.output
+
+
+def claims_log() -> None:
+    both = [table("public", "claims"), table("public", "members")]
+    log(
+        entry(
+            "paid",
+            NOW,
+            "/home/me/claims/claims.qsql",
+            tables=both,
+            columns=[
+                col(0, "member_id", "select", "join", "group"),
+                col(0, "paid_amount"),
+                col(1, "id", "join"),
+            ],
+            joins=[[[0, "member_id"], [1, "id"]]],
+            unresolved=[
+                {"column": "status", "roles": ["where"], "candidates": [0, 1], "nested": False}
+            ],
+        ),
+        entry(
+            "denied",
+            NOW,
+            "/home/me/claims/denials.qsql",
+            tables=[table("public", "claims", star=True)],
+        ),
+        entry(
+            "seeds",
+            NOW,
+            "/home/me/claims/claims.qsql",
+            tables=[{"kind": "file", "parts": ["/home/me/claims/seeds/plans.csv"], "star": False}],
+            columns=[col(0, "plan_id")],
+        ),
+    )
+
+
+@pytest.mark.parametrize("flag", [None, "--markdown"])
+def test_an_empty_log_says_how_to_turn_recording_on(flag) -> None:
+    out = cli(*([flag] if flag else []))
+    assert "no usage recorded" in out and "QSQL_USAGE=1" in out
+
+
+def test_an_empty_log_as_json_is_an_empty_report() -> None:
+    doc = json.loads(cli("--json"))
+    assert doc["tables"] == [] and "QSQL_USAGE=1" in doc["hint"]
+
+
+def test_the_report_reads_what_was_logged_whether_or_not_recording_is_on(monkeypatch) -> None:
+    claims_log()
+    assert "public.claims" in cli()
+    monkeypatch.setenv("QSQL_USAGE", "1")
+    assert "public.claims" in cli()
+
+
+def test_markdown_is_a_section_per_table() -> None:
+    claims_log()
+    assert cli("--markdown") == (
+        "# quicksql usage: last 90 days\n"
+        "\n"
+        "A use is a (notebook, day) that read it; score weighs recent uses"
+        " (half-life 30 days).\n"
+        "\n"
+        "## postgres · public.claims — context ctx1 · 2 notebooks, score 2.0\n"
+        "Used in: claims/claims.qsql (1), claims/denials.qsql (1)\n"
+        "| column | type | uses | read as | note |\n"
+        "|---|---|---|---|---|\n"
+        "| member_id | | 1 | select, join, group | |\n"
+        "| paid_amount | | 1 | select | |\n"
+        "Joins: claims.member_id = members.id (1)\n"
+        "Read with `select *`: 1\n"
+        "Unresolved (this table or another in the query has it): status (1)\n"
+        "\n"
+        "## postgres · public.members — context ctx1 · 1 notebook, score 1.0\n"
+        "Used in: claims/claims.qsql (1)\n"
+        "| column | type | uses | read as | note |\n"
+        "|---|---|---|---|---|\n"
+        "| id | | 1 | join | |\n"
+        "Joins: claims.member_id = members.id (1)\n"
+        "Unresolved (this table or another in the query has it): status (1)\n"
+        "\n"
+        "## file · /home/me/claims/seeds/plans.csv · 1 notebook, score 1.0\n"
+        "Used in: claims/claims.qsql (1)\n"
+        "| column | type | uses | read as | note |\n"
+        "|---|---|---|---|---|\n"
+        "| plan_id | | 1 | select | |\n"
+    )
+
+
+def test_text_lists_each_table_with_its_columns() -> None:
+    claims_log()
+    out = cli()
+    assert "postgres · public.claims — context ctx1 · 2 notebooks, score 2.0" in out
+    assert "used in: claims/claims.qsql (1), claims/denials.qsql (1)" in out
+    lines = [line.split() for line in out.splitlines()]
+    assert ["member_id", "1", "select,", "join,", "group"] in lines
+    assert "joins: claims.member_id = members.id (1)" in out
+    assert "select *: 1" in out
+    assert "unresolved: status (1)" in out
+
+
+def test_json_is_one_document() -> None:
+    claims_log()
+    doc = json.loads(cli("--json"))
+    assert (doc["days"], doc["half_life"], doc["notebooks"]) == (90, 30.0, [])
+    claims, members, plans = doc["tables"]
+    assert (claims["engine"], claims["context"], claims["kind"], claims["name"]) == (
+        "postgres",
+        "ctx1",
+        "table",
+        "public.claims",
+    )
+    assert (claims["uses"], claims["stars"], claims["score"]) == (2, 1, 2.0)
+    assert claims["notebooks"] == [
+        {"path": "/home/me/claims/claims.qsql", "uses": 1},
+        {"path": "/home/me/claims/denials.qsql", "uses": 1},
+    ]
+    assert claims["columns"][0] == {
+        "name": "member_id",
+        "score": 1.0,
+        "uses": 1,
+        "roles": ["select", "join", "group"],
+        "type": "",
+        "description": "",
+        "note": "",
+        "pinned": False,
+        "missing": False,
+    }
+    assert claims["joins"] == [
+        {
+            "left": {"table": "public.claims", "column": "member_id"},
+            "right": {"table": "public.members", "column": "id"},
+            "uses": 1,
+            "score": 1.0,
+        }
+    ]
+    assert claims["unresolved"] == [{"name": "status", "uses": 1, "roles": ["where"]}]
+    assert (plans["kind"], plans["engine"], plans["context"]) == ("file", None, None)
+    assert members["name"] == "public.members"
+
+
+def test_top_and_columns_cut_the_report_and_say_so() -> None:
+    claims_log()
+    out = cli("--markdown", "--top", "1", "--columns", "1")
+    assert out.count("\n## ") == 1
+    assert "| member_id |" in out and "| paid_amount |" not in out
+    assert "+1 more column" in out
+    assert "+2 more tables" in out
+    doc = json.loads(cli("--json", "--top", "1", "--columns", "1"))
+    assert len(doc["tables"]) == 1 and len(doc["tables"][0]["columns"]) == 1
+
+
+def test_engine_and_days_filter_the_report() -> None:
+    claims_log()
+    log(entry("old", "2020-01-01", tables=[table("public", "ancient")]))
+    out = cli("--markdown", "--engine", "file")
+    assert out.count("\n## ") == 1 and "plans.csv" in out
+    assert "ancient" not in cli("--days", "365")
+    assert "no usage recorded in the last 90 days" in cli("--engine", "sqlite")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--days", "0"],
+        ["--top", "0"],
+        ["--columns", "-1"],
+        ["--half-life", "0"],
+        ["--json", "--markdown"],
+        ["--nope"],
+    ],
+)
+def test_bad_flags_exit_2(args) -> None:
+    cli(*args, code=2)
