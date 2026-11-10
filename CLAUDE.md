@@ -140,6 +140,28 @@ first `@cell`) inherited by every cell.
   builtins — after changing a directive (give every `qfield` a `description=`), regenerate
   it: `uv run quicksql directives --markdown > src/quicksql/skill/references/directives.md`.
 
+- **Usage tracking is opt-in and local** (`docs/usage-plan.md`). With `QSQL_USAGE=1`
+  exactly (not `QUICKSQL_*`) in the process that runs a notebook, `plugins/usage.py`'s
+  `after_run` scans every cell's *rendered* SQL (`sqlscan.scan`: split, strict parse,
+  sqlglot `qualify`, scopes), resolves reads across `ref()` (`lineage`: a column passed
+  through unchanged, by name, renamed or through `*`, counts on its source table, on the
+  producer's context) and logs each `ok` cell once per (notebook, cell, day, content) under
+  `$QSQL_HOME/usage/` (`usage_log.py`: a 0600 file per pid per day, finished days compacted,
+  365 days kept). Off, it imports and creates nothing; `-- @usage: false` only opts out.
+  Only source columns count (never a computed column, a CTE's or a cell's output, or a table
+  the notebook creates). A context is `sha256(Executor.context_identity)[:12]`, not
+  `context_key` (a database file's key is relative to its notebook; in memory, the
+  notebook's path stands in); a file has no context, its path is its identity. The log
+  holds names and paths, never SQL text, literals, DSNs or sqlglot's messages (a scan error
+  is a statement number and a kind). The run path imports neither `catalog`,
+  `catalog_store` nor polars (`test_demos`). `quicksql usage [NOTEBOOK ...]` (`usage.py`)
+  reports: a use is a (notebook, day), score decays by half-life; with NOTEBOOKs it keeps
+  their contexts, compiles only them, merges spellings by catalog leaf `cache_key`, and
+  takes types from `CatalogCache.at_hand` (never loads; `--load` does);
+  `$QSQL_HOME/usage/curation.yaml` pins, hides and annotates. The attribution tests in
+  `tests/test_sqlscan.py` pin sqlglot 30.12 behaviours: a sqlglot bump that shifts one
+  fails there.
+
 ## Commands
 
 - `uv run pytest` — markers `network` / `bigquery` / `postgres` are deselected by default.
@@ -167,7 +189,7 @@ first `@cell`) inherited by every cell.
   `uv run pytest`. Contracts live in `pyproject.toml` `[tool.importlinter]`; both
   `ignore_imports` lists are empty since Phase 6: fix a new violation, don't list it.
 - `uv run quicksql` (bare = init) | `init` | `run` | `watch` | `tui` | `list` | `show <cell>` |
-  `compile` | `status` | `head <cell>` | `directives` | `skill` | `live …` (arm, disarm, autorun, run,
+  `compile` | `status` | `head <cell>` | `directives` | `usage` | `skill` | `live …` (arm, disarm, autorun, run,
   cancel, wait, events, query, catalog, focus, notify) — default file `base.qsql`;
   `--set key.path=value` repeatable. Exit codes: 0 ok, 1 failed, 2 usage, 3 compile (or
   missing notebook) / unknown cell, 4 no live session (or timeout), 5 refused. `quicksql tui`
@@ -183,15 +205,23 @@ first `@cell`) inherited by every cell.
 - `bootstrap.py` — the composition root: builtins list, `registries_for`, the shared
   plugin-module loader, app-level `compile_file`/`compile_text`
 - `plugins/` — `base.py` (Plugin, qfield), `builtin.py` (the directive vocabulary),
-  `emit_sql.py` (behavior-plugin demonstrator)
+  `emit_sql.py` (behavior-plugin demonstrator), `usage.py` (the `usage` directive, lineage
+  across `ref()`, the recorder behind `QSQL_USAGE=1`)
 - `config.py` — model composition, scope checks, layer merging, engine/sink resolution
   (`make_sink`)
 - `overrides.py` — `--set` / `QUICKSQL_*` parsing
 - `render.py` — Jinja on SQL bodies; ref/source/var/env; records edges + extensions
 - `sources.py` — file reader registry (csv/parquet/json/excel)
 - `graph.py` — topo sort, cycle detection, downstream sets
+- `home.py` — `$QSQL_HOME` (`quicksql_home`); imports nothing of quicksql, so an
+  extension can ask (it can't import `state`)
 - `state.py` — fingerprints, the per-notebook state file under `~/.quicksql/state/`,
   `statuses` for `status`
+- `sqlscan.py` — what a cell's rendered SQL reads: relations, columns and their roles,
+  joins, unresolved candidates, the terminal statement's outputs (core: sqlglot only)
+- `usage_log.py` — the usage log on disk (core: stdlib only)
+- `usage.py` — the usage report: aggregate, a notebook's contexts, enrich, curate,
+  render (front-end)
 - `compiler.py` — parse → config → render → graph ⇒ `Project`
 - `runner.py` — topo run; the cell protocol (`execute_cell`); plugin run-chain;
   RunSession holds the conduit connection, engine sessions, and extension cache across
