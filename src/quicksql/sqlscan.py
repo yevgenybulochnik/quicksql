@@ -37,9 +37,37 @@ class Rel:
 
 
 @dataclass(frozen=True)
+class ColumnUse:
+    """A column read straight from a relation, and the clauses that read it:
+    select | where | join | group | having | order | window | from."""
+
+    rel: Rel
+    column: str
+    roles: frozenset[str]
+
+
+@dataclass(frozen=True)
+class Unresolved:
+    """A column the statement alone can't place: unqualified with several
+    relations in scope, or in a subquery that may be correlated. One of
+    ``candidates`` has it; None stands for a relation whose columns aren't
+    known and that is no source. ``nested``: the candidates come from nested
+    scopes, innermost first, so the first that has the column is the one read;
+    otherwise exactly one has it."""
+
+    column: str
+    roles: frozenset[str]
+    candidates: tuple[Rel | None, ...]
+    nested: bool = False
+
+
+@dataclass(frozen=True)
 class Scan:
     # each relation read; whether a `*` over it reaches a statement's result
     tables: tuple[tuple[Rel, bool], ...] = ()
+    # columns read from a relation; a ref's are the recorder's to resolve
+    columns: tuple[ColumnUse, ...] = ()
+    unresolved: tuple[Unresolved, ...] = ()
     # what the cell CREATEs (tables and views), lower-cased
     created: frozenset[tuple[str, ...]] = frozenset()
     # (statement number from 1, kind): "parse", "qualify", "unsupported:<Kind>";
@@ -69,7 +97,48 @@ class _Unknown:
 
 
 _UNKNOWN = _Unknown()
-_Source = "tuple[Rel, ...] | _Unknown | Scope"
+
+
+@dataclass(frozen=True)
+class _End:
+    """Where a read ends: a column of a source relation."""
+
+    rel: Rel
+    column: str
+
+
+@dataclass(frozen=True)
+class _Open:
+    """A read that ends on one of several relations."""
+
+    column: str
+    candidates: tuple[Rel | None, ...]
+    nested: bool
+
+
+def _role(column: exp.Column) -> str:
+    """The clause a column is read in: its nearest clause ancestor."""
+    key, node = column.arg_key, column.parent
+    while node is not None:
+        if isinstance(node, exp.Where):
+            return "where"
+        if isinstance(node, exp.Join):
+            return "join" if key in ("on", "using") else "from"
+        if isinstance(node, exp.Group):
+            return "group"
+        if isinstance(node, exp.Having):
+            return "having"
+        if isinstance(node, exp.Order):
+            return "order"
+        if isinstance(node, _QUERY):
+            return "select"
+        key, node = node.arg_key, node.parent
+    return "select"
+
+
+def _correlatable(scope: Scope) -> bool:
+    """Whether the scope's query can read its enclosing query's relations."""
+    return scope.is_subquery or scope.is_udtf
 
 
 @contextmanager
@@ -207,6 +276,8 @@ class _Scanner:
                 self.refs[key] = cell
         self.created: frozenset[tuple[str, ...]] = frozenset()
         self.tables: dict[Rel, bool] = {}
+        self.columns: dict[tuple[Rel, str], set[str]] = {}
+        self.unresolved: dict[tuple[str, tuple[Rel | None, ...], bool], set[str]] = {}
         self.errors: list[tuple[int, str]] = []
 
     def _ref_key(self, text: str) -> tuple[Any, ...] | None:
@@ -255,6 +326,10 @@ class _Scanner:
             tree = _as_select(tree)
         for table in tree.find_all(exp.Table):
             table.meta["written"] = table.name  # a path, before the dialect folds its case
+        for column in tree.find_all(exp.Column):
+            # as written: qualify places a bare column on a subquery's own table,
+            # though it may be the enclosing query's
+            column.meta["written"] = (column.table, column.name)
         try:
             tree = qualify(tree, dialect=self.dialect, validate_qualify_columns=False)
             scopes = traverse_scope(tree)
@@ -268,6 +343,10 @@ class _Scanner:
             return
         for rel in found.tables:
             self.tables.setdefault(rel, False)
+        for key, roles in found.columns.items():
+            self.columns.setdefault(key, set()).update(roles)
+        for key, roles in found.unresolved.items():
+            self.unresolved.setdefault(key, set()).update(roles)
 
     # ---- relations
 
@@ -302,12 +381,100 @@ class _Statement:
         self.scanner = scanner
         self.scopes = scopes
         self.tables: dict[Rel, None] = {}  # in the order met
+        self.columns: dict[tuple[Rel, str], set[str]] = {}
+        self.unresolved: dict[tuple[str, tuple[Rel | None, ...], bool], set[str]] = {}
         self._classified: dict[int, tuple[Rel, ...] | _Unknown] = {}
 
     def read(self) -> None:
         for scope in self.scopes:
             for _, source in scope.selected_sources.values():
                 self.source(source)
+        seen: set[int] = set()
+        for scope in self.scopes:  # inner scopes first: a correlated column is
+            for column in scope.columns:  # listed again by each enclosing scope
+                if id(column) in seen or isinstance(column.this, exp.Star):
+                    continue
+                seen.add(id(column))
+                self.record(self.resolve(scope, column), _role(column))
+
+    def record(self, reads: list[_End | _Open], role: str) -> None:
+        for read in reads:
+            if isinstance(read, _End):
+                self.columns.setdefault((read.rel, read.column), set()).add(role)
+            else:
+                key = (read.column, read.candidates, read.nested)
+                self.unresolved.setdefault(key, set()).add(role)
+
+    # ---- columns
+
+    def resolve(self, scope: Scope, column: exp.Column) -> list[_End | _Open]:
+        """What a column of ``scope`` reads."""
+        name, qualifier = column.name, column.table
+        written = column.meta.get("written")
+        if _correlatable(scope) and self.enclosing(scope):
+            if written is None and isinstance(column.parent, exp.Dot):
+                return []  # qualify's guess at a struct, where it can't know the relation
+            if written is not None and not written[0]:
+                # bare as written: the subquery's relation or an enclosing one
+                return self.place(scope, written[1])
+        if qualifier:
+            source = self.lookup(scope, qualifier)
+            if source is not None:
+                return self.read_from(source, name)
+            name = qualifier  # it names no relation: a struct's root column
+        return self.place(scope, name)
+
+    def enclosing(self, scope: Scope) -> list[Scope]:
+        """The scopes whose relations a correlated ``scope`` can read,
+        nearest first."""
+        found = []
+        while _correlatable(scope) and scope.parent is not None:
+            scope = scope.parent
+            if scope.selected_sources:
+                found.append(scope)
+        return found
+
+    def lookup(self, scope: Scope, alias: str) -> Any:
+        """The source ``alias`` names in ``scope``, or in a scope around it."""
+        at: Scope | None = scope
+        while at is not None:
+            if alias in at.selected_sources:
+                return self.source(at.selected_sources[alias][1])
+            at = at.parent
+        return None
+
+    def read_from(self, source: Any, name: str) -> list[_End | _Open]:
+        """A column read from a relation the statement names."""
+        if isinstance(source, tuple):
+            return [_End(rel, name) for rel in source]
+        return []
+
+    def options(self, scope: Scope, name: str) -> list[tuple[Rel, ...] | None]:
+        """The relations of ``scope`` that may have a column ``name``."""
+        found: list[tuple[Rel, ...] | None] = []
+        for _, source in scope.selected_sources.values():
+            source = self.source(source)
+            if isinstance(source, tuple):
+                found.append(source)
+            elif isinstance(source, _Unknown):
+                found.append(None)
+        return found
+
+    def place(self, scope: Scope, name: str) -> list[_End | _Open]:
+        """An unqualified column: on the one relation that can have it, else
+        unresolved, with the scope's relations and then the enclosing ones as
+        candidates."""
+        levels = [self.options(at, name) for at in (scope, *self.enclosing(scope))]
+        found = [option for level in levels for option in level]
+        if len(found) == 1:
+            return [_End(rel, name) for rel in found[0] or ()]
+        candidates = tuple(
+            dict.fromkeys(rel for option in found for rel in (option or (None,)))
+        )
+        if all(rel is None for rel in candidates):
+            return []
+        nested = sum(1 for level in levels if level) > 1
+        return [_Open(name, candidates, nested)]
 
     def source(self, source: Any) -> Any:
         """A scope's source as what a column read from it reads: source
@@ -343,6 +510,14 @@ def scan(
         scanner.run(sql)
     return Scan(
         tables=tuple(scanner.tables.items()),
+        columns=tuple(
+            ColumnUse(rel, column, frozenset(roles))
+            for (rel, column), roles in scanner.columns.items()
+        ),
+        unresolved=tuple(
+            Unresolved(column, frozenset(roles), candidates, nested)
+            for (column, candidates, nested), roles in scanner.unresolved.items()
+        ),
         created=scanner.created,
         errors=tuple(scanner.errors),
     )
