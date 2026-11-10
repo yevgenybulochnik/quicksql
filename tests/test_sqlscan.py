@@ -296,3 +296,262 @@ def test_create_as_insert_select_and_copy_scan_as_they_are() -> None:
     )
     assert rels(found) == [table("s1"), table("s2"), table("s3")]
     assert found.errors == ()
+
+
+# ---- columns: the probe tables of docs/usage-plan.md, per dialect
+
+from quicksql.sqlscan import Unresolved  # noqa: E402
+
+DIALECTS = ["duckdb", "postgres", "bigquery"]
+EXPANDS_ALIASES = ["duckdb", "postgres"]  # BigQuery reads a WHERE alias as a column
+
+
+def columns(found: Scan) -> dict[str, set[str]]:
+    """``table.column`` -> roles."""
+    return {".".join((*use.rel.parts, use.column)): set(use.roles) for use in found.columns}
+
+
+def unresolved(found: Scan) -> dict[str, tuple]:
+    return {u.column: u.candidates for u in found.unresolved}
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_columns_count_on_the_table_they_are_read_from(dialect: str) -> None:
+    found = off_conduit(
+        "select o.amount * o.qty as revenue, upper(c.name) as customer"
+        " from orders o join customers c on c.id = o.customer_id",
+        dialect,
+    )
+    assert columns(found) == {
+        "orders.amount": {"select"},
+        "orders.qty": {"select"},
+        "customers.name": {"select"},
+        "customers.id": {"join"},
+        "orders.customer_id": {"join"},
+    }
+    assert found.unresolved == ()
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_ctes_outputs_are_not_columns(dialect: str) -> None:
+    found = off_conduit(
+        "with lines as (select order_id, amount * qty as revenue from order_lines)"
+        " select order_id, sum(revenue) as revenue from lines group by order_id",
+        dialect,
+    )
+    assert set(columns(found)) == {
+        "order_lines.order_id",
+        "order_lines.amount",
+        "order_lines.qty",
+    }
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_derived_column_of_the_same_name_counts_once(dialect: str) -> None:
+    found = off_conduit(
+        "with adj as (select amount * 1.1 as amount from orders) select amount from adj", dialect
+    )
+    assert columns(found) == {"orders.amount": {"select"}}
+
+
+@pytest.mark.parametrize("dialect", EXPANDS_ALIASES)
+def test_a_where_alias_reference_counts_its_inputs(dialect: str) -> None:
+    # in Postgres WHERE can't see a select alias, so this read a real column
+    # `revenue`; sqlglot credits the alias's inputs all the same (the plan's risk)
+    found = off_conduit(
+        "select amount * qty as revenue from orders where revenue > 100", dialect
+    )
+    assert columns(found) == {
+        "orders.amount": {"select", "where"},
+        "orders.qty": {"select", "where"},
+    }
+
+
+def test_bigquery_reads_a_where_alias_reference_as_a_column() -> None:
+    found = off_conduit(
+        "select amount * qty as revenue from orders where revenue > 100", "bigquery"
+    )
+    assert columns(found) == {
+        "orders.amount": {"select"},
+        "orders.qty": {"select"},
+        "orders.revenue": {"where"},
+    }
+
+
+@pytest.mark.parametrize("dialect", EXPANDS_ALIASES)
+def test_a_lateral_alias_reference_counts_its_inputs(dialect: str) -> None:
+    found = off_conduit(
+        "select amount * qty as revenue, revenue * 0.1 as tax from orders", dialect
+    )
+    assert columns(found) == {"orders.amount": {"select"}, "orders.qty": {"select"}}
+
+
+def test_bigquery_reads_a_lateral_alias_reference_as_a_column() -> None:
+    found = off_conduit(
+        "select amount * qty as revenue, revenue * 0.1 as tax from orders", "bigquery"
+    )
+    assert set(columns(found)) == {"orders.amount", "orders.qty", "orders.revenue"}
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_having_or_order_by_alias_reference_yields_no_column(dialect: str) -> None:
+    found = off_conduit("select a as z from s group by z having z > 1 order by z", dialect)
+    assert columns(found) == {"s.a": {"select", "group"}}
+    assert found.unresolved == ()
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_unqualified_columns_over_two_tables_wait_for_a_schema(dialect: str) -> None:
+    found = off_conduit("select id, amount from orders join payments using (order_id)", dialect)
+    assert columns(found) == {"orders.order_id": {"join"}, "payments.order_id": {"join"}}
+    both = (table("orders"), table("payments"))
+    assert unresolved(found) == {"id": both, "amount": both}
+    assert {u.roles for u in found.unresolved} == {frozenset({"select"})}
+    assert not any(u.nested for u in found.unresolved)
+
+
+def test_a_bigquery_path_and_a_postgres_schema_carry_their_columns() -> None:
+    assert columns(off_conduit("select a from `proj.ds.tbl` where b", "bigquery")) == {
+        "proj.ds.tbl.a": {"select"},
+        "proj.ds.tbl.b": {"where"},
+    }
+    assert columns(off_conduit("select m.a from claims.members m", "postgres")) == {
+        "claims.members.a": {"select"}
+    }
+
+
+def test_bigquery_pipe_syntax_scans_like_any_query() -> None:
+    found = off_conduit("FROM t |> WHERE x > 1 |> SELECT a, b", "bigquery")
+    assert found.errors == ()
+    assert set(columns(found)) == {"t.a", "t.b", "t.x"}
+    assert columns(found)["t.x"] == {"where"}
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_correlated_column_counts_on_the_enclosing_source(dialect: str) -> None:
+    found = off_conduit(
+        "select o.total from orders o"
+        " where exists (select 1 from payments p where p.oid = o.id)",
+        dialect,
+    )
+    assert columns(found) == {
+        "orders.total": {"select"},
+        "payments.oid": {"where"},
+        "orders.id": {"where"},
+    }
+    assert found.unresolved == ()
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_an_unqualified_column_in_a_correlated_subquery_is_unresolved(dialect: str) -> None:
+    # sqlglot credits `id` to payments, though it may be the outer table's
+    found = off_conduit(
+        "select o.total from orders o where exists (select 1 from payments where oid = id)",
+        dialect,
+    )
+    assert columns(found) == {"orders.total": {"select"}}
+    inner_first = (table("payments"), table("orders"))
+    assert unresolved(found) == {"oid": inner_first, "id": inner_first}
+    assert all(u.nested and u.roles == {"where"} for u in found.unresolved)
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_a_subquery_with_no_enclosing_relation_resolves(dialect: str) -> None:
+    found = off_conduit("select (select max(a) from t) as top", dialect)
+    assert columns(found) == {"t.a": {"select"}}
+    assert found.unresolved == ()
+
+
+@pytest.mark.parametrize("dialect", ["duckdb", "bigquery"])
+def test_a_struct_root_with_one_relation_in_scope_is_its_column(dialect: str) -> None:
+    found = off_conduit("select address.city from customers", dialect)
+    assert columns(found) == {"customers.address": {"select"}}
+
+
+@pytest.mark.parametrize("dialect", ["duckdb", "bigquery"])
+def test_a_struct_root_with_two_relations_in_scope_is_unresolved(dialect: str) -> None:
+    # bare, sqlglot reads this as column `city` of a source `address`
+    found = off_conduit(
+        "select address.city from customers c join orders o on c.id = o.cid", dialect
+    )
+    assert set(columns(found)) == {"customers.id", "orders.cid"}
+    assert found.unresolved == (
+        Unresolved("address", frozenset({"select"}), (table("customers"), table("orders"))),
+    )
+
+
+def test_a_nested_field_records_its_top_level_column() -> None:
+    found = off_conduit("select o.address.city, o.items[1].sku from orders o", "duckdb")
+    assert set(columns(found)) == {"orders.address", "orders.items"}
+
+
+def test_a_column_read_in_two_clauses_is_one_use_with_both_roles() -> None:
+    found = duck("select a from t where a > 1 group by a having sum(b) > 2 order by sum(c)")
+    assert columns(found) == {
+        "t.a": {"select", "where", "group"},
+        "t.b": {"having"},
+        "t.c": {"order"},
+    }
+
+
+def test_an_update_counts_what_it_reads_not_what_it_assigns() -> None:
+    assert columns(duck("update orders set amount = 0 where status = 'void'")) == {
+        "orders.status": {"where"}
+    }
+    found = duck("update orders set amount = s.amount * 2 from staged s where orders.id = s.id")
+    assert columns(found) == {
+        "staged.amount": {"select"},
+        "orders.id": {"where"},
+        "staged.id": {"where"},
+    }
+
+
+def test_a_delete_counts_its_condition() -> None:
+    found = duck("delete from orders using voided v where orders.id = v.id and v.flag")
+    assert columns(found) == {
+        "orders.id": {"where"},
+        "voided.id": {"where"},
+        "voided.flag": {"where"},
+    }
+
+
+def test_a_merge_counts_its_on_and_the_values_it_writes() -> None:
+    found = off_conduit(
+        "merge into orders o using staged s on o.id = s.id"
+        " when matched and s.live then update set amount = s.amount"
+        " when not matched then insert (id, amount) values (s.id, s.total)",
+        "postgres",
+    )
+    assert columns(found) == {
+        "orders.id": {"join"},
+        "staged.id": {"join", "select"},
+        "staged.live": {"select"},
+        "staged.amount": {"select"},
+        "staged.total": {"select"},
+    }
+
+
+def test_a_files_columns_count_on_the_file() -> None:
+    found = duck("select a from read_csv_auto('/x.csv', header=true) where b > 1")
+    assert columns(found) == {"/x.csv.a": {"select"}, "/x.csv.b": {"where"}}
+    found = duck("select a from read_parquet(['p.parquet', 'q.parquet'])")
+    assert columns(found) == {"p.parquet.a": {"select"}, "q.parquet.a": {"select"}}
+    assert columns(duck("select a from 'data/x.parquet'")) == {"data/x.parquet.a": {"select"}}
+
+
+def test_columns_of_a_non_source_or_a_created_table_do_not_count() -> None:
+    assert duck("select a from generate_series(1, 10) g(a)") == Scan()
+    found = duck("create temp table tmp as select a from orders; select a, b from tmp")
+    assert columns(found) == {"orders.a": {"select"}}
+    assert found.unresolved == ()
+
+
+def test_a_refs_columns_are_kept_for_the_recorder() -> None:
+    found = duck("select s.a, o.b from stage s join orders o on s.id = o.id", {"stage": "stage"})
+    assert columns(found) == {
+        "stage.a": {"select"},
+        "stage.id": {"join"},
+        "orders.b": {"select"},
+        "orders.id": {"join"},
+    }
+    assert {use.rel for use in found.columns} == {ref("stage"), table("orders")}
