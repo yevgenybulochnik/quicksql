@@ -734,3 +734,36 @@ Where a step didn't work as written, the smallest change that keeps its intent:
 - **An unwritable log is reported by raising once** (step 8). `after_run` gets no run
   context, so the one channel to the run's log is the contained failure `_notify`
   records; the recorder raises on the first failed write per process and is silent after.
+- **`sqlscan.relation` reads a sink's `ref_expr`** (step 8, after timing): the recorder
+  first ran a full scan of `SELECT * FROM <ref_expr>` per cell to learn what its sink
+  lands. It now parses that without qualifying, and ref keys are remembered per process.
+- **The report lists unresolved columns** under each candidate table (step 10): the plan
+  showed none, which hid the undercount it promises is visible.
+- **`hide` also takes `engine:table`** (step 15), for a whole table; the plan's globs were
+  on `engine:table.column` only.
+
+## Verification carried out (2026-11-10)
+
+- `uv run pytest` under `systemd-run --user --scope -p MemoryMax=3G`: 1111 passed, 1
+  skipped; `uv run lint-imports`: 2 kept. With the compose stack up,
+  `pytest -m "postgres or bigquery"`: 20 passed.
+- **Latency, in process, a day of 50 pid files seeded** (this box):
+  - unchanged rerun: 0.9–1.1 ms median, under the 2 ms budget;
+  - cold: **50–65 ms, over the 15 ms budget**, on both demo notebooks (7 cells each).
+    Of it: importing `sqlscan` and the optimizer 8 ms, the seed 4 ms, the prune/compact
+    check 0.3 ms, and scanning 40–48 ms on a first pass (16 ms on a second pass in the
+    same process: sqlglot's first use of each dialect and its lazy imports are the
+    rest). A cell costs 0.8–4.4 ms to scan here, against the 0.5–1.2 ms the plan measured,
+    so the budget isn't reachable on this box by trimming the recorder. Every
+    `quicksql run` with recording on pays the cold cost once; a TUI or `watch` session
+    pays it on its first run only.
+- Off by default: the sources demo run with `QSQL_USAGE` unset leaves `$QSQL_HOME` with
+  `state/` only.
+- End to end on the kitchen-sink stack with `QSQL_USAGE=1`: the run logs 7 lines, a
+  second run adds none; `quicksql usage --markdown` lists `claims.*` under the Postgres
+  context and `compendia.*` under the BigQuery one, credits `class_spend`'s reads through
+  `ref()` (`pharmacy_claims.ndc`, `therapeutic_classes.class_name`, the join
+  `pharmacy_claims.ndc = ndc_directory.ndc`), and shows no computed alias and no
+  `class_spend` sink table. `--load` adds types and descriptions from both engines.
+- TUI (tmux, a DuckDB notebook): armed, one run logs 1 line; ten unchanged saves leave
+  1; an edit makes 2; `quicksql usage NOTEBOOK --markdown` answers while the TUI is open.
