@@ -1615,3 +1615,57 @@ def test_the_default_cache_takes_the_environments_settings(monkeypatch) -> None:
     assert cache.store is not None and cache.on_refresh == refreshed.append
     monkeypatch.setenv("QSQL_CATALOG_PERSIST", "0")
     assert qcatalog.default_cache().store is None
+
+
+# ---------- a read that never loads (the usage report's) ----------
+
+
+def test_at_hand_answers_from_memory_and_never_loads(disk) -> None:
+    calls: list[str] = []
+    cache = disk()
+    assert cache.at_hand(_remote("k", calls)) is None
+    assert calls == []
+    cache.load(_remote("k", calls))
+    assert cache.at_hand(_remote("k", calls))["n"].to_list() == [1]
+    assert calls == ["k"]
+
+
+def test_at_hand_reads_a_new_sessions_level_from_the_disk(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("k", calls))
+    disk.clock.now += 60
+    cache = disk()
+    assert cache.at_hand(_remote("k", calls))["n"].to_list() == [1]
+    assert cache.peek(_remote("k", calls)) is not None  # kept: the next ask is memory's
+    assert calls == ["k"]
+
+
+def test_at_hand_starts_no_refresh_behind_a_stale_level(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("k", calls))
+    disk.clock.now += 1000
+    cache = disk(revalidate_after=100)
+    assert cache.at_hand(_remote("k", calls)) is not None
+    assert cache.wait_refreshes(5) and calls == ["k"]
+
+
+def test_at_hand_misses_a_level_past_max_age_or_cleared(disk) -> None:
+    calls: list[str] = []
+    disk().load(_remote("old", calls))
+    disk().load(_remote("gone", calls, scope="bigquery:q"))
+    disk.clock.now += 10
+    disk().invalidate(scopes=["bigquery:q"])
+    assert disk().at_hand(_remote("gone", calls, scope="bigquery:q")) is None
+    disk.clock.now += 1000
+    assert disk(max_age=500).at_hand(_remote("old", calls)) is None
+    assert calls == ["old", "gone"]
+
+
+def test_at_hand_never_reads_the_disk_for_a_level_that_doesnt_persist(disk) -> None:
+    calls: list[int] = []
+    cache = disk()
+    assert cache.at_hand(_counting_node("local", 1, calls)) is None
+    cache.load(_counting_node("local", 1, calls))
+    assert cache.at_hand(_counting_node("local", 1, calls)) is not None
+    assert disk().at_hand(_counting_node("local", 1, calls)) is None
+    assert calls == [1]
