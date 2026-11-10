@@ -201,7 +201,7 @@ def _file_path(text: str) -> str:
     return match.group(1) + match.group(2) if match else text
 
 
-def _ends_with(parts: tuple[str, ...], other: tuple[str, ...]) -> bool:
+def same_table(parts: tuple[str, ...], other: tuple[str, ...]) -> bool:
     """Whether two dotted names agree on as many trailing parts as the
     shorter has: ``t`` and ``main.t`` name one table."""
     n = min(len(parts), len(other))
@@ -417,7 +417,7 @@ class _Scanner:
             return _UNKNOWN  # no source, and its arguments stay out of the scan
         parts = tuple(part.name for part in table.parts)
         folded = tuple(p.lower() for p in parts)
-        if any(_ends_with(folded, made) for made in self.created):
+        if any(same_table(folded, made) for made in self.created):
             return _UNKNOWN
         if len(parts) == 1 and parts[0].lower().endswith(self.file_suffixes or ("\0",)):
             # a replacement scan: the path as written

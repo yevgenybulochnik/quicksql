@@ -192,7 +192,9 @@ def test_a_producer_with_usage_off_stops_the_trace() -> None:
             "all": cell("select * from stage", refs=["stage"]),
         }
     )
-    assert columns(reads["top"]) == {"plans.plan_id": {"join", "select"}}
+    assert columns(reads["top"]) == {"plans.plan_id": {"join"}}
+    # the cell that opted out may have it: nothing says, so it stays open
+    assert set(reads["top"].unresolved) == {("member_id", (None, src("plans")), False)}
     assert tables(reads["top"]) == {"plans": False}
     assert reads["top"].joins == set()
     assert tables(reads["all"]) == {}
