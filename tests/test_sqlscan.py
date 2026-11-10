@@ -47,6 +47,10 @@ def rels(found: Scan) -> list[Rel]:
     return [rel for rel, _ in found.tables]
 
 
+def reads_nothing(found: Scan) -> bool:
+    return (found.tables, found.columns, found.unresolved, found.joins, found.star) == ((),) * 5
+
+
 # ---- statements
 
 
@@ -204,12 +208,12 @@ def test_a_non_reader_table_function_is_no_source_and_its_arguments_stay_out() -
         "select a from generate_series(1, 10) g(a);"
         " select b from postgres_scan('host=db password=hunter2', 'public', 'orders')"
     )
-    assert found == Scan()
+    assert reads_nothing(found) and found.errors == ()
     assert "hunter2" not in repr(found)
 
 
 def test_a_reader_function_without_a_literal_path_is_no_source() -> None:
-    assert duck("select a from read_csv(getvariable('p'))") == Scan()
+    assert reads_nothing(duck("select a from read_csv(getvariable('p'))"))
 
 
 def test_files_count_on_the_conduits_engine_only() -> None:
@@ -540,7 +544,7 @@ def test_a_files_columns_count_on_the_file() -> None:
 
 
 def test_columns_of_a_non_source_or_a_created_table_do_not_count() -> None:
-    assert duck("select a from generate_series(1, 10) g(a)") == Scan()
+    assert reads_nothing(duck("select a from generate_series(1, 10) g(a)"))
     found = duck("create temp table tmp as select a from orders; select a, b from tmp")
     assert columns(found) == {"orders.a": {"select"}}
     assert found.unresolved == ()
@@ -770,7 +774,7 @@ def test_a_join_through_a_cte_is_a_join_of_the_tables() -> None:
 
 def test_a_derived_relation_that_names_its_columns_is_ruled_in_or_out() -> None:
     # `b` isn't one of c's columns, so it is u's; `a` is c's (qualify places it)
-    found = duck("with c as (select a from t) select a, b from c join u on c.k2 = u.k")
+    found = duck("with c as (select a, k from t) select a, b from c join u on c.k = u.k")
     assert columns(found)["u.b"] == {"select"}
     assert columns(found)["t.a"] == {"select"}
     assert found.unresolved == ()

@@ -68,6 +68,15 @@ class Scan:
     # columns read from a relation; a ref's are the recorder's to resolve
     columns: tuple[ColumnUse, ...] = ()
     unresolved: tuple[Unresolved, ...] = ()
+    # equalities between columns of two relations, each side (relation, column),
+    # the pair in a fixed order
+    joins: tuple[tuple[tuple[Rel, str], tuple[Rel, str]], ...] = ()
+    # the terminal statement's named columns: each one's pass-through origin,
+    # None when it's computed
+    outputs: tuple[tuple[str, tuple[Rel, str] | None], ...] = ()
+    # the relations a terminal `*` passes through, each with the columns the
+    # `*` leaves out or replaces (lower-cased)
+    star: tuple[tuple[Rel, frozenset[str]], ...] = ()
     # what the cell CREATEs (tables and views), lower-cased
     created: frozenset[tuple[str, ...]] = frozenset()
     # (statement number from 1, kind): "parse", "qualify", "unsupported:<Kind>";
@@ -120,8 +129,12 @@ def _role(column: exp.Column) -> str:
     """The clause a column is read in: its nearest clause ancestor."""
     key, node = column.arg_key, column.parent
     while node is not None:
-        if isinstance(node, exp.Where):
+        if isinstance(node, exp.Window) and key in ("partition_by", "order"):
+            return "window"
+        if isinstance(node, (exp.Where, exp.Qualify)):
             return "where"
+        if isinstance(node, (exp.From, exp.Lateral)):
+            return "from"
         if isinstance(node, exp.Join):
             return "join" if key in ("on", "using") else "from"
         if isinstance(node, exp.Group):
@@ -129,11 +142,39 @@ def _role(column: exp.Column) -> str:
         if isinstance(node, exp.Having):
             return "having"
         if isinstance(node, exp.Order):
-            return "order"
+            return "window" if isinstance(node.parent, exp.Window) else "order"
         if isinstance(node, _QUERY):
             return "select"
         key, node = node.arg_key, node.parent
     return "select"
+
+
+def _star(select: exp.Expression) -> exp.Star | None:
+    """A select-list item as the star it is: ``*`` or ``t.*``."""
+    if isinstance(select, exp.Column):
+        select = select.this
+    return select if isinstance(select, exp.Star) else None
+
+
+def _left_out(star: exp.Star) -> tuple[set[str], list[str]]:
+    """The columns a star excludes (lower-cased), and the ones it replaces
+    with a computed value."""
+    excluded = {e.name.lower() for e in star.args.get("except_") or []}
+    replaced = [e.alias_or_name for e in star.args.get("replace") or []]
+    return excluded, replaced
+
+
+def _conjuncts(condition: exp.Expression) -> Iterator[exp.Expression]:
+    condition = condition.unnest()
+    if isinstance(condition, exp.And):
+        yield from _conjuncts(condition.this)
+        yield from _conjuncts(condition.expression)
+    else:
+        yield condition
+
+
+def _join_key(end: tuple[Rel, str]) -> tuple[Any, ...]:
+    return (end[0].parts, end[1], end[0].kind)
 
 
 def _correlatable(scope: Scope) -> bool:
@@ -278,6 +319,9 @@ class _Scanner:
         self.tables: dict[Rel, bool] = {}
         self.columns: dict[tuple[Rel, str], set[str]] = {}
         self.unresolved: dict[tuple[str, tuple[Rel | None, ...], bool], set[str]] = {}
+        self.joins: dict[tuple[tuple[Rel, str], tuple[Rel, str]], None] = {}
+        self.outputs: tuple[tuple[str, tuple[Rel, str] | None], ...] = ()
+        self.star: tuple[tuple[Rel, frozenset[str]], ...] = ()
         self.errors: list[tuple[int, str]] = []
 
     def _ref_key(self, text: str) -> tuple[Any, ...] | None:
@@ -335,6 +379,7 @@ class _Scanner:
             scopes = traverse_scope(tree)
             found = _Statement(self, scopes)
             found.read()
+            outputs, star = found.shape(found.root()) if scopes else ([], [])
         except Exception:
             self.errors.append((index, "qualify"))
             return
@@ -347,6 +392,12 @@ class _Scanner:
             self.columns.setdefault(key, set()).update(roles)
         for key, roles in found.unresolved.items():
             self.unresolved.setdefault(key, set()).update(roles)
+        self.joins.update(found.joins)
+        for rel, _ in star:
+            self.tables[rel] = True
+        if terminal:
+            self.outputs = tuple((name, (o.rel, o.column) if o else None) for name, o in outputs)
+            self.star = tuple(star)
 
     # ---- relations
 
@@ -383,6 +434,7 @@ class _Statement:
         self.tables: dict[Rel, None] = {}  # in the order met
         self.columns: dict[tuple[Rel, str], set[str]] = {}
         self.unresolved: dict[tuple[str, tuple[Rel | None, ...], bool], set[str]] = {}
+        self.joins: dict[tuple[tuple[Rel, str], tuple[Rel, str]], None] = {}
         self._classified: dict[int, tuple[Rel, ...] | _Unknown] = {}
 
     def read(self) -> None:
@@ -396,6 +448,8 @@ class _Statement:
                     continue
                 seen.add(id(column))
                 self.record(self.resolve(scope, column), _role(column))
+        for scope in self.scopes:
+            self.read_joins(scope)
 
     def record(self, reads: list[_End | _Open], role: str) -> None:
         for read in reads:
@@ -407,22 +461,31 @@ class _Statement:
 
     # ---- columns
 
-    def resolve(self, scope: Scope, column: exp.Column) -> list[_End | _Open]:
-        """What a column of ``scope`` reads."""
+    def resolve(
+        self, scope: Scope, column: exp.Column, trail: frozenset[Any] = frozenset()
+    ) -> list[_End | _Open]:
+        """What a column of ``scope`` reads: followed through the CTEs and
+        subqueries that pass it on unchanged, to the source relation."""
         name, qualifier = column.name, column.table
         written = column.meta.get("written")
         if _correlatable(scope) and self.enclosing(scope):
             if written is None and isinstance(column.parent, exp.Dot):
-                return []  # qualify's guess at a struct, where it can't know the relation
+                # qualify's guess at a struct, where it can't know the relation.
+                # `u.b` on the subquery's own `u` it rewrites to a field of an
+                # enclosing table's column `u`: that was a column `b`
+                field = column.parent.expression
+                if name in scope.selected_sources and isinstance(field, exp.Identifier):
+                    return self.place(scope, field.name, trail)
+                return []
             if written is not None and not written[0]:
                 # bare as written: the subquery's relation or an enclosing one
-                return self.place(scope, written[1])
+                return self.place(scope, written[1], trail)
         if qualifier:
             source = self.lookup(scope, qualifier)
             if source is not None:
-                return self.read_from(source, name)
+                return self.read_from(source, name, trail)
             name = qualifier  # it names no relation: a struct's root column
-        return self.place(scope, name)
+        return self.place(scope, name, trail)
 
     def enclosing(self, scope: Scope) -> list[Scope]:
         """The scopes whose relations a correlated ``scope`` can read,
@@ -443,38 +506,199 @@ class _Statement:
             at = at.parent
         return None
 
-    def read_from(self, source: Any, name: str) -> list[_End | _Open]:
+    def read_from(self, source: Any, name: str, trail: frozenset[Any]) -> list[_End | _Open]:
         """A column read from a relation the statement names."""
+        sure, options = self.source_options(source, name, trail)
+        return sure if sure is not None else self.settle(name, [options])
+
+    def source_options(
+        self, source: Any, name: str, trail: frozenset[Any]
+    ) -> tuple[list[_End | _Open] | None, list[tuple[Rel, ...] | None]]:
+        """A column ``name`` of one source, as (what it reads when the source
+        is known to have it, the relations that may have it otherwise). None
+        among them: a relation whose columns aren't known."""
         if isinstance(source, tuple):
-            return [_End(rel, name) for rel in source]
+            return None, [source]
+        if isinstance(source, _Unknown):
+            return None, [None]
+        return self.derived(source, name, trail)
+
+    def options(
+        self, scope: Scope, name: str, trail: frozenset[Any], only: str | None = None
+    ) -> tuple[list[_End | _Open] | None, list[tuple[Rel, ...] | None]]:
+        """``source_options`` over the scope's sources, or just ``only``."""
+        sure = None
+        found: list[tuple[Rel, ...] | None] = []
+        for alias, (_, source) in scope.selected_sources.items():
+            if only is not None and alias != only:
+                continue
+            has, options = self.source_options(self.source(source), name, trail)
+            if has is not None and sure is None:
+                sure = has
+            found += options
+        return sure, found
+
+    def leaves(self, scope: Scope) -> list[Scope]:
+        """A set operation's SELECTs, left to right."""
+        if not isinstance(scope.expression, exp.SetOperation):
+            return [scope]
+        return [leaf for branch in scope.union_scopes for leaf in self.leaves(branch)]
+
+    def follow(self, scope: Scope, select: exp.Expression, trail: frozenset[Any]) -> list[Any]:
+        """What reading one of the scope's select-list items reads: its column
+        when the item is a bare one (aliased or not), nothing when computed."""
+        value = select.unalias().unnest()
+        if isinstance(value, exp.Column) and _star(value) is None:
+            return self.resolve(scope, value, trail)
         return []
 
-    def options(self, scope: Scope, name: str) -> list[tuple[Rel, ...] | None]:
-        """The relations of ``scope`` that may have a column ``name``."""
+    def derived(
+        self, scope: Scope, name: str, trail: frozenset[Any]
+    ) -> tuple[list[_End | _Open] | None, list[tuple[Rel, ...] | None]]:
+        """``source_options`` of a CTE or subquery: followed through its
+        select of that name, else through a ``*`` that doesn't leave it out."""
+        key = (id(scope), name)
+        if key in trail:  # a recursive CTE reading itself
+            return None, []
+        trail = trail | {key}
+        query = scope.expression
+        if isinstance(query, exp.SetOperation):
+            leaves = self.leaves(scope)
+            names = [s.alias_or_name for s in leaves[0].expression.selects] if leaves else []
+            starred = any(_star(s) for leaf in leaves for s in leaf.expression.selects)
+            if starred or name not in names:
+                return None, [None] if starred else []
+            position, reads = names.index(name), []
+            for leaf in leaves:  # each branch's column at that position is read
+                selects = leaf.expression.selects
+                if position < len(selects):
+                    reads += self.follow(leaf, selects[position], trail)
+            return reads, []
+        for select in query.selects:
+            if _star(select) is None and select.alias_or_name == name:
+                return self.follow(scope, select, trail), []
         found: list[tuple[Rel, ...] | None] = []
-        for _, source in scope.selected_sources.values():
-            source = self.source(source)
-            if isinstance(source, tuple):
-                found.append(source)
-            elif isinstance(source, _Unknown):
-                found.append(None)
-        return found
+        for select in query.selects:
+            star = _star(select)
+            if star is None:
+                continue
+            excluded, replaced = _left_out(star)
+            if name.lower() in (r.lower() for r in replaced):
+                return [], []  # computed here
+            if name.lower() in excluded:
+                continue
+            only = select.table if isinstance(select, exp.Column) else None
+            sure, options = self.options(scope, name, trail, only or None)
+            if sure is not None:
+                return sure, []
+            found += options
+        return None, found
 
-    def place(self, scope: Scope, name: str) -> list[_End | _Open]:
-        """An unqualified column: on the one relation that can have it, else
-        unresolved, with the scope's relations and then the enclosing ones as
-        candidates."""
-        levels = [self.options(at, name) for at in (scope, *self.enclosing(scope))]
+    def settle(self, name: str, levels: list[list[tuple[Rel, ...] | None]]) -> list[_End | _Open]:
+        """A column over the relations that may have it, by scope (innermost
+        first): read from the only one, else unresolved."""
         found = [option for level in levels for option in level]
         if len(found) == 1:
             return [_End(rel, name) for rel in found[0] or ()]
-        candidates = tuple(
-            dict.fromkeys(rel for option in found for rel in (option or (None,)))
-        )
+        candidates = tuple(dict.fromkeys(rel for option in found for rel in (option or (None,))))
         if all(rel is None for rel in candidates):
             return []
-        nested = sum(1 for level in levels if level) > 1
-        return [_Open(name, candidates, nested)]
+        return [_Open(name, candidates, nested=sum(1 for level in levels if level) > 1)]
+
+    def place(self, scope: Scope, name: str, trail: frozenset[Any]) -> list[_End | _Open]:
+        """An unqualified column: read from the relation known to have it or
+        the only one that can, else unresolved, with the scope's relations and
+        then the enclosing ones as candidates."""
+        levels: list[list[tuple[Rel, ...] | None]] = []
+        for at in (scope, *self.enclosing(scope)):
+            sure, options = self.options(at, name, trail)
+            if sure is not None:
+                if not any(levels):
+                    return sure  # no nearer relation could have shadowed it
+                options = [*options, None]
+            levels.append(options)
+        return self.settle(name, levels)
+
+    # ---- joins
+
+    def read_joins(self, scope: Scope) -> None:
+        """Equalities between columns of two relations: in a join's ON (USING
+        is one by now), and among a WHERE's top-level conjuncts (a comma join)."""
+        query = scope.expression
+        if not isinstance(query, exp.Select):
+            return
+        conditions = [j.args["on"] for j in query.args.get("joins") or [] if j.args.get("on")]
+        where = query.args.get("where")
+        if where is not None:
+            conditions.append(where.this)
+        for condition in conditions:
+            for equality in _conjuncts(condition):
+                left, right = equality.this, equality.args.get("expression")
+                if not (
+                    isinstance(equality, exp.EQ)
+                    and isinstance(left, exp.Column)
+                    and isinstance(right, exp.Column)
+                    and left.table != right.table
+                    and {left.table, right.table} <= set(scope.selected_sources)
+                ):
+                    continue
+                ends = [self.resolve(scope, side) for side in (left, right)]
+                if all(len(e) == 1 and isinstance(e[0], _End) for e in ends):
+                    a, b = sorted(((e[0].rel, e[0].column) for e in ends), key=_join_key)
+                    if a != b:
+                        self.joins[(a, b)] = None
+
+    # ---- the statement's result
+
+    def root(self) -> Scope:
+        """The scope of the statement's own query."""
+        root = self.scopes[-1]
+        query = root.expression
+        while isinstance(query, exp.Subquery):  # COPY (SELECT ...)
+            query = query.this
+        return {id(s.expression): s for s in self.scopes}.get(id(query), root)
+
+    def shape(
+        self, scope: Scope, trail: frozenset[int] = frozenset()
+    ) -> tuple[list[tuple[str, _End | None]], list[tuple[Rel, frozenset[str]]]]:
+        """A query's result as (its named columns, each with its pass-through
+        origin; the source relations a ``*`` passes through, each with the
+        columns the ``*`` leaves out)."""
+        query = scope.expression
+        if id(scope) in trail or not isinstance(query, _QUERY):
+            return [], []
+        trail = trail | {id(scope)}
+        outputs: list[tuple[str, _End | None]] = []
+        stars: list[tuple[Rel, frozenset[str]]] = []
+        if isinstance(query, exp.SetOperation):
+            for position, leaf in enumerate(self.leaves(scope)):
+                named, passed = self.shape(leaf, trail)
+                if position == 0:  # the first branch names them; each is several columns
+                    outputs = [(name, None) for name, _ in named]
+                stars += passed
+            return outputs, stars
+        for select in query.selects:
+            star = _star(select)
+            if star is None:
+                reads = self.follow(scope, select, frozenset())
+                origin = reads[0] if len(reads) == 1 and isinstance(reads[0], _End) else None
+                outputs.append((select.alias_or_name, origin))
+                continue
+            excluded, replaced = _left_out(star)
+            left_out = frozenset(excluded | {r.lower() for r in replaced})
+            only = select.table if isinstance(select, exp.Column) else None
+            for alias, (_, source) in scope.selected_sources.items():
+                if only and alias != only:
+                    continue
+                source = self.source(source)
+                if isinstance(source, tuple):
+                    stars += [(rel, left_out) for rel in source]
+                elif isinstance(source, Scope):
+                    named, passed = self.shape(source, trail)
+                    outputs += [(n, o) for n, o in named if n.lower() not in left_out]
+                    stars += [(rel, out | left_out) for rel, out in passed]
+            outputs += [(name, None) for name in replaced]
+        return outputs, stars
 
     def source(self, source: Any) -> Any:
         """A scope's source as what a column read from it reads: source
@@ -518,6 +742,9 @@ def scan(
             Unresolved(column, frozenset(roles), candidates, nested)
             for (column, candidates, nested), roles in scanner.unresolved.items()
         ),
+        joins=tuple(scanner.joins),
+        outputs=scanner.outputs,
+        star=scanner.star,
         created=scanner.created,
         errors=tuple(scanner.errors),
     )
