@@ -364,6 +364,82 @@ def enrich(
     return columns
 
 
+@dataclass
+class Curation:
+    """``$QSQL_HOME/usage/curation.yaml``: what a person adds to the ranking.
+    ``pin`` and ``hide`` are globs on ``engine:table.column`` (``file:`` for a
+    file; ``hide`` also takes ``engine:table``, for the whole table); ``notes``
+    maps such a glob to a note shown next to the columns it matches."""
+
+    pin: list[str] = field(default_factory=list)
+    hide: list[str] = field(default_factory=list)
+    notes: dict[str, str] = field(default_factory=dict)
+
+
+def read_curation(path: Path) -> Curation:
+    """The curation file, an empty one when there's none. Raises QsqlError
+    for a file that isn't what it should be: silently ignoring a hide list
+    would show what someone hid."""
+    import yaml
+
+    from .errors import QsqlError
+
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return Curation()
+    except OSError as exc:
+        raise QsqlError(f"usage: can't read {path}: {exc}") from exc
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise QsqlError(f"usage: {path} isn't YAML: {exc}") from exc
+    raw = {} if raw is None else raw
+    pin, hide, notes = (
+        (raw.get(key) or kind() if isinstance(raw, dict) else None)
+        for key, kind in (("pin", list), ("hide", list), ("notes", dict))
+    )
+    if not (isinstance(pin, list) and isinstance(hide, list) and isinstance(notes, dict)):
+        raise QsqlError(
+            f"usage: {path} should be a mapping of `pin` and `hide` (lists of"
+            " engine:table.column globs) and `notes` (glob: note)"
+        )
+    return Curation(
+        [str(p) for p in pin], [str(h) for h in hide], {str(k): str(v) for k, v in notes.items()}
+    )
+
+
+def curate(tables: list[TableUsage], curation: Curation) -> list[TableUsage]:
+    """Apply a curation: hidden tables and columns go, pinned columns come
+    first, notes attach."""
+    from fnmatch import fnmatchcase
+
+    def matches(name: str, patterns: Iterable[str]) -> bool:
+        return any(fnmatchcase(name, pattern) for pattern in patterns)
+
+    kept = []
+    for table in tables:
+        owner = f"{table.engine or table.kind}:{table.name}"
+        if matches(owner, curation.hide):
+            continue
+        columns = []
+        for column in table.columns:
+            name = f"{owner}.{column.name}"
+            if matches(name, curation.hide):
+                continue
+            column.pinned = matches(name, curation.pin)
+            column.note = next(
+                (note for glob, note in curation.notes.items() if fnmatchcase(name, glob)), ""
+            )
+            columns.append(column)
+        table.columns = sorted(columns, key=lambda c: not c.pinned)  # stable: score within
+        table.unresolved = [
+            c for c in table.unresolved if not matches(f"{owner}.{c.name}", curation.hide)
+        ]
+        kept.append(table)
+    return kept
+
+
 def report(
     projects: Sequence[Any] = (),
     *,
@@ -413,6 +489,7 @@ def report(
             found = known.get(column.name.lower())
             column.missing = found is None
             column.type, column.description = found or ("", "")
+    tables = curate(tables, read_curation(UsageLog().root / "curation.yaml"))
     return Report(tables, today, days, half_life, paths)
 
 

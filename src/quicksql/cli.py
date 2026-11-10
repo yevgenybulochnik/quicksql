@@ -649,7 +649,11 @@ def usage_cmd(
     if load and not notebooks:
         raise typer.BadParameter("needs a NOTEBOOK: its catalogs are what loads", param_hint="--load")
     projects = [_project(notebook, sets, plugins) for notebook in notebooks or []]
-    found = usage.report(projects, days=days, half_life=half_life, engine=engine, load=load)
+    try:
+        found = usage.report(projects, days=days, half_life=half_life, engine=engine, load=load)
+    except QsqlError as exc:  # a curation file that doesn't read
+        typer.secho(str(exc), fg="red")
+        raise typer.Exit(EXIT_FAILED)
     if json_out:
         typer.echo(json.dumps(usage.to_json(found, top, columns)))
     elif markdown:
