@@ -434,7 +434,7 @@ def test_a_logged_line_says_what_the_cell_read_and_no_sql(nb, on) -> None:
         "errors": [],
     }
     raw = b"".join(p.read_bytes() for p in UsageLog().root.iterdir())
-    assert b"secret-literal" not in raw and b"select" not in raw.lower()
+    assert b"secret-literal" not in raw and b"<>" not in raw and b" from " not in raw.lower()
 
 
 def test_unresolved_columns_and_scan_errors_are_logged(nb, on) -> None:

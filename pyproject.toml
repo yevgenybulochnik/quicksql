@@ -73,6 +73,7 @@ source_modules = [
     "quicksql.config",
     "quicksql.errors",
     "quicksql.graph",
+    "quicksql.home",
     "quicksql.models",
     "quicksql.overrides",
     "quicksql.parser",
@@ -82,7 +83,7 @@ source_modules = [
     # the usage scanner: sqlglot and executors.base only
     "quicksql.sqlscan",
     "quicksql.state",
-    # the usage log on disk: stdlib and state ($QSQL_HOME) only
+    # the usage log on disk: stdlib and home ($QSQL_HOME) only
     "quicksql.usage_log",
     # the contracts extensions implement; the package __init__s are core: they only
     # re-export their base module

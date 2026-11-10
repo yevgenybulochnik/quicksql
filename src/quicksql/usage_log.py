@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from .state import quicksql_home
+from .home import quicksql_home
 
 VERSION = 1
 RETENTION_DAYS = 365

@@ -695,3 +695,42 @@ the curation file.
   - the latency budget covers the seed and the prune/compact check;
   - BigQuery script blocks and date-sharded tables are out of scope;
   - the `public` assumption, DSN spellings and the unguarded sqlglot upgrade are risks.
+
+## Changes made while building (2026-11-10)
+
+Where a step didn't work as written, the smallest change that keeps its intent:
+
+- **`home.py` holds `$QSQL_HOME`** (step 8). The plan had `usage_log` import `state` for
+  `quicksql_home`. The extensions contract is transitive and counts `TYPE_CHECKING`
+  imports, so `plugins.usage -> usage_log -> state -> compiler` broke it. `HOME_ENV` and
+  `quicksql_home` moved to a new core module, `quicksql.home`, which imports nothing of
+  quicksql; `state` still exports `quicksql_home`, so no caller changed.
+- **`Unresolved` carries `nested`** (steps 3, 7, 14). The report resolves candidates from
+  nested scopes to the innermost that has the column, and flat ones to the only one that
+  has it; the plan's dataclass and log line had no way to tell the two apart. Logged as
+  `"nested": true|false` on each unresolved entry.
+- **Statement indexes count from 1** (step 2), as `RunResult.statement` does; `(0, "too
+  large")` is then the one error that names no statement.
+- **BigQuery doesn't expand alias references** (step 3). The plan says `qualify` expands a
+  WHERE or lateral alias reference "in every dialect"; on 30.12.0 it does in DuckDB and
+  Postgres, and in BigQuery it qualifies the reference as a column of the table
+  (`orders.revenue`). That is right for BigQuery, where neither clause can see a select
+  alias. Both behaviours are pinned.
+- **A bare column in a LATERAL subquery** (step 4). `qualify` rewrites `b` in
+  `lateral (select b from u where …)` to a field of a column `u` on the enclosing table.
+  The scanner reads that back as the column `b`, unresolved (inner relation first), and
+  drops any other struct guess `qualify` makes inside a correlated subquery.
+- **An UNNEST or other non-query derived relation is a null candidate** (step 4): its
+  output columns aren't known (a BigQuery UNNEST of structs exposes their fields), so an
+  unqualified column beside one stays unresolved rather than being credited to the table.
+- **A CTE or subquery that names its columns rules itself in or out inside the scan**
+  (step 4), the rule the plan gives the recorder for `ref()` candidates: `qualify` places
+  a column on a derived relation that outputs it, and one that doesn't is no candidate,
+  so a single table left over is the read.
+- **`LOAD` is a `Command` to sqlglot** (step 2). It is let through by keyword as a
+  statement that reads nothing; every other `Command` is `unsupported:Command`.
+- **A replacement scan keeps its path as written** (step 2): DuckDB's dialect folds a
+  quoted identifier's case, so the scanner notes each table's name before `qualify`.
+- **An unwritable log is reported by raising once** (step 8). `after_run` gets no run
+  context, so the one channel to the run's log is the contained failure `_notify`
+  records; the recorder raises on the first failed write per process and is silent after.

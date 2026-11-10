@@ -91,7 +91,7 @@ _NO_READ = tuple(
         "Create", "Drop", "Insert", "Set", "Attach", "Detach", "Use", "Alter", "Comment",
         "TruncateTable", "Transaction", "Commit", "Rollback", "Pragma", "Analyze", "Grant",
         "Install", "Declare", "Describe", "Show", "Values", "Copy",
-    )  # fmt: skip
+    )
     if (kind := getattr(exp, name, None)) is not None
 )
 # a Command (sqlglot's fallback for syntax it doesn't model) that reads nothing
