@@ -299,6 +299,16 @@ def _digest(text: str, length: int) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:length]
 
 
+def context_of(project: Any, cell: Any) -> str:
+    """The context a cell's tables are logged on: its executor's context
+    identity, hashed (an identity can carry a DSN). An in-memory database has
+    none, and nothing outside its notebook can read it: the notebook's path
+    stands in."""
+    executor = project.registries.executors.get(cell.engine)
+    identity = executor.context_identity(cell.config, project.root)
+    return _digest(identity or f"{cell.engine}:{project.path.resolve()}", 12)
+
+
 def _scans(project: Any, state: _State) -> dict[str, CellScan]:
     """Every cell of the notebook, scanned (memoized) and placed on its context."""
     from ..sqlscan import scan
@@ -332,7 +342,6 @@ def _scans(project: Any, state: _State) -> dict[str, CellScan]:
         except QsqlError:  # a sink that can't say (no DSN): nothing to match
             return None
 
-    notebook = str(project.path.resolve())
     cells: dict[str, CellScan] = {}
     for name in project.order:
         cell = project.cells[name]
@@ -343,9 +352,7 @@ def _scans(project: Any, state: _State) -> dict[str, CellScan]:
             if expr is not None:
                 refs[expr] = ref
         found = scanned(cell.sql, executor.dialect, refs, cell.engine == conduit.ENGINE)
-        # an in-memory database has no identity: only this notebook reads it
-        identity = executor.context_identity(cell.config, project.root)
-        context = _digest(identity or f"{cell.engine}:{notebook}", 12)
+        context = context_of(project, cell)
         landed = None
         expr = relation(name)
         if expr is not None:

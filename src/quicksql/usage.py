@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Iterable
+from pathlib import Path
+from typing import Any, Iterable, Sequence
 
 # (engine, context, kind, parts); a file: (None, None, "file", (path,))
 TableId = tuple[str | None, str | None, str, tuple[str, ...]]
@@ -199,20 +200,63 @@ class Report:
     notebooks: list[str] = field(default_factory=list)  # the ones it was asked about
 
 
+def keep(
+    usage: Usage,
+    contexts: set[tuple[str | None, str | None]],
+    notebooks: set[str],
+    directories: list[str],
+) -> None:
+    """Narrow ``usage`` to a notebook's world: the tables on ``contexts``,
+    and the files one of ``notebooks`` read or that sit under one of
+    ``directories``."""
+
+    def kept(table: TableId) -> bool:
+        if table[2] != "file":
+            return (table[0], table[1]) in contexts
+        if any(notebook in notebooks for notebook, _ in usage.tables[table]):
+            return True
+        return any(table[3][0].startswith(d.rstrip("/") + "/") for d in directories)
+
+    for table in [t for t in usage.tables if not kept(t)]:
+        del usage.tables[table]
+
+
+def _label(cells: list[str]) -> str:
+    shown = cells[:3] + ([f"+{len(cells) - 3}"] if len(cells) > 3 else [])
+    return "context of " + ", ".join(shown)
+
+
 def report(
+    projects: Sequence[Any] = (),
     *,
     today: date | None = None,
     days: int = 90,
     half_life: float = 30.0,
     engine: str | None = None,
 ) -> Report:
-    """What the log holds for the last ``days`` days, every context."""
+    """What the log holds for the last ``days`` days. With ``projects``
+    (compiled notebooks): what every logged notebook read on their contexts,
+    each context named by their cells on it. Without: every context, by its
+    hash. Logged notebooks are only read about, never compiled."""
+    from .plugins.usage import context_of
     from .usage_log import UsageLog
 
     today = today or date.today()
     since = (today - timedelta(days=days)).isoformat()
     usage = collect(UsageLog().read(since=since), today, days)
-    return Report(rank(usage, today, half_life, engine), today, days, half_life)
+    cells: dict[tuple[str | None, str | None], list[str]] = {}
+    for project in projects:
+        for name in project.order:
+            cell = project.cells[name]
+            cells.setdefault((cell.engine, context_of(project, cell)), []).append(name)
+    paths = [str(project.path.resolve()) for project in projects]
+    if projects:
+        keep(usage, set(cells), set(paths), [str(Path(p).parent) for p in paths])
+    tables = rank(usage, today, half_life, engine)
+    for table in tables:
+        if (table.engine, table.context) in cells:
+            table.label = _label(cells[(table.engine, table.context)])
+    return Report(tables, today, days, half_life, paths)
 
 
 ROLE_ORDER = ("select", "from", "join", "where", "group", "having", "window", "order")

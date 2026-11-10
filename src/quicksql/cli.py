@@ -606,6 +606,11 @@ def directives_cmd(
 
 @app.command("usage")
 def usage_cmd(
+    notebooks: Optional[list[Path]] = typer.Argument(
+        None, help="Report on these notebooks' contexts (none: every context, by its hash)"
+    ),
+    sets: Optional[list[str]] = SET_OPT,
+    plugins: Optional[list[str]] = PLUGINS_OPT,
     days: int = typer.Option(90, "--days", min=1, help="Read the last N days of the log"),
     top: int = typer.Option(20, "--top", min=1, help="Show the N highest-scoring tables"),
     columns: int = typer.Option(15, "--columns", min=0, help="Show N columns per table"),
@@ -622,15 +627,20 @@ def usage_cmd(
 
     Ranked from the usage log, which records nothing unless QSQL_USAGE=1 is
     set where notebooks run (run, watch, tui). A use is a (notebook, day);
-    score weighs recent uses. Reads only the log, so it works while a TUI has
-    a notebook open."""
+    score weighs recent uses.
+
+    With NOTEBOOKS, each compiles as `run` would (--set, --plugins) and the
+    report shows what every logged notebook read on their contexts, named by
+    their cells. Only the notebooks named compile. It reads only files, so it
+    works while a TUI has a notebook open."""
     from . import usage
 
     if half_life <= 0:
         raise typer.BadParameter("must be more than 0", param_hint="--half-life")
     if json_out and markdown:
         raise typer.BadParameter("choose one of --json and --markdown")
-    found = usage.report(days=days, half_life=half_life, engine=engine)
+    projects = [_project(notebook, sets, plugins) for notebook in notebooks or []]
+    found = usage.report(projects, days=days, half_life=half_life, engine=engine)
     if json_out:
         typer.echo(json.dumps(usage.to_json(found, top, columns)))
     elif markdown:
