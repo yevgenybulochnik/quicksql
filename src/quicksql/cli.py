@@ -604,6 +604,41 @@ def directives_cmd(
     typer.echo("sinks:   " + ", ".join(s["name"] for s in vocabulary.sinks(registries)))
 
 
+@app.command("usage")
+def usage_cmd(
+    days: int = typer.Option(90, "--days", min=1, help="Read the last N days of the log"),
+    top: int = typer.Option(20, "--top", min=1, help="Show the N highest-scoring tables"),
+    columns: int = typer.Option(15, "--columns", min=0, help="Show N columns per table"),
+    engine: Optional[str] = typer.Option(
+        None, "--engine", help="Only tables on this engine (file: the files)"
+    ),
+    half_life: float = typer.Option(
+        30.0, "--half-life", help="Days for a use to count half as much"
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print one JSON document instead"),
+    markdown: bool = typer.Option(False, "--markdown", help="Print Markdown, an agent's format"),
+) -> None:
+    """The source tables notebooks read, and the columns they read from them.
+
+    Ranked from the usage log, which records nothing unless QSQL_USAGE=1 is
+    set where notebooks run (run, watch, tui). A use is a (notebook, day);
+    score weighs recent uses. Reads only the log, so it works while a TUI has
+    a notebook open."""
+    from . import usage
+
+    if half_life <= 0:
+        raise typer.BadParameter("must be more than 0", param_hint="--half-life")
+    if json_out and markdown:
+        raise typer.BadParameter("choose one of --json and --markdown")
+    found = usage.report(days=days, half_life=half_life, engine=engine)
+    if json_out:
+        typer.echo(json.dumps(usage.to_json(found, top, columns)))
+    elif markdown:
+        typer.echo(usage.to_markdown(found, top, columns), nl=False)
+    else:
+        typer.echo(usage.to_text(found, top, columns), nl=False)
+
+
 # ---------- quicksql live: an agent alongside the open TUI ----------
 
 live_app = typer.Typer(

@@ -181,4 +181,234 @@ def rank(
                 unresolved=sorted(unresolved, key=lambda c: (-c.score, c.name)),
             )
         )
-    return sorted(tables, key=lambda t: (-t.score, t.kind, t.parts, t.engine or "", t.context or ""))
+    return sorted(
+        tables,
+        key=lambda t: (-t.score, t.kind == "file", t.parts, t.engine or "", t.context or ""),
+    )
+
+
+# ---- the report
+
+
+@dataclass
+class Report:
+    tables: list[TableUsage]  # ranked, uncut
+    today: date
+    days: int
+    half_life: float
+    notebooks: list[str] = field(default_factory=list)  # the ones it was asked about
+
+
+def report(
+    *,
+    today: date | None = None,
+    days: int = 90,
+    half_life: float = 30.0,
+    engine: str | None = None,
+) -> Report:
+    """What the log holds for the last ``days`` days, every context."""
+    from .usage_log import UsageLog
+
+    today = today or date.today()
+    since = (today - timedelta(days=days)).isoformat()
+    usage = collect(UsageLog().read(since=since), today, days)
+    return Report(rank(usage, today, half_life, engine), today, days, half_life)
+
+
+ROLE_ORDER = ("select", "from", "join", "where", "group", "having", "window", "order")
+
+
+def _roles(roles: Iterable[str]) -> list[str]:
+    """Roles in the order a query's clauses are written."""
+    return sorted(roles, key=lambda r: (ROLE_ORDER.index(r) if r in ROLE_ORDER else 99, r))
+
+
+def _short(notebook: str) -> str:
+    """A notebook's path as its directory and name: enough to tell two apart."""
+    return "/".join(notebook.rsplit("/", 2)[-2:])
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _heading(table: TableUsage) -> str:
+    where = "" if table.kind == "file" else f" — {table.label or f'context {table.context}'}"
+    return (
+        f"{table.engine or table.kind} · {table.name}{where}"
+        f" · {_plural(len(table.notebooks), 'notebook')}, score {table.score:.1f}"
+    )
+
+
+def _used_in(table: TableUsage) -> str:
+    shown = [f"{_short(path)} ({uses})" for path, uses in table.notebooks[:3]]
+    more = len(table.notebooks) - len(shown)
+    return ", ".join(shown + ([f"+{more}"] if more > 0 else []))
+
+
+def _side(column: ColumnId) -> str:
+    """``claims.member_id``: a join's side by its table's own name."""
+    (_, _, kind, parts), name = column
+    owner = parts[-1].rsplit("/", 1)[-1] if kind == "file" else parts[-1]
+    return f"{owner}.{name}"
+
+
+def _joins(table: TableUsage) -> str:
+    return " · ".join(f"{_side(j.left)} = {_side(j.right)} ({j.uses})" for j in table.joins)
+
+
+def _note(column: ColumnUsage) -> str:
+    said = [
+        "pinned" if column.pinned else "",
+        column.note,
+        column.description,
+        "no longer in the table" if column.missing else "",
+    ]
+    return "; ".join(part for part in said if part)
+
+
+def _unresolved(table: TableUsage) -> str:
+    return ", ".join(f"{c.name} ({c.uses})" for c in table.unresolved)
+
+
+def hint(found: Report) -> str:
+    """What an empty report says: nothing was recorded, and how recording
+    is turned on."""
+    return (
+        f"no usage recorded in the last {found.days} days: recording is opt-in, set"
+        " QSQL_USAGE=1 where notebooks run (quicksql run, watch, tui)"
+    )
+
+
+def to_json(found: Report, top: int = 20, columns: int = 15) -> dict[str, Any]:
+    def column(c: ColumnUsage) -> dict[str, Any]:
+        return {
+            "name": c.name,
+            "score": round(c.score, 3),
+            "uses": c.uses,
+            "roles": _roles(c.roles),
+            "type": c.type,
+            "description": c.description,
+            "note": c.note,
+            "pinned": c.pinned,
+            "missing": c.missing,
+        }
+
+    def side(end: ColumnId) -> dict[str, str]:
+        return {"table": ".".join(end[0][3]), "column": end[1]}
+
+    doc: dict[str, Any] = {
+        "today": found.today.isoformat(),
+        "days": found.days,
+        "half_life": found.half_life,
+        "notebooks": found.notebooks,
+        "tables": [
+            {
+                "engine": t.engine,
+                "context": t.context,
+                "context_label": t.label,
+                "kind": t.kind,
+                "name": t.name,
+                "parts": list(t.parts),
+                "score": round(t.score, 3),
+                "uses": t.uses,
+                "stars": t.stars,
+                "notebooks": [{"path": path, "uses": uses} for path, uses in t.notebooks],
+                "columns": [column(c) for c in t.columns[:columns]],
+                "joins": [
+                    {
+                        "left": side(j.left),
+                        "right": side(j.right),
+                        "uses": j.uses,
+                        "score": round(j.score, 3),
+                    }
+                    for j in t.joins
+                ],
+                "unresolved": [
+                    {"name": c.name, "uses": c.uses, "roles": _roles(c.roles)}
+                    for c in t.unresolved
+                ],
+            }
+            for t in found.tables[:top]
+        ],
+    }
+    if not found.tables:
+        doc["hint"] = hint(found)
+    return doc
+
+
+def _row(cells: Iterable[Any]) -> str:
+    return "|" + "".join(f" {cell} |" if str(cell) else " |" for cell in cells)
+
+
+def to_markdown(found: Report, top: int = 20, columns: int = 15) -> str:
+    """The agent's format: a section per table, its columns as a table."""
+    if not found.tables:
+        return hint(found) + "\n"
+    out = [
+        f"# quicksql usage: last {found.days} days",
+        "",
+        "A use is a (notebook, day) that read it; score weighs recent uses"
+        f" (half-life {found.half_life:g} days).",
+    ]
+    for table in found.tables[:top]:
+        out += ["", f"## {_heading(table)}", f"Used in: {_used_in(table)}"]
+        out += [_row(("column", "type", "uses", "read as", "note")), "|---|---|---|---|---|"]
+        out += [
+            _row((c.name, c.type, c.uses, ", ".join(_roles(c.roles)), _note(c)))
+            for c in table.columns[:columns]
+        ]
+        more = len(table.columns) - columns
+        if more > 0:
+            out.append(f"+{_plural(more, 'more column')}")
+        if table.joins:
+            out.append(f"Joins: {_joins(table)}")
+        if table.stars:
+            out.append(f"Read with `select *`: {table.stars}")
+        if table.unresolved:
+            out.append(
+                f"Unresolved (this table or another in the query has it): {_unresolved(table)}"
+            )
+    more = len(found.tables) - top
+    if more > 0:
+        out += ["", f"+{_plural(more, 'more table')}"]
+    return "\n".join(out) + "\n"
+
+
+def to_text(found: Report, top: int = 20, columns: int = 15) -> str:
+    if not found.tables:
+        return hint(found) + "\n"
+    out = [
+        f"usage: last {found.days} days; a use is a (notebook, day), score weighs recent"
+        f" uses (half-life {found.half_life:g} days)"
+    ]
+    for table in found.tables[:top]:
+        out += ["", _heading(table), f"  used in: {_used_in(table)}"]
+        rows = [("column", "type", "uses", "read as", "note")] + [
+            (c.name, c.type, str(c.uses), ", ".join(_roles(c.roles)), _note(c))
+            for c in table.columns[:columns]
+        ]
+        if len(rows) > 1:
+            widths = [max(len(row[i]) for row in rows) for i in range(4)]
+            for row in rows:
+                cells = [
+                    row[0].ljust(widths[0]),
+                    row[1].ljust(widths[1]),
+                    row[2].rjust(widths[2]),
+                    row[3].ljust(widths[3]),
+                    row[4],
+                ]
+                out.append(("  " + "  ".join(cells)).rstrip())
+        more = len(table.columns) - columns
+        if more > 0:
+            out.append(f"  +{_plural(more, 'more column')}")
+        if table.joins:
+            out.append(f"  joins: {_joins(table)}")
+        if table.stars:
+            out.append(f"  select *: {table.stars}")
+        if table.unresolved:
+            out.append(f"  unresolved: {_unresolved(table)}")
+    more = len(found.tables) - top
+    if more > 0:
+        out += ["", f"+{_plural(more, 'more table')}"]
+    return "\n".join(out) + "\n"
