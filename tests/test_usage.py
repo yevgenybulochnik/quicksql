@@ -672,9 +672,9 @@ def test_unresolved_columns_resolve_when_every_candidate_is_known(wh) -> None:
     )
     cache = CatalogCache()
     before = by_name(usage_report.report([project], cache=cache).tables)
-    assert [c.name for c in before["dbo.orders"].unresolved] == ["amount", "cid", "id", "name"]
+    assert {c.name for c in before["orders"].unresolved} == {"amount", "cid", "id", "name"}
     after = by_name(usage_report.report([project], cache=cache, load=True).tables)
-    orders, customers = after["dbo.orders"], after["dbo.customers"]
+    orders, customers = after["orders"], after["customers"]
     assert {c.name: c.roles for c in orders.columns} == {"amount": ["select", "where"]}
     assert {c.name: c.roles for c in customers.columns} == {"name": ["select"], "id": ["join"]}
     assert [c.name for c in orders.unresolved] == ["cid", "id"]

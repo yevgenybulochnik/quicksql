@@ -620,6 +620,11 @@ def usage_cmd(
     half_life: float = typer.Option(
         30.0, "--half-life", help="Days for a use to count half as much"
     ),
+    load: bool = typer.Option(
+        False,
+        "--load",
+        help="Load the columns of tables the catalog doesn't have on disk (DuckDB, SQLite, files)",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Print one JSON document instead"),
     markdown: bool = typer.Option(False, "--markdown", help="Print Markdown, an agent's format"),
 ) -> None:
@@ -631,7 +636,9 @@ def usage_cmd(
 
     With NOTEBOOKS, each compiles as `run` would (--set, --plugins) and the
     report shows what every logged notebook read on their contexts, named by
-    their cells. Only the notebooks named compile. It reads only files, so it
+    their cells, with types and descriptions from the catalog on disk
+    (BigQuery, Postgres; --load reaches the engines for the rest). Only the
+    notebooks named compile. It reads only files, so it
     works while a TUI has a notebook open."""
     from . import usage
 
@@ -639,8 +646,10 @@ def usage_cmd(
         raise typer.BadParameter("must be more than 0", param_hint="--half-life")
     if json_out and markdown:
         raise typer.BadParameter("choose one of --json and --markdown")
+    if load and not notebooks:
+        raise typer.BadParameter("needs a NOTEBOOK: its catalogs are what loads", param_hint="--load")
     projects = [_project(notebook, sets, plugins) for notebook in notebooks or []]
-    found = usage.report(projects, days=days, half_life=half_life, engine=engine)
+    found = usage.report(projects, days=days, half_life=half_life, engine=engine, load=load)
     if json_out:
         typer.echo(json.dumps(usage.to_json(found, top, columns)))
     elif markdown:

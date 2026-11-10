@@ -226,6 +226,144 @@ def _label(cells: list[str]) -> str:
     return "context of " + ", ".join(shown)
 
 
+def _renamed(usage: Usage, names: dict[TableId, TableId]) -> None:
+    """Fold each table of ``names`` into the one it maps to: two spellings
+    of one table are one table, used once per (notebook, day)."""
+
+    def to(table: TableId) -> TableId:
+        return names.get(table, table)
+
+    def fold(found: dict[Any, set[Any]], rename: Any) -> dict[Any, set[Any]]:
+        out: dict[Any, set[Any]] = {}
+        for key, value in found.items():
+            out.setdefault(rename(key), set()).update(value)
+        return out
+
+    def column(key: ColumnId) -> ColumnId:
+        return (to(key[0]), key[1])
+
+    def open_(key: OpenId) -> OpenId:
+        return (key[0], tuple(dict.fromkeys(c if c is None else to(c) for c in key[1])), key[2])
+
+    usage.tables = fold(usage.tables, to)
+    usage.stars = fold(usage.stars, to)
+    usage.columns = fold(usage.columns, column)
+    usage.roles = fold(usage.roles, column)
+    usage.joins = fold(usage.joins, lambda j: (column(j[0]), column(j[1])))
+    usage.unresolved = fold(usage.unresolved, open_)
+    usage.unresolved_roles = fold(usage.unresolved_roles, open_)
+
+
+def _file_leaf(path: str, registries: Any) -> Any:
+    """A file's columns, read through DuckDB with the notebook's reader for
+    its extension: a catalog leaf, so the cache holds it like a table's."""
+    from .conduit import duckdb_field_paths, load_extension
+    from .models import CatalogNode
+    from .sources import reader_for
+
+    def load() -> Any:
+        import duckdb
+
+        reader = reader_for(path, None, registries.readers)
+        con = duckdb.connect()
+        try:
+            for extension in reader.requires:
+                load_extension(con, extension)
+            relation = con.sql(f"SELECT * FROM {reader.expr(path)} LIMIT 0")
+            return duckdb_field_paths(relation.columns, relation.types)
+        finally:
+            con.close()
+
+    return CatalogNode(title=f"file:{path}", load=load)
+
+
+# a table's columns from its catalog leaf: lower-cased name -> (type, description)
+Columns = dict[str, tuple[str, str]]
+
+
+def enrich(
+    usage: Usage,
+    contexts: dict[tuple[str | None, str | None], tuple[Any, Any]],
+    cache: Any,
+    load: bool,
+) -> dict[TableId, Columns]:
+    """Bring the catalog to ``usage``, for the tables on ``contexts`` (each
+    with the named notebook's (project, cell) that reaches it) and the files:
+
+    * two spellings whose leaves share a ``cache_key`` (``orders`` and
+      ``public.orders``) become one table: building a leaf loads nothing;
+    * a table's columns come from its leaf's frame when the cache has it at
+      hand (memory, or the disk for an engine that persists); ``load`` loads
+      the ones that are missing;
+    * an unresolved column resolves when every candidate's columns are
+      known: to the first candidate that has it when they come from nested
+      scopes (innermost first), else to the only one that has it.
+
+    Returns the columns of each table whose frame was at hand."""
+    from .catalog import stamp
+
+    leaves: dict[TableId, Any] = {}
+    for table in usage.tables:
+        engine, context, kind, parts = table
+        try:
+            if kind == "file":
+                if load and contexts:
+                    project = next(iter(contexts.values()))[0]
+                    leaves[table] = _file_leaf(parts[0], project.registries)
+                continue
+            project, cell = contexts[(engine, context)]
+            executor = project.registries.executors.get(cell.engine)
+            leaf = executor.catalog_table(cell.config, project.root, list(parts))
+            if leaf is not None:
+                leaves[table] = stamp(
+                    leaf, scope=executor.context_key(cell.config), persist=executor.catalog_persists
+                )
+        except Exception:  # an engine that can't say: the table stays as logged
+            continue
+
+    # one table per leaf, under its most qualified spelling
+    spellings: dict[tuple[Any, ...], list[TableId]] = {}
+    for table, leaf in leaves.items():
+        spellings.setdefault((table[0], table[1], leaf.cache_key), []).append(table)
+    names = {}
+    for same in spellings.values():
+        canonical = max(same, key=lambda t: (len(t[3]), t[3]))
+        names.update({table: canonical for table in same if table != canonical})
+        leaves[canonical] = leaves[same[0]]
+    _renamed(usage, names)
+
+    columns: dict[TableId, Columns] = {}
+    for table in usage.tables:
+        leaf = leaves.get(table)
+        if leaf is None:
+            continue
+        frame = cache.at_hand(leaf)
+        if frame is None and load:
+            try:
+                frame = cache.load(leaf)[0]
+            except Exception:  # unreachable, or gone: no columns for it
+                continue
+        if frame is None or not {"column", "field_path", "type"} <= set(frame.columns):
+            continue
+        columns[table] = {
+            str(row["column"]).lower(): (str(row["type"] or ""), str(row.get("description") or ""))
+            for row in frame.iter_rows(named=True)
+            if row["column"] == row["field_path"]  # top-level columns
+        }
+
+    for key in list(usage.unresolved):
+        name, candidates, nested = key
+        if not all(c is not None and c in columns for c in candidates):
+            continue  # a candidate nobody can check keeps it unresolved
+        having = [c for c in candidates if name.lower() in columns[c]]
+        if not having or (not nested and len(having) > 1):
+            continue
+        column = (having[0], name)
+        usage.columns.setdefault(column, set()).update(usage.unresolved.pop(key))
+        usage.roles.setdefault(column, set()).update(usage.unresolved_roles.pop(key))
+    return columns
+
+
 def report(
     projects: Sequence[Any] = (),
     *,
@@ -233,11 +371,15 @@ def report(
     days: int = 90,
     half_life: float = 30.0,
     engine: str | None = None,
+    load: bool = False,
+    cache: Any = None,
 ) -> Report:
     """What the log holds for the last ``days`` days. With ``projects``
     (compiled notebooks): what every logged notebook read on their contexts,
-    each context named by their cells on it. Without: every context, by its
-    hash. Logged notebooks are only read about, never compiled."""
+    each context named by their cells on it, enriched from their catalogs
+    (``enrich``; ``cache`` is a ``CatalogCache``, the default one when None).
+    Without: every context, by its hash. Logged notebooks are only read
+    about, never compiled."""
     from .plugins.usage import context_of
     from .usage_log import UsageLog
 
@@ -245,17 +387,32 @@ def report(
     since = (today - timedelta(days=days)).isoformat()
     usage = collect(UsageLog().read(since=since), today, days)
     cells: dict[tuple[str | None, str | None], list[str]] = {}
+    reach: dict[tuple[str | None, str | None], tuple[Any, Any]] = {}
     for project in projects:
         for name in project.order:
             cell = project.cells[name]
-            cells.setdefault((cell.engine, context_of(project, cell)), []).append(name)
+            context = (cell.engine, context_of(project, cell))
+            cells.setdefault(context, []).append(name)
+            reach.setdefault(context, (project, cell))
     paths = [str(project.path.resolve()) for project in projects]
+    columns: dict[TableId, Columns] = {}
     if projects:
         keep(usage, set(cells), set(paths), [str(Path(p).parent) for p in paths])
+        if usage.tables:
+            if cache is None:
+                from .catalog import default_cache
+
+                cache = default_cache()
+            columns = enrich(usage, reach, cache, load)
     tables = rank(usage, today, half_life, engine)
     for table in tables:
         if (table.engine, table.context) in cells:
             table.label = _label(cells[(table.engine, table.context)])
+        known = columns.get(table.id)
+        for column in table.columns if known is not None else ():
+            found = known.get(column.name.lower())
+            column.missing = found is None
+            column.type, column.description = found or ("", "")
     return Report(tables, today, days, half_life, paths)
 
 
