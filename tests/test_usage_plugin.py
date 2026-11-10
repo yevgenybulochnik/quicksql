@@ -1,5 +1,7 @@
 """The recorder: lineage across a notebook's cells, and the UsagePlugin."""
 
+import os
+
 from quicksql.plugins.usage import CellScan, Source, lineage
 from quicksql.sqlscan import Rel, scan
 
@@ -278,3 +280,376 @@ def test_a_file_is_keyed_by_its_resolved_path_and_has_no_context() -> None:
 def test_a_scans_errors_are_the_cells() -> None:
     reads = run({"a": cell("select 'x' from where; call foo(1)")})["a"]
     assert reads.errors == ((1, "parse"), (2, "unsupported:Command"))
+
+
+# ---- the plugin: QSQL_USAGE=1 records what a run's ok cells read
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from datetime import date, timedelta  # noqa: E402
+
+import duckdb  # noqa: E402
+import pytest  # noqa: E402
+
+from quicksql.bootstrap import compile_file, compile_text  # noqa: E402
+from quicksql.plugins import usage as usage_plugin  # noqa: E402
+from quicksql.runner import run_project  # noqa: E402
+from quicksql.usage_log import UsageLog  # noqa: E402
+
+HEADER = "-- @input: {duckdb: wh.db}\n"
+
+
+@pytest.fixture
+def on(monkeypatch):
+    monkeypatch.setenv("QSQL_USAGE", "1")
+
+
+@pytest.fixture
+def nb(tmp_path):
+    """A notebook directory with a DuckDB warehouse: orders and customers."""
+    root = tmp_path / "nb"
+    root.mkdir()
+    with duckdb.connect(str(root / "wh.db")) as con:
+        con.execute("create table orders as select 1 as id, 9.5 as amount, 7 as cid, 'x' as status")
+        con.execute("create table customers as select 7 as id, 'ada' as name")
+    return root
+
+
+def write(root, text, name="nb.qsql"):
+    path = root / name
+    path.write_text(text)
+    return path
+
+
+def run_file(path):
+    """Compile and run a notebook: (results by cell, the run's notes)."""
+    notes: list[str] = []
+    results = run_project(
+        compile_file(path),
+        on_event=lambda e: notes.append(e.detail) if e.kind == "note" else None,
+    )
+    return {r.cell: r for r in results}, notes
+
+
+def logged() -> list[dict]:
+    return list(UsageLog().read())
+
+
+def context_of(identity: str) -> str:
+    return hashlib.sha256(identity.encode()).hexdigest()[:12]
+
+
+def test_the_usage_directive_defaults_on_and_inherits(tmp_path) -> None:
+    project = compile_text("-- @cell a\nselect 1;\n", root=tmp_path)
+    assert project.cells["a"].config.usage is True
+    project = compile_text(
+        "-- @usage: false\n-- @cell a\nselect 1;\n-- @cell b\n-- @usage: true\nselect 2;\n",
+        root=tmp_path,
+    )
+    assert (project.cells["a"].config.usage, project.cells["b"].config.usage) == (False, True)
+
+
+def test_the_usage_directive_never_reruns_a_cell(tmp_path) -> None:
+    from quicksql.state import own_hash
+
+    one = compile_text("-- @cell a\nselect 1;\n", root=tmp_path)
+    two = compile_text("-- @cell a\n-- @usage: false\nselect 1;\n", root=tmp_path)
+    assert own_hash(one.cells["a"], one.config) == own_hash(two.cells["a"], two.config)
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true", "yes", "11", " 1"])
+def test_recording_is_off_unless_the_variable_is_exactly_1(
+    nb, qsql_home, monkeypatch, value
+) -> None:
+    if value is not None:
+        monkeypatch.setenv("QSQL_USAGE", value)
+    results, notes = run_file(write(nb, HEADER + "-- @cell a\n-- @usage: true\nselect id from orders;\n"))
+    assert results["a"].ok
+    assert not (qsql_home / "usage").exists()
+    assert notes == []
+
+
+def test_a_run_with_recording_off_imports_no_scanner(nb, qsql_home) -> None:
+    path = write(nb, HEADER + "-- @cell a\nselect id from orders;\n")
+    code = (
+        "import sys\n"
+        "from quicksql.bootstrap import compile_file\n"
+        "from quicksql.runner import run_project\n"
+        f"assert all(r.ok for r in run_project(compile_file({str(path)!r})))\n"
+        "print(sorted(m for m in sys.modules if m in"
+        " ('quicksql.sqlscan', 'quicksql.usage_log', 'sqlglot.optimizer.qualify')))\n"
+    )
+
+    def modules(**env) -> str:
+        base = {k: v for k, v in os.environ.items() if k != "QSQL_USAGE"}
+        done = subprocess.run(
+            [sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    assert modules() == "[]"
+    assert not (qsql_home / "usage").exists()
+    assert modules(QSQL_USAGE="1") == (
+        "['quicksql.sqlscan', 'quicksql.usage_log', 'sqlglot.optimizer.qualify']"
+    )
+    assert (qsql_home / "usage").is_dir()
+
+
+def test_a_logged_line_says_what_the_cell_read_and_no_sql(nb, on) -> None:
+    path = write(
+        nb,
+        HEADER
+        + "-- @cell paid\n"
+        "select o.amount, c.name from orders o join customers c on c.id = o.cid\n"
+        "where o.status <> 'secret-literal';\n",
+    )
+    results, notes = run_file(path)
+    assert results["paid"].ok and notes == []
+    (entry,) = logged()
+    context = context_of(f"duckdb:{nb / 'wh.db'}")
+    customers = {"engine": "duckdb", "context": context, "kind": "table", "parts": ["customers"], "star": False}
+    orders = {**customers, "parts": ["orders"]}
+    assert entry.pop("at").startswith(str(date.today().year))
+    assert len(entry.pop("key")) == 16
+    assert entry == {
+        "v": 1,
+        "day": date.today().isoformat(),
+        "notebook": str(path),
+        "cell": "paid",
+        "engine": "duckdb",
+        "context": context,
+        "tables": [customers, orders],
+        "columns": [
+            {"table": 0, "column": "id", "roles": ["join"]},
+            {"table": 0, "column": "name", "roles": ["select"]},
+            {"table": 1, "column": "amount", "roles": ["select"]},
+            {"table": 1, "column": "cid", "roles": ["join"]},
+            {"table": 1, "column": "status", "roles": ["where"]},
+        ],
+        "joins": [[[0, "id"], [1, "cid"]]],
+        "unresolved": [],
+        "errors": [],
+    }
+    raw = b"".join(p.read_bytes() for p in UsageLog().root.iterdir())
+    assert b"secret-literal" not in raw and b"select" not in raw.lower()
+
+
+def test_unresolved_columns_and_scan_errors_are_logged(nb, on) -> None:
+    path = write(
+        nb,
+        HEADER
+        + "-- @cell a\n-- @output: {type: none}\n"
+        "pivot orders on status using sum(amount);\n"
+        "select amount, name from orders o join customers c on c.id = o.cid;\n",
+    )
+    results, _ = run_file(path)
+    assert results["a"].ok, results["a"].error
+    (entry,) = logged()
+    assert entry["errors"] == [[1, "unsupported:Pivot"]]
+    assert [t["parts"] for t in entry["tables"]] == [["customers"], ["orders"]]
+    assert entry["unresolved"] == [
+        {"column": "amount", "roles": ["select"], "candidates": [1, 0], "nested": False},
+        {"column": "name", "roles": ["select"], "candidates": [1, 0], "nested": False},
+    ]
+
+
+def test_only_ok_cells_are_logged(nb, on) -> None:
+    path = write(
+        nb,
+        HEADER
+        + "-- @cell good\nselect id from orders;\n"
+        "-- @cell bad\nselect nope from orders;\n"
+        "-- @cell after\nselect * from {{ ref('bad') }};\n",
+    )
+    results, _ = run_file(path)
+    assert {name: r.status for name, r in results.items()} == {
+        "good": "ok",
+        "bad": "failed",
+        "after": "skipped",
+    }
+    assert [entry["cell"] for entry in logged()] == ["good"]
+
+
+def test_usage_false_in_the_header_logs_nothing(nb, on, qsql_home) -> None:
+    results, notes = run_file(
+        write(nb, "-- @usage: false\n" + HEADER + "-- @cell a\nselect id from orders;\n")
+    )
+    assert results["a"].ok and notes == []
+    assert logged() == []
+
+
+def test_usage_false_on_a_cell_logs_no_line_and_stops_what_reads_through_it(nb, on) -> None:
+    path = write(
+        nb,
+        HEADER
+        + "-- @cell stage\n-- @usage: false\nselect * from orders;\n"
+        "-- @cell top\nselect s.amount, c.name from {{ ref('stage') }} s"
+        " join customers c on c.id = s.cid;\n",
+    )
+    run_file(path)
+    (entry,) = logged()
+    assert entry["cell"] == "top"
+    assert [t["parts"] for t in entry["tables"]] == [["customers"]]
+    assert [c["column"] for c in entry["columns"]] == ["id", "name"]
+
+
+def test_a_notebook_without_a_file_logs_nothing(nb, on, qsql_home) -> None:
+    project = compile_text(HEADER + "-- @cell a\nselect id from orders;\n", root=nb)
+    assert all(r.ok for r in run_project(project))
+    assert not (qsql_home / "usage").exists()
+
+
+def test_a_ref_across_contexts_is_logged_on_its_producers_context(tmp_path, on) -> None:
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "app.db") as con:
+        con.execute("create table events (id integer, kind text)")
+        con.execute("insert into events values (1, 'click')")
+    path = write(
+        tmp_path,
+        "-- @cell raw\n-- @input: {sqlite: app.db}\nselect id, kind from events;\n"
+        "-- @cell kinds\nselect kind, count(*) as n from {{ ref('raw') }} group by kind;\n",
+    )
+    results, _ = run_file(path)
+    assert all(r.ok for r in results.values()), [r.error for r in results.values()]
+    by_cell = {entry["cell"]: entry for entry in logged()}
+    events = {
+        "engine": "sqlite",
+        "context": context_of(f"sqlite:{tmp_path / 'app.db'}"),
+        "kind": "table",
+        "parts": ["events"],
+        "star": False,
+    }
+    assert by_cell["kinds"]["tables"] == [events]
+    assert by_cell["kinds"]["columns"] == [
+        {"table": 0, "column": "kind", "roles": ["group", "select"]}
+    ]
+    # the line is the duckdb cell's; the table is where its producer read it
+    assert by_cell["kinds"]["engine"] == "duckdb"
+    assert by_cell["kinds"]["context"] != events["context"]
+
+
+def test_a_file_is_logged_by_the_path_duckdb_reads(nb, on, tmp_path, monkeypatch) -> None:
+    (nb / "seeds").mkdir()
+    (nb / "seeds" / "users.csv").write_text("user_id,name\n1,ada\n")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "seeds").mkdir(parents=True)
+    (elsewhere / "seeds" / "plans.csv").write_text("plan_id\n1\n")
+    path = write(
+        nb,
+        "-- @cell users\nselect user_id from {{ source('seeds/users.csv') }};\n"
+        # hand-written and relative: DuckDB reads it against the process's cwd
+        "-- @cell plans\nselect plan_id from read_csv('seeds/plans.csv');\n",
+    )
+    monkeypatch.chdir(elsewhere)
+    results, _ = run_file(path)
+    assert all(r.ok for r in results.values()), [r.error for r in results.values()]
+    tables = {entry["cell"]: entry["tables"] for entry in logged()}
+    assert tables["users"] == [
+        {"kind": "file", "parts": [str(nb / "seeds" / "users.csv")], "star": False}
+    ]
+    assert tables["plans"] == [
+        {"kind": "file", "parts": [str(elsewhere / "seeds" / "plans.csv")], "star": False}
+    ]
+
+
+def test_in_memory_contexts_of_two_notebooks_hash_apart(tmp_path, on) -> None:
+    text = "-- @cell t\nselect table_name from information_schema.tables;\n"
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+        run_file(write(tmp_path / name, text))
+    run_file(write(tmp_path / "one", text, name="again.qsql"))
+    contexts = {entry["notebook"]: entry["tables"][0]["context"] for entry in logged()}
+    assert len(set(contexts.values())) == 3
+    one = tmp_path / "one" / "nb.qsql"
+    assert contexts[str(one)] == context_of(f"duckdb:{one}")
+
+
+def test_two_notebooks_that_reach_one_database_share_its_context(nb, on) -> None:
+    (nb / "sub").mkdir()
+    run_file(write(nb, HEADER + "-- @cell a\nselect id from orders;\n"))
+    run_file(
+        write(nb / "sub", "-- @input: {duckdb: ../wh.db}\n-- @cell b\nselect id from orders;\n")
+    )
+    assert len({entry["tables"][0]["context"] for entry in logged()}) == 1
+
+
+def test_an_unwritable_usage_directory_is_reported_once(nb, on, qsql_home) -> None:
+    (qsql_home / "usage").write_text("a file where the directory should be")
+    path = write(nb, HEADER + "-- @cell a\nselect id from orders;\n")
+    results, first = run_file(path)
+    assert results["a"].ok
+    assert len(first) == 1 and "usage" in first[0] and str(qsql_home / "usage") in first[0]
+    results, second = run_file(path)
+    assert results["a"].ok and second == []
+
+
+def test_an_unchanged_rerun_adds_no_line(nb, on) -> None:
+    path = write(
+        nb, HEADER + "-- @cell a\nselect id from orders;\n-- @cell b\nselect name from customers;\n"
+    )
+    run_file(path)
+    run_file(path)
+    assert sorted(entry["cell"] for entry in logged()) == ["a", "b"]
+    usage_plugin.forget()  # as a new process starts: nothing remembered
+    run_file(path)
+    assert sorted(entry["cell"] for entry in logged()) == ["a", "b"]
+
+
+def test_an_edited_cell_adds_one_line(nb, on) -> None:
+    text = HEADER + "-- @cell a\nselect id from orders;\n-- @cell b\nselect name from customers;\n"
+    run_file(write(nb, text))
+    run_file(write(nb, text.replace("select id from", "select id, amount from")))
+    assert sorted(entry["cell"] for entry in logged()) == ["a", "a", "b"]
+    # an edit that reads the same columns adds none
+    run_file(write(nb, text.replace("select id from", "select id,  amount from")))
+    assert len(logged()) == 3
+    # going back to the first version adds none: that read is logged for today
+    run_file(write(nb, text))
+    assert len(logged()) == 3
+
+
+def test_an_upstream_edit_that_changes_a_downstream_cells_reads_logs_it_anew(nb, on) -> None:
+    text = (
+        HEADER
+        + "-- @cell stage\nselect id, amount from orders;\n"
+        "-- @cell top\nselect amount from {{ ref('stage') }};\n"
+    )
+    run_file(write(nb, text))
+    assert sorted(entry["cell"] for entry in logged()) == ["stage", "top"]
+    run_file(write(nb, text.replace("id, amount from", "id, amount * 2 as amount from")))
+    # top's SQL is unchanged, but it no longer reads orders.amount
+    assert sorted(entry["cell"] for entry in logged()) == ["stage", "top", "top"]
+    assert [entry["columns"] for entry in logged() if entry["cell"] == "top"][-1] == []
+
+
+def test_a_raising_recorder_leaves_the_run_ok_and_says_so(nb, on, monkeypatch) -> None:
+    import quicksql.sqlscan
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("scanner blew up")
+
+    monkeypatch.setattr(quicksql.sqlscan, "scan", boom)
+    results, notes = run_file(write(nb, HEADER + "-- @cell a\nselect id from orders;\n"))
+    assert results["a"].ok
+    assert len(notes) == 1
+    assert "plugin 'usage' after_run failed" in notes[0] and "scanner blew up" in notes[0]
+    assert logged() == []
+
+
+def test_the_first_write_prunes_and_compacts(nb, on, qsql_home) -> None:
+    usage = qsql_home / "usage"
+    usage.mkdir()
+    ago = lambda days: (date.today() - timedelta(days=days)).isoformat()  # noqa: E731
+    old = {"v": 1, "day": ago(3), "notebook": "/x.qsql", "cell": "c", "key": "k"}
+    for pid in (11, 22):
+        (usage / f"{ago(3)}.{pid}.ndjson").write_text(json.dumps(old) + "\n")
+    (usage / f"{ago(400)}.11.ndjson").write_text(json.dumps({**old, "day": ago(400)}) + "\n")
+    run_file(write(nb, HEADER + "-- @cell a\nselect id from orders;\n"))
+    assert sorted(p.name for p in usage.iterdir()) == sorted(
+        [f"{ago(3)}.ndjson", f"{date.today().isoformat()}.{os.getpid()}.ndjson"]
+    )
+    assert [entry["cell"] for entry in logged()] == ["c", "a"]
