@@ -73,3 +73,37 @@ def test_every_example_compiles_and_runs(example, tmp_path) -> None:
     shutil.copy(SKILL / "examples" / example, nb)
     results = run_project(compile_file(nb))
     assert results and all(r.ok for r in results), [(r.cell, r.error) for r in results]
+
+
+def test_the_skill_says_to_read_usage_before_writing_sql() -> None:
+    head = (SKILL / "SKILL.md").read_text()
+    assert "quicksql usage NOTEBOOK --markdown" in head
+    assert "(references/usage.md)" in head
+    # an agent reads the report; turning recording on is the person's call
+    assert "QSQL_USAGE" in head and "don't set it yourself" in head
+
+
+def test_the_usage_reference_covers_the_command_and_its_output() -> None:
+    from typer.main import get_command
+
+    from quicksql import usage
+    from quicksql.cli import app
+
+    text = (SKILL / "references" / "usage.md").read_text()
+    command = get_command(app).commands["usage"]
+    for option in (o for p in command.params for o in p.opts if o.startswith("--")):
+        assert f"`{option}" in text, option
+    for said in ("QSQL_USAGE=1", "curation.yaml", "`pin`", "`hide`", "`notes`", "@usage: false"):
+        assert said in text, said
+    empty = usage.Report([], __import__("datetime").date(2026, 11, 9), 90, 30.0)
+    sample = usage.TableUsage(
+        "duckdb", "c", "table", ("t",), 1.0, 1, [("/n.qsql", 1)],
+        [usage.ColumnUsage("a", 1.0, 1, ["select"])],
+        [usage.JoinUsage((("duckdb", "c", "table", ("t",)), "a"),
+                         (("duckdb", "c", "table", ("u",)), "a"), 1.0, 1)],
+        0, [usage.ColumnUsage("b", 1.0, 1, ["where"])],
+    )  # fmt: skip
+    doc = usage.to_json(usage.Report([sample], empty.today, 90, 30.0))
+    keys = {*doc, *doc["tables"][0], *doc["tables"][0]["columns"][0], *usage.to_json(empty)}
+    for key in sorted(keys):
+        assert f'"{key}"' in text, key
