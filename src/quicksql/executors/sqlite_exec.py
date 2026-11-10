@@ -8,7 +8,14 @@ from typing import Any
 
 from ..models import CatalogNode, RunContext
 from ..registry import executor
-from .base import DbApiSession, EngineSession, Executor, field_path_frame, info_node
+from .base import (
+    DbApiSession,
+    EngineSession,
+    Executor,
+    database_file_identity,
+    field_path_frame,
+    info_node,
+)
 
 
 class SQLiteSession(DbApiSession):
@@ -22,6 +29,9 @@ class SQLiteExecutor(Executor):
 
     def context_key(self, config: Any) -> str:
         return f"sqlite:{self.input_spec(config).get('path') or ':memory:'}"
+
+    def context_identity(self, config: Any, root: Path) -> str | None:
+        return database_file_identity(self.name, self.input_spec(config).get("path"), root)
 
     def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
         """One connection per context: temp tables live there, and a :memory:

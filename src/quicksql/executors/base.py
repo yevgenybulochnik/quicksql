@@ -13,6 +13,7 @@ contexts it reaches, which the TUI browses and the LSP completes from.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -163,6 +164,14 @@ def info_node(title: str, message: str) -> CatalogNode:
     return CatalogNode(title=title, load=lambda: frame)
 
 
+def database_file_identity(engine: str, path: str | None, root: Path) -> str | None:
+    """``Executor.context_identity`` for an engine whose context is a database
+    file: its path under ``root``, normalized; None in memory."""
+    if not path or path == ":memory:":
+        return None
+    return f"{engine}:{os.path.abspath(root / path)}"
+
+
 def engine_input(config: Any, engine: str, shorthand: str = "path") -> dict[str, Any]:
     """The ``input.<engine>`` directive as a dict, ``{}`` when absent. A bare
     string is the engine's shorthand for its main key: ``input: {sqlite: x.db}``
@@ -201,6 +210,15 @@ class Executor(ABC):
     def context_key(self, config: Any) -> str:
         """Cells with equal keys share an execution context (engine + target)."""
         return f"{self.name}:"
+
+    def context_identity(self, config: Any, root: Path) -> str | None:
+        """What the context ``config`` names is, whichever notebook names it:
+        two notebooks that reach one database agree, two that reach different
+        ones differ. The context key by default, which is that already for a
+        server; an engine whose key is relative to the notebook (a database
+        file's path) resolves it against ``root``. None: nothing outside this
+        notebook's own session can reach it (an in-memory database)."""
+        return self.context_key(config)
 
     def split_statements(self, sql: str) -> list[str]:
         """Split the cell body into statements, in the engine's dialect."""
