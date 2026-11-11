@@ -27,18 +27,13 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from pydantic import BaseModel
 
+from .home import quicksql_home
 from .models import RenderedCell
 
 if TYPE_CHECKING:
     from .compiler import Project
 
-HOME_ENV = "QSQL_HOME"  # not QUICKSQL_*: overrides.py reads those as config
 _VERSION = 2  # 1 was one shared file next to the notebooks
-
-
-def quicksql_home() -> Path:
-    """quicksql's per-user directory: ``$QSQL_HOME``, else ``~/.quicksql``."""
-    return Path(os.environ.get(HOME_ENV) or Path.home() / ".quicksql")
 
 
 @dataclass(frozen=True)

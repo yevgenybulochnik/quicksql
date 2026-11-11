@@ -28,6 +28,7 @@ Write a directive as a comment: `-- @key: value` on one line, or YAML in a
 | `schema` | both | string or null | `null` | override | yes | The schema a database sink lands in, unless `output.schema` names one. |
 | `sources` | both | mapping | `{}` | deep | yes | Named files that `source('name')` reads: `{name: path}`, or `{name: {path: ..., type: csv, ...reader options}}` (csv, parquet, json, excel). |
 | `tags` | both | list of strings | `[]` | extend | no | Free-form labels. |
+| `usage` | both | boolean | `true` | override | no | Whether the cell's reads are recorded when usage tracking is on (`QSQL_USAGE=1`, see `quicksql usage`); `false` in the header opts the notebook out, in a cell that cell. It can't turn tracking on. |
 | `vars` | both | mapping | `{}` | deep | yes | Values the SQL reads with `var('key')` (or `vars.key`); override one with `--set vars.key=value`. |
 
 ## Engines `engine:` can name

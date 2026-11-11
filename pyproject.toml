@@ -15,7 +15,7 @@ dependencies = [
     "polars>=1.0",
     "typer>=0.12",
     "watchfiles>=0.24",
-    "sqlglot>=25",  # statement splitting for multi-statement cells (core, engine-dialect aware)
+    "sqlglot>=30.12",  # statement splitting (core, dialect aware); usage attribution is pinned on 30.12
 ]
 
 [project.optional-dependencies]
@@ -73,13 +73,18 @@ source_modules = [
     "quicksql.config",
     "quicksql.errors",
     "quicksql.graph",
+    "quicksql.home",
     "quicksql.models",
     "quicksql.overrides",
     "quicksql.parser",
     "quicksql.registry",
     "quicksql.render",
     "quicksql.runner",
+    # the usage scanner: sqlglot and executors.base only
+    "quicksql.sqlscan",
     "quicksql.state",
+    # the usage log on disk: stdlib and home ($QSQL_HOME) only
+    "quicksql.usage_log",
     # the contracts extensions implement; the package __init__s are core: they only
     # re-export their base module
     "quicksql.executors",
@@ -97,6 +102,7 @@ forbidden_modules = [
     "quicksql.executors.sqlite_exec",
     "quicksql.plugins.builtin",
     "quicksql.plugins.emit_sql",
+    "quicksql.plugins.usage",
     "quicksql.sinks.duckdb_sink",
     "quicksql.sinks.none_sink",
     "quicksql.sinks.parquet_sink",
@@ -116,6 +122,7 @@ forbidden_modules = [
     "quicksql.sheet",
     "quicksql.tui",
     "quicksql.tui.**",
+    "quicksql.usage",
     "quicksql.vocabulary",
     "quicksql.watcher",
 ]
@@ -134,6 +141,7 @@ source_modules = [
     "quicksql.executors.sqlite_exec",
     "quicksql.plugins.builtin",
     "quicksql.plugins.emit_sql",
+    "quicksql.plugins.usage",
     "quicksql.sinks.duckdb_sink",
     "quicksql.sinks.none_sink",
     "quicksql.sinks.parquet_sink",
@@ -155,6 +163,7 @@ forbidden_modules = [
     "quicksql.sheet",
     "quicksql.tui",
     "quicksql.tui.**",
+    "quicksql.usage",
     "quicksql.vocabulary",
     "quicksql.watcher",
 ]

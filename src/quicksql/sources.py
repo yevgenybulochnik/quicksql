@@ -41,6 +41,11 @@ def _args(path: str, opts: dict[str, Any]) -> str:
 class SourceReader(ABC):
     name: ClassVar[str] = ""
     requires: ClassVar[list[str]] = []
+    # the DuckDB table functions that read this format: a call to one with a
+    # path literal is a read of that file, whoever wrote the call (source()
+    # renders one, a cell may spell one out). A reader that names none is
+    # never recognized in a cell's SQL.
+    functions: ClassVar[tuple[str, ...]] = ()
 
     @abstractmethod
     def expr(self, path: str, **opts: Any) -> str:
@@ -49,18 +54,24 @@ class SourceReader(ABC):
 
 @source_reader("csv")
 class CsvReader(SourceReader):
+    functions = ("read_csv", "read_csv_auto")
+
     def expr(self, path: str, **opts: Any) -> str:
         return f"read_csv_auto({_args(path, opts)})"
 
 
 @source_reader("parquet")
 class ParquetReader(SourceReader):
+    functions = ("read_parquet", "parquet_scan")
+
     def expr(self, path: str, **opts: Any) -> str:
         return f"read_parquet({_args(path, opts)})"
 
 
 @source_reader("json")
 class JsonReader(SourceReader):
+    functions = ("read_json", "read_json_auto", "read_ndjson", "read_ndjson_auto")
+
     def expr(self, path: str, **opts: Any) -> str:
         return f"read_json_auto({_args(path, opts)})"
 
@@ -68,6 +79,7 @@ class JsonReader(SourceReader):
 @source_reader("excel")
 class ExcelReader(SourceReader):
     requires = ["excel"]
+    functions = ("read_xlsx",)
 
     def expr(self, path: str, **opts: Any) -> str:
         return f"read_xlsx({_args(path, opts)})"

@@ -38,3 +38,28 @@ def test_sql_literal_quoting() -> None:
     assert sql_literal("o'brien") == "'o''brien'"
     assert sql_literal(True) == "true"
     assert sql_literal(7) == "7"
+
+
+def test_each_builtin_reader_names_the_functions_that_read_its_format() -> None:
+    functions = {name: READERS.get(name).functions for name in READERS.names()}
+    assert functions == {
+        "csv": ("read_csv", "read_csv_auto"),
+        "parquet": ("read_parquet", "parquet_scan"),
+        "json": ("read_json", "read_json_auto", "read_ndjson", "read_ndjson_auto"),
+        "excel": ("read_xlsx",),
+    }
+
+
+@pytest.mark.parametrize("name", READERS.names())
+def test_a_readers_expr_calls_one_of_its_own_functions(name: str) -> None:
+    reader = READERS.get(name)
+    called = reader.expr("/abs/x").partition("(")[0]
+    assert called in reader.functions
+
+
+def test_a_reader_without_the_attribute_names_no_function() -> None:
+    class Theirs(sources.SourceReader):
+        def expr(self, path, **opts):
+            return f"read_theirs('{path}')"
+
+    assert Theirs().functions == ()

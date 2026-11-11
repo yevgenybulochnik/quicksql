@@ -22,7 +22,7 @@ from . import compiler, sources
 from .compiler import Project
 from .errors import QsqlError
 from .executors import bigquery_exec, duckdb_exec, postgres_exec, sqlite_exec
-from .plugins import builtin, emit_sql
+from .plugins import builtin, emit_sql, usage
 from .registry import Registries, marked
 from .sinks import duckdb_sink, none_sink, parquet_sink, postgres_sink
 
@@ -31,6 +31,7 @@ from .sinks import duckdb_sink, none_sink, parquet_sink, postgres_sink
 BUILTIN_MODULES: tuple[ModuleType, ...] = (
     builtin,
     emit_sql,
+    usage,
     duckdb_exec,
     sqlite_exec,
     bigquery_exec,

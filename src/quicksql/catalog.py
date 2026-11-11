@@ -269,6 +269,26 @@ class CatalogCache:
             self._frames.move_to_end(node.cache_key)
             return entry.frame
 
+    def at_hand(self, node: CatalogNode) -> pl.DataFrame | None:
+        """The node's frame from memory, else from the disk (a level that
+        persists), else None: it never loads, and starts no refresh behind a
+        stale level. For a reader that must not reach an engine (``quicksql
+        usage``); a level past ``max_age`` or cleared is a miss, as for
+        ``read``."""
+        now = self.clock()
+        with self._lock:
+            entry = self._frames.get(node.cache_key)
+            if entry is not None and not (entry.persist and now - entry.saved_at > self.max_age):
+                return entry.frame
+        if self.store is None or not node.persist:
+            return None
+        stored = self.store.get(node.cache_key, node.scope)
+        if stored is None or stored.saved_at < self._floor or now - stored.saved_at > self.max_age:
+            return None
+        with self._lock:
+            self._keep(node, stored.frame, stored.saved_at)
+        return stored.frame
+
     def load(self, node: CatalogNode) -> tuple[pl.DataFrame, bool]:
         """The node's frame and whether this call didn't load it (cached, or
         another asker's load)."""

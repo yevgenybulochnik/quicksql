@@ -10,7 +10,7 @@ import duckdb
 from ..conduit import ConduitSession, duckdb_field_paths
 from ..models import CatalogNode, RunContext
 from ..registry import executor
-from .base import EngineSession, Executor, info_node
+from .base import EngineSession, Executor, database_file_identity, info_node
 
 
 @executor("duckdb")
@@ -20,6 +20,9 @@ class DuckDBExecutor(Executor):
 
     def context_key(self, config: Any) -> str:
         return f"duckdb:{self.input_spec(config).get('path') or ':memory:'}"
+
+    def context_identity(self, config: Any, root: Path) -> str | None:
+        return database_file_identity(self.name, self.input_spec(config).get("path"), root)
 
     def open_session(self, config: Any, ctx: RunContext) -> EngineSession:
         return ConduitSession(ctx.conn)

@@ -30,9 +30,11 @@ def add_plugin(registries):
 @pytest.fixture(autouse=True)
 def qsql_home(tmp_path_factory, monkeypatch):
     """Keep every test out of the real ~/.quicksql: runs write state files
-    there, and the notebook picker reads user templates from it."""
+    there, and the notebook picker reads user templates from it. Usage
+    recording is off whatever the shell exports: a test turns it on itself."""
     home = tmp_path_factory.mktemp("qsql-home")
     monkeypatch.setenv("QSQL_HOME", str(home))
+    monkeypatch.delenv("QSQL_USAGE", raising=False)
     return home
 
 

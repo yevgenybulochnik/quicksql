@@ -604,6 +604,73 @@ def directives_cmd(
     typer.echo("sinks:   " + ", ".join(s["name"] for s in vocabulary.sinks(registries)))
 
 
+@app.command("usage")
+def usage_cmd(
+    notebooks: Optional[list[Path]] = typer.Argument(
+        None, help="Report on these notebooks' contexts (none: every context, by its hash)"
+    ),
+    sets: Optional[list[str]] = SET_OPT,
+    plugins: Optional[list[str]] = PLUGINS_OPT,
+    days: int = typer.Option(90, "--days", min=1, help="Read the last N days of the log"),
+    top: int = typer.Option(20, "--top", min=1, help="Show the N highest-scoring tables"),
+    columns: int = typer.Option(15, "--columns", min=0, help="Show N columns per table"),
+    engine: Optional[str] = typer.Option(
+        None, "--engine", help="Only tables on this engine (file: the files)"
+    ),
+    tables: Optional[list[str]] = typer.Option(
+        None,
+        "--table",
+        help="Only tables this names: a glob on the name or its end, any case "
+        "(claims, public.*, postgres:public.claims; repeatable)",
+    ),
+    half_life: float = typer.Option(
+        30.0, "--half-life", help="Days for a use to count half as much"
+    ),
+    load: bool = typer.Option(
+        False,
+        "--load",
+        help="Load the columns of tables the catalog doesn't have on disk (DuckDB, SQLite, files)",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print one JSON document instead"),
+    markdown: bool = typer.Option(False, "--markdown", help="Print Markdown, an agent's format"),
+) -> None:
+    """The source tables notebooks read, and the columns they read from them.
+
+    Ranked from the usage log, which records nothing unless QSQL_USAGE=1 is
+    set where notebooks run (run, watch, tui). A use is a (notebook, day);
+    score weighs recent uses. --table looks one table up, however far down
+    the ranking it is.
+
+    With NOTEBOOKS, each compiles as `run` would (--set, --plugins) and the
+    report shows what every logged notebook read on their contexts, named by
+    their cells, with types and descriptions from the catalog on disk
+    (BigQuery, Postgres; --load reaches the engines for the rest). Only the
+    notebooks named compile. It reads only files, so it
+    works while a TUI has a notebook open."""
+    from . import usage
+
+    if half_life <= 0:
+        raise typer.BadParameter("must be more than 0", param_hint="--half-life")
+    if json_out and markdown:
+        raise typer.BadParameter("choose one of --json and --markdown")
+    if load and not notebooks:
+        raise typer.BadParameter("needs a NOTEBOOK: its catalogs are what loads", param_hint="--load")
+    projects = [_project(notebook, sets, plugins) for notebook in notebooks or []]
+    try:
+        found = usage.report(
+            projects, days=days, half_life=half_life, engine=engine, asked=tables or (), load=load
+        )
+    except QsqlError as exc:  # a curation file that doesn't read
+        typer.secho(str(exc), fg="red")
+        raise typer.Exit(EXIT_FAILED)
+    if json_out:
+        typer.echo(json.dumps(usage.to_json(found, top, columns)))
+    elif markdown:
+        typer.echo(usage.to_markdown(found, top, columns), nl=False)
+    else:
+        typer.echo(usage.to_text(found, top, columns), nl=False)
+
+
 # ---------- quicksql live: an agent alongside the open TUI ----------
 
 live_app = typer.Typer(

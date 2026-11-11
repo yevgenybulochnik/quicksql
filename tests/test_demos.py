@@ -7,6 +7,7 @@ demo/**/*.qsql is collected by glob, so a new demo is covered with no edit here.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -107,23 +108,40 @@ def test_sources_demo_runs_offline(tmp_path: Path, monkeypatch) -> None:
 WITHOUT = "import sys; sys.modules.update(polars=None, textual=None)\nfrom quicksql.cli import app\napp()"
 
 
-def test_sources_demo_compiles_and_runs_without_polars_or_textual(tmp_path: Path) -> None:
+def test_sources_demo_compiles_and_runs_without_polars_or_textual(
+    tmp_path: Path, qsql_home: Path
+) -> None:
     """The core path needs neither: a pure-DuckDB notebook compiles, runs and
-    reports `run --json` previews with both blocked from import."""
+    reports `run --json` previews with both blocked from import. Recording
+    usage (``QSQL_USAGE=1``) is on that path too: it needs neither, nor the
+    catalog (``catalog_store`` imports polars), and says nothing on stderr."""
     copy = tmp_path / "sources"
     shutil.copytree(DEMO / "sources", copy, ignore=shutil.ignore_patterns(*SOURCES_OUTPUTS))
 
-    def cli(*args: str) -> subprocess.CompletedProcess:
+    def cli(*args: str, **env: str) -> subprocess.CompletedProcess:
         done = subprocess.run(
             [sys.executable, "-c", WITHOUT, *args], cwd=copy, capture_output=True, text=True,
-            timeout=120,
+            timeout=120, env={**os.environ, **env},
         )
         assert done.returncode == 0, done.stdout + done.stderr
         return done
 
     for command in ("compile", "list", "explain"):
         cli(command, "sources.qsql")
-    report = json.loads(cli("run", "sources.qsql", "--json", "--rows", "2").stdout)
+    plain = cli("run", "sources.qsql", "--json", "--rows", "2")
+    report = json.loads(plain.stdout)
     assert [c["status"] for c in report["cells"]] == ["ok"] * len(report["cells"])
     assert all(c["preview"]["rows"] for c in report["cells"])
     cli("status", "sources.qsql")
+    assert not (qsql_home / "usage").exists()  # off unless asked for
+
+    recorded = cli("run", "sources.qsql", "--json", "--rows", "2", QSQL_USAGE="1")
+    assert [c["status"] for c in json.loads(recorded.stdout)["cells"]] == ["ok"] * len(
+        report["cells"]
+    )
+    assert recorded.stderr == plain.stderr
+    (day_file,) = (qsql_home / "usage").iterdir()
+    logged = [json.loads(line) for line in day_file.read_text().splitlines()]
+    assert sorted(entry["cell"] for entry in logged) == sorted(c["cell"] for c in report["cells"])
+    assert all(entry["errors"] == [] for entry in logged), [e["errors"] for e in logged]
+    assert any(t["kind"] == "file" for entry in logged for t in entry["tables"])
